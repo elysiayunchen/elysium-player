@@ -24,6 +24,7 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
 
+import android.support.v4.media.session.MediaSessionCompat;
 import androidx.core.app.NotificationCompat;
 import androidx.media.app.NotificationCompat.MediaStyle;
 
@@ -275,7 +276,8 @@ public class PlaybackService extends Service {
 
         MediaStyle style = new MediaStyle().setShowActionsInCompactView(0, 1, 2);
         if (session != null) {
-            style.setMediaSession(session.getSessionToken());
+            // androidx 的 MediaStyle 认 compat Token，框架 Token 要转一手
+            style.setMediaSession(MediaSessionCompat.Token.fromToken(session.getSessionToken()));
         }
         NotificationCompat.Builder b = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.appicon)
