@@ -1,0 +1,35 @@
+# 构建与本地数据
+build/
+dist/
+__pycache__/
+*.pyc
+*.log
+dev.log
+webview_test.log
+
+# 打包中间物
+build_v*/
+dist_v*/
+dist_prev/
+dist_t/
+
+# UI 回归自检的截图产物（verify_ui.py / verify_walk.py / verify_unify.py 每次跑都会重新生成）
+_art/_v_*.png
+_art/_u_*.png
+_art/_zoom_*.png
+_art/walk/
+
+# 内部设计/调研笔记：只留本地，不进公开仓库（含上游与内部实现记录）
+_art/*.md
+
+# 一次性验证脚本与临时数据目录：跑完就该删，别混进仓库
+_tmp_*
+_tmp/
+
+# 系统
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 发布产物不进仓库（走 Releases）
+release/

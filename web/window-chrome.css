@@ -1,0 +1,206 @@
+/* ==========================================================================
+   Elysium · 窗口壳层 (window-chrome.css)
+
+   目标：复刻 ZCode 那种「无边框 / 系统材质 / 自绘标题栏 / 圆角发丝边」的
+   窗口质感。只做窗口壳，不参与任何内容设计。
+
+   ── 设计契约（改动边界）────────────────────────────────────────────────
+   1. 不重定义任何主题色板变量：--bg / --ink / --accent / --line / --shadow …
+      一律「只引用、不赋值」。深浅主题由 app.js 切换 data-theme，本层自动跟随。
+   2. 不修改 style.css 的任何一行，也不改卡片 / 列表 / 播放条 / 搜索页等
+      业务组件。唯一的布局改动是给 .shell 增加一行 48px 标题栏并顺移 grid
+      行号，外加 .drawer 的 top 补偿（它是 fixed 贴顶层）。
+   3. 不修改 app.js。全部行为在 window-chrome.js 里，且只在
+      window.pywebview.api 存在时才调用窗口 API；浏览器调试 / APK 下静默降级。
+   4. 本文件必须在 style.css 之后加载；回滚只需删掉 index.html 里这两行引用，
+      或把 html 的 data-chrome 置为 off。
+
+   ── 质感分级（发布兼容性）──────────────────────────────────────────────
+   L3  DWM Desktop Acrylic（Win11 22621+ / pywebview transparent / WebView2）
+       → html[data-wc-material="on"]：body 半透明叠色，系统材质透出窗口。
+   L2  CSS 玻璃层（Win10、老 WebView2、材质被环境变量关闭）
+       → 顶层玻璃高光 + 发丝边 + 圆角，仍是无边框自绘窗口，界面不降级。
+   L1  纯不透明主题底色（能力全失 / forced-colors 高对比度）
+       → 保留标题栏与可用性，只关掉半透明与模糊。
+
+   任何一级失败都不会白屏、不会阻塞播放：DWM 调用在 Python 侧全部 try/except，
+   前端只按 win_material_state() 的返回值决定是否启用 L3。
+   环境变量 ELYSIUM_WINDOW_MATERIAL=off 可一键回退到 L2，便于发布排查。
+
+   ── 平台隔离（后续 APK）───────────────────────────────────────────────
+   desktop  全套窗口壳（默认；JS 未执行时也是它，保证 frameless 窗口有关闭入口）
+   android  隐藏标题栏 / 窗口按钮 / 圆角边框，恢复原始两行 grid，
+            用 env(safe-area-inset-*) 避让状态栏与导航栏（需 viewport-fit=cover）
+   web      --serve / --browser 调试，保留壳但隐藏窗口按钮（没有 js_api）
+   APK 宿主只需注入 window.ELYSIUM_PLATFORM = 'android'（或让 UA 命中 Android），
+   无需改前端业务代码；Windows 专属逻辑集中在 main.py 的窗口壳段落与
+   window-chrome.js，不散进 app.js。
+
+   ── 对应 ZCode 的真实参数（REA 逆向 app.asar 得到）──────────────────────
+   frame:false + backgroundMaterial:"acrylic" + backgroundColor:"#00000000"
+   titleBarOverlay height 48 / rightPaddingPx 136 / symbolColor 随主题
+   clip-path:inset(0 round 16px) + app-region:drag（这里等价为
+   .pywebview-drag-region）+ 最大化 rounded-none
+   #root opacity 0→1 .16s、logo .72s cubic-bezier(.22,1,.36,1)
+   ========================================================================== */
+
+:root{
+  /* 只定义形状 / 尺寸 / 动效，不定义颜色 */
+  --wc-title-h:48px;
+  --wc-ctrls-w:136px;
+  --wc-radius:12px;
+  --wc-ease:cubic-bezier(.22,1,.36,1);
+  --wc-fade:.16s;
+  --wc-pop:.72s;
+  --wc-safe-top:env(safe-area-inset-top,0px);
+  --wc-safe-bottom:env(safe-area-inset-bottom,0px);
+}
+
+/* ---------------------------------------------------------------- 首屏
+   遮罩自带定时淡出：即使 JS 完全不执行也不会把界面盖死（发布兜底）。
+   JS 只负责提前加 .wc-ready，让淡出紧跟真实首帧。 */
+html[data-chrome="on"]::before{
+  content:"";
+  position:fixed;inset:0;z-index:2147483646;pointer-events:none;
+  background:var(--bg);
+  animation:wc-boot-out var(--wc-fade) ease .45s forwards;
+}
+html[data-chrome="on"].wc-ready::before{
+  animation:none;opacity:0;visibility:hidden;
+}
+@keyframes wc-boot-out{to{opacity:0;visibility:hidden}}
+
+/* ---------------------------------------------------------------- 窗口壳
+   48px 自绘标题栏占 .shell 第一行；原有两行顺移。 */
+html[data-chrome="on"]:not([data-platform="android"]) .shell{
+  grid-template-rows:var(--wc-title-h) minmax(0,1fr) 92px;
+}
+html[data-chrome="on"]:not([data-platform="android"]) .wc-title{
+  grid-column:1 / -1;grid-row:1;
+}
+html[data-chrome="on"]:not([data-platform="android"]) .side,
+html[data-chrome="on"]:not([data-platform="android"]) .stage{grid-row:2}
+html[data-chrome="on"]:not([data-platform="android"]) .player{grid-row:3}
+/* .drawer 是 fixed 贴顶层，唯一需要补偿的业务层 */
+html[data-chrome="on"]:not([data-platform="android"]) .drawer{top:var(--wc-title-h)}
+
+.wc-title{
+  height:var(--wc-title-h);
+  display:flex;align-items:center;gap:12px;
+  padding-left:16px;position:relative;z-index:20;
+  background:color-mix(in srgb,var(--bg) 58%,transparent);
+  box-shadow:inset 0 -1px 0 var(--line);
+  -webkit-app-region:drag;   /* 预留给未来 Electron 壳；WebView2 忽略 */
+  user-select:none;
+}
+/* 不支持 color-mix 时回退到不透明主题底色，不引入新颜色 */
+@supports not (color:color-mix(in srgb,red,blue)){
+  .wc-title{background:var(--bg)}
+}
+.wc-brand{display:flex;align-items:center;gap:9px;flex:0 0 auto;color:var(--ink);font-size:12.5px;font-weight:650}
+.wc-brand img{width:20px;height:20px;border-radius:6px;display:block}
+.wc-drag{flex:1 1 auto;min-width:0;height:100%;cursor:default}
+.wc-path{flex:0 0 auto;font-size:11px;color:var(--muted);max-width:34%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wc-ctrls{
+  display:none;width:var(--wc-ctrls-w);flex:0 0 var(--wc-ctrls-w);height:100%;
+  justify-content:flex-end;margin-left:auto;
+}
+html[data-wc-api="on"] .wc-ctrls{display:flex}
+.wc-ctrl{
+  width:44px;height:100%;display:grid;place-items:center;
+  color:var(--ink);font:12px/1 ui-monospace,Consolas,monospace;
+  transition:background .12s ease,color .12s ease;
+  -webkit-app-region:no-drag;app-region:no-drag;
+}
+.wc-ctrl:hover{background:var(--hover-2)}
+.wc-ctrl[data-act="close"]:hover{background:#e81123;color:#fff}
+.wc-ctrl:focus-visible{outline:1px solid var(--accent);outline-offset:-3px}
+
+/* ---------------------------------------------------------------- 材质
+   L3：系统 Acrylic 可用 → 让主题底色半透明，材质从窗口后面透出来。
+   Acrylic 本身已由 DWM 模糊桌面，这里不再叠 backdrop-filter（否则会二次糊）。 */
+html[data-chrome="on"][data-wc-material="on"] body{
+  background:color-mix(in srgb,var(--bg) 72%,transparent);
+}
+@supports not (color:color-mix(in srgb,red,blue)){
+  html[data-chrome="on"][data-wc-material="on"] body{background:var(--bg)}
+}
+/* L2：没有系统材质时给标题栏一层极淡的玻璃高光，保留「浮起」感。 */
+html[data-chrome="on"]:not([data-wc-material="on"]):not([data-platform="android"]) .wc-title{
+  background-image:linear-gradient(180deg,color-mix(in srgb,var(--ink) 5%,transparent),transparent);
+}
+
+/* ---------------------------------------------------------------- 边框
+   纯视觉 overlay：pointer-events:none，不裁切任何内容，因此右键菜单 /
+   抽屉 / 歌词层 / toast 都不会被剪掉。真圆角由 DWM(33=DWMWCP_ROUND)
+   在窗口层裁出（Win11 22000+）；Win10 没有系统圆角时降级为直角窗口，
+   这里只保留发丝边，不伪造「涂个实色角块假装透明圆角」。 */
+html[data-chrome="on"]:not([data-platform="android"])::after{
+  content:"";
+  position:fixed;inset:0;z-index:2147483000;pointer-events:none;
+  border-radius:var(--wc-radius);
+  box-shadow:inset 0 0 0 1px var(--line-2),inset 0 1px 0 var(--hover-2);
+  transition:box-shadow .18s ease;
+}
+/* 最大化：ZCode 的 rounded-none，发丝边一起归零。
+   选择器特异性必须不低于上面的边框规则，否则会被它盖回去。 */
+html[data-chrome="on"][data-window-state="maximized"]{--wc-radius:0px}
+html[data-chrome="on"][data-window-state="maximized"]:not([data-platform="android"])::after{
+  box-shadow:none;
+}
+/* 窗口失活：边框与标题栏弱化，和 Windows 原生窗口一致 */
+html[data-chrome="on"][data-window-active="false"]:not([data-platform="android"])::after{
+  box-shadow:inset 0 0 0 1px var(--line);
+}
+html[data-window-active="false"] .wc-title{opacity:.74}
+
+/* ---------------------------------------------------------------- 平台：Android
+   没有系统标题栏 / 没有 Windows 窗口按钮；改成状态栏与导航栏避让。 */
+html[data-platform="android"][data-chrome="on"] .wc-title{display:none}
+html[data-platform="android"][data-chrome="on"] .shell{
+  grid-template-rows:minmax(0,1fr) 92px;
+  height:calc(100vh - var(--wc-safe-top) - var(--wc-safe-bottom));
+  padding-top:var(--wc-safe-top);
+  padding-bottom:var(--wc-safe-bottom);
+}
+html[data-platform="android"] .side,
+html[data-platform="android"] .stage{grid-row:1}
+html[data-platform="android"] .player{grid-row:2}
+html[data-platform="android"] .drawer{top:0}
+html[data-platform="android"] body{background:var(--bg)}
+html[data-platform="android"]::after{display:none}
+html[data-platform="android"] .wc-ctrls{display:none}
+/* 没有 safe-area 的 WebView（旧 Android）退化成 0，不会撑破布局 */
+@supports not (padding:env(safe-area-inset-top)){
+  html[data-platform="android"]{--wc-safe-top:0px;--wc-safe-bottom:0px}
+}
+
+/* ---------------------------------------------------------------- 一键回滚 */
+html[data-chrome="off"] .wc-title{display:none}
+html[data-chrome="off"] .shell{grid-template-rows:minmax(0,1fr) 92px}
+html[data-chrome="off"] .side,
+html[data-chrome="off"] .stage{grid-row:1}
+html[data-chrome="off"] .player{grid-row:2}
+html[data-chrome="off"] .drawer{top:0}
+html[data-chrome="off"]::before,
+html[data-chrome="off"]::after{display:none}
+
+/* ---------------------------------------------------------------- 无障碍 / 动效 */
+@media (prefers-reduced-motion:reduce){
+  html[data-chrome="on"]::before{animation:none;opacity:0;visibility:hidden}
+  html[data-chrome="on"]::after{transition:none}
+  .wc-ctrl{transition:none}
+}
+@media (forced-colors:active){
+  html[data-chrome="on"]:not([data-platform="android"])::after{
+    background-image:none;box-shadow:inset 0 0 0 1px CanvasText;
+  }
+  html[data-chrome="on"] body,
+  .wc-title{background:Canvas;color:CanvasText}
+  .wc-ctrl:hover{background:Highlight;color:HighlightText}
+}
+/* 高 DPI 下 1px 内描边用 box-shadow 绘制，比 border 更不容易发虚；
+   圆角半径交给 DWM(33) 与 CSS 共同处理，不写死物理像素。 */
+@media (min-resolution:2dppx){
+  html[data-chrome="on"]{--wc-radius:10px}
+}
