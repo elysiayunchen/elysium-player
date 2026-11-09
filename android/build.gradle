@@ -1,0 +1,5 @@
+// 根构建脚本：AGP 8.2.2 配 Gradle 8.4 / JDK 17-21；Chaquopy 15.0.1 提供 Android 内嵌 Python 3.10
+plugins {
+    id 'com.android.application' version '8.2.2' apply false
+    id 'com.chaquo.python' version '15.0.1' apply false
+}

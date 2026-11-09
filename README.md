@@ -155,7 +155,8 @@ web/app.js               全部交互逻辑
 ## 运行
 
 **直接用成品**：到 [Releases](https://github.com/elysiayunchen/elysium-player/releases/latest) 下载
-`Elysium.exe`（便携版，免安装）或 `Elysium-setup.exe`（按用户安装，免管理员权限）。
+`Elysium.exe`（Windows 便携版，免安装）、`Elysium-setup.exe`（Windows 安装版，按用户安装，免管理员权限）
+或 `Elysium.apk`（Android 版，Chaquopy 内嵌 Python 后端，构建配置在 [android/](android/)）。
 需要 Windows 10/11 与 Microsoft Edge WebView2 Runtime。应用内置更新追踪，
 有新版本会在「设置」亮红点并支持应用内下载。
 
