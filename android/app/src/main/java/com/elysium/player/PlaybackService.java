@@ -273,6 +273,10 @@ public class PlaybackService extends Service {
         }
         PendingIntent pOpen = PendingIntent.getActivity(this, 1, open, openFlags);
 
+        MediaStyle style = new MediaStyle().setShowActionsInCompactView(0, 1, 2);
+        if (session != null) {
+            style.setMediaSession(session.getSessionToken());
+        }
         NotificationCompat.Builder b = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.appicon)
                 .setContentIntent(pOpen)
@@ -288,9 +292,7 @@ public class PlaybackService extends Service {
                         control(playing ? ACTION_PAUSE : ACTION_TOGGLE)))
                 .addAction(new NotificationCompat.Action(
                         R.drawable.appicon, "下一首", control(ACTION_NEXT)))
-                .setStyle(new MediaStyle()
-                        .setMediaSession(session == null ? null : session.getSessionToken())
-                        .setShowActionsInCompactView(0, 1, 2));
+                .setStyle(style);
 
         // 划掉通知 = 明确不要播了：暂停播放并收摊（避免「无声播放还占着进程」）
         b.setDeleteIntent(control(ACTION_PAUSE));
