@@ -5,12 +5,17 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+import androidx.core.content.FileProvider;
+
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
+
+import java.io.File;
 
 /**
  * Elysium Android 壳：Chaquopy 后台线程跑 Python 本地服务（main.serve_android），
@@ -21,6 +26,44 @@ public class MainActivity extends Activity {
 
     private static final int PORT = 18810;
     private WebView web;
+
+    /** 前端通过 window.ElysiumAndroid 调用：外链走系统浏览器、应用内更新调起安装器。 */
+    private class UpdateBridge {
+
+        @JavascriptInterface
+        public boolean openUrl(String url) {
+            String u = url == null ? "" : url;
+            if (!u.startsWith("http://") && !u.startsWith("https://")) {
+                return false;
+            }
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(u)));
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        /** 前端「安装更新」：把下载好的 APK 经 FileProvider 交给系统安装器。 */
+        @JavascriptInterface
+        public boolean installUpdate(String path) {
+            try {
+                File f = new File(path == null ? "" : path);
+                if (!f.isFile()) {
+                    return false;
+                }
+                Uri uri = FileProvider.getUriForFile(
+                        MainActivity.this, "com.elysium.player.provider", f);
+                Intent it = new Intent(Intent.ACTION_VIEW);
+                it.setDataAndType(uri, "application/vnd.android.package-archive");
+                it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                startActivity(it);
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -36,6 +79,8 @@ public class MainActivity extends Activity {
         web.setBackgroundColor(Color.parseColor("#08080b"));
         web.getSettings().setJavaScriptEnabled(true);
         web.getSettings().setDomStorageEnabled(true);
+        // 只加载 127.0.0.1 的本地页面（见 shouldOverrideUrlLoading），桥不会暴露给外站
+        web.addJavascriptInterface(new UpdateBridge(), "ElysiumAndroid");
         web.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {

@@ -11,8 +11,8 @@ android {
         applicationId "com.elysium.player"
         minSdk 24
         targetSdk 34
-        versionCode 15
-        versionName "1.5.0"
+        versionCode 16
+        versionName "1.5.1"
         python {
             version "3.10"
         }
@@ -21,8 +21,23 @@ android {
         }
     }
 
+    // 固定签名：应用内更新靠覆盖安装，新旧 APK 签名必须一致。
+    // debug 与 release 都用同一把钥匙；仓库是公开的，keystore + 密码随库走
+    // （个人侧载应用的取舍：签名连续性 > 密钥保密性，见 android/README.md）。
+    signingConfigs {
+        elysium {
+            storeFile rootProject.file("elysium.keystore")
+            storePassword "elysium2026"
+            keyAlias "elysium"
+            keyPassword "elysium2026"
+        }
+    }
     buildTypes {
+        debug {
+            signingConfig signingConfigs.elysium
+        }
         release {
+            signingConfig signingConfigs.elysium
             minifyEnabled false
         }
     }
@@ -30,6 +45,10 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+}
+
+dependencies {
+    implementation 'androidx.core:core:1.13.1'   // FileProvider：把下载好的 APK 共享给系统安装器
 }
 
 chaquopy {

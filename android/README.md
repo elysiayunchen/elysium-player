@@ -24,6 +24,11 @@ cp ../app.png app/src/main/res/drawable/appicon.png
 
 - Python 目标 3.10，`pip install mutagen`（写标签用，纯 Python）由 Chaquopy 构建时自动完成
 - `ndk.abiFilters`: arm64-v8a + armeabi-v7a
-- debug 签名（`~/.android/debug.keystore` 自动生成）；换机器重建会换签名，升级需先卸载
+- **固定签名**：`elysium.keystore`（alias `elysium`，密码 `elysium2026`）随仓库走，debug / release
+  同一把钥匙 —— 应用内更新靠覆盖安装，签名必须跨构建一致。仓库公开，密钥也就公开，
+  这是个人侧载应用的取舍（签名连续性 > 密钥保密性）；换钥 = 用户全体卸载重装，别轻易动
+- **应用内更新**：下载好的 APK 在应用私有目录（`files/Elysium/`），前端经
+  `window.ElysiumAndroid.installUpdate(path)`（JavascriptInterface + FileProvider）调起
+  系统安装器；Android 8+ 首次会引导授予「安装未知应用」权限
 - 出站走 HTTP 代理的环境，给 `gradle.properties` 加 `systemProp.https.proxyHost/Port`
   （JVM 不读 `http_proxy` 环境变量）

@@ -37,7 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "Elysium"
 APP_TITLE = "Elysium - 在线音乐"
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 LEGACY_NAME = "FlacMusic"
 UPSTREAM = "https://flac.music.hi.cn/"
 API_URL = UPSTREAM + "ajax.php?act="

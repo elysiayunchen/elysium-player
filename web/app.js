@@ -10,6 +10,9 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// Android 宿主（Chaquopy APK）注入 window.ElysiumAndroid；UA 兜底 --serve 浏览器调试
+const IS_ANDROID = (typeof window !== 'undefined' && window.ELYSIUM_PLATFORM === 'android') ||
+  /Android/i.test(navigator.userAgent || '');
 const icon = (n) => `<svg><use href="#i-${n}"/></svg>`;
 
 const pad = (n) => (n < 10 ? '0' + n : '' + n);
@@ -693,9 +696,11 @@ function paintUpdateAssets() {
     const prog = dl && dl.state === 'running'
       ? `<p class="tip">${fmtSize(dl.got)}${dl.total ? ' / ' + fmtSize(dl.total) : ''} · ${fmtSpeed(dl.speed) || '…'}</p>`
       : '';
-    const doneTip = dl && dl.state === 'done' && dl.path
-      ? `<p class="tip">已下载：${esc(dl.path)} · 手动运行即可完成更新${dl.verified ? ' · SHA-256 已通过' : ''}</p>`
-      : '';
+    const doneTip = (dl && dl.state === 'done' && dl.path) ? `
+      <p class="tip">${dl.verified ? 'SHA-256 已通过 · ' : ''}${esc(dl.path)}</p>
+      ${IS_ANDROID
+        ? `<div class="field-acts"><button class="btn sm" data-act="upd-install" data-path="${esc(dl.path)}">安装更新</button></div>`
+        : '<p class="tip">手动运行即可完成更新</p>'}` : '';
     const errTip = dl && dl.state === 'error'
       ? `<p class="tip">下载失败：${esc(dl.error || '')}（可换镜像再试）</p>`
       : '';
@@ -719,7 +724,9 @@ function paintUpdateAssets() {
 function openExternal(url) {
   const u = String(url || '');
   if (!/^https?:\/\//i.test(u)) return;
-  if (window.pywebview && window.pywebview.api && window.pywebview.api.open_url) {
+  if (IS_ANDROID && window.ElysiumAndroid && window.ElysiumAndroid.openUrl) {
+    window.ElysiumAndroid.openUrl(u);      // Android WebView 里 window.open 不可靠，走原生 Intent
+  } else if (window.pywebview && window.pywebview.api && window.pywebview.api.open_url) {
     window.pywebview.api.open_url(u);      // WebView2 里交给系统默认浏览器
   } else {
     window.open(u, '_blank');
@@ -752,7 +759,10 @@ function pollUpdateDl() {
     const prev = state.updateDl;
     state.updateDl = d.data || { state: 'idle' };
     if (prev && prev.state === 'running') {          // 只在状态跃迁时弹，刷新页面不重复打扰
-      if (state.updateDl.state === 'done') toast('新版本已下载到下载目录，手动运行即可完成更新');
+      if (state.updateDl.state === 'done') {
+        toast(IS_ANDROID ? '新版本已下载完成，去「更新」里点「安装更新」'
+                         : '新版本已下载到下载目录，手动运行即可完成更新');
+      }
       if (state.updateDl.state === 'error') toast('下载失败：' + (state.updateDl.error || ''), 'err');
     }
     paintUpdateAssets();
@@ -4358,6 +4368,18 @@ document.addEventListener('click', async (e) => {
         paintUpdateAssets();
         pollUpdateDl();                      // 立刻接管轮询（页面刷新后也靠它恢复进度）
       } catch (err) { toast(err.message || '下载启动失败', 'err'); }
+      break;
+    }
+    case 'upd-install': {
+      const bridge = window.ElysiumAndroid;
+      const path = el.dataset.path || '';
+      if (bridge && bridge.installUpdate) {
+        const ok = bridge.installUpdate(path);
+        toast(ok ? '已调起系统安装器，请确认安装' : '调起安装器失败（文件不存在或权限不足）',
+              ok ? '' : 'err');
+      } else {
+        toast('此版本不支持应用内安装，请用文件管理器手动安装 APK', 'err');
+      }
       break;
     }
     case 'upd-copy': {

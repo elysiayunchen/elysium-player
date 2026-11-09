@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 下载目录落在应用 files 目录（~/Elysium），整棵授予系统安装器读取 -->
+<paths>
+    <files-path name="app_files" path="." />
+</paths>
