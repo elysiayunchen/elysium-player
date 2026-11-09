@@ -18,6 +18,7 @@ import collections
 import concurrent.futures as _cf
 import hashlib
 import http.client
+import importer                      # 歌单导入（规则外置 + 三桶判定），见 providers/
 import json
 import os
 import queue
@@ -312,8 +313,18 @@ class Store:
         now = int(time.time())
         # id 带上时间戳 + 随机后缀，避免同毫秒建两个歌单撞 id
         pid = "pl_%d_%s" % (now, os.urandom(3).hex())
-        self._pls().append({"id": pid, "name": name, "created_at": now,
-                            "updated_at": now, "items": []})
+        entry = {"id": pid, "name": name, "created_at": now,
+                 "updated_at": now, "items": []}
+        # 导入歌单的来源元数据：纯展示用，不参与 items 结构，也不影响去重键。
+        # 只收白名单字段，避免把整个预览结果或用户本机路径写进 data.json。
+        src = payload.get("source")
+        if isinstance(src, dict):
+            allowed = ("mode", "platform", "label", "url", "filename",
+                       "name", "partial", "note", "rules_version", "imported_at")
+            clean = {k: src[k] for k in allowed if src.get(k) not in (None, "")}
+            if clean:
+                entry["source"] = clean
+        self._pls().append(entry)
 
     def _pl_rename(self, payload):
         pl = self._pl_find(payload.get("id"))
@@ -2741,6 +2752,19 @@ class Handler(BaseHTTPRequestHandler):
             data["_version"] = VERSION
             self._send(200, data)
             return
+        if path == "/api/import/status":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            self._send(200, {"ok": True,
+                             "data": importer.status((q.get("id") or [""])[0])})
+            return
+        if path == "/api/providers/health":
+            # 按需自检：三个探针各取一个固定公开歌单，失败只标记降级，不影响主流程
+            self._send(200, {"ok": True, "data": importer.health()})
+            return
+        if path == "/api/update/check":
+            # notify-only：只比版本号，绝不自动下载 / 替换文件
+            self._send(200, {"ok": True, "data": importer.update_check()})
+            return
         if path == "/api/store/export":
             # 导出脱敏副本：去掉含用户名的本机绝对路径，
             # 分享给别人时不会泄漏磁盘结构与用户名。
@@ -2845,6 +2869,55 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/store":
                 body = self._json_body()
                 self._send(200, {"ok": True, "data": STORE.apply(body.get("op"), body.get("payload"))})
+                return
+
+            if path == "/api/import/preview":
+                # dry-run：只解析 + 三桶判定，绝不写用户数据
+                self._send(200, {"ok": True,
+                                 "data": importer.start_preview(self._json_body())})
+                return
+
+            if path == "/api/import/cancel":
+                tid = str((self._json_body() or {}).get("id") or "")
+                self._send(200, {"ok": True, "data": {"cancelled": importer.cancel(tid)}})
+                return
+
+            if path == "/api/import/commit":
+                body = self._json_body() or {}
+                # 只接受本项目能播放的两个音源；QQ / 酷狗的原生 id 绝不能进歌单，
+                # 否则会出现一条永远播不了、也换不了源的僵尸曲目。
+                items = [x for x in (body.get("items") or [])
+                         if isinstance(x, dict) and x.get("platform") in PLATFORMS
+                         and str(x.get("id") or "").strip()]
+                if not items:
+                    self._send(200, {"ok": False, "error": "没有勾选任何可导入的曲目"})
+                    return
+                target = str(body.get("target_id") or "").strip()
+                if target and not any(p.get("id") == target
+                                      for p in STORE.data.get("playlists") or []):
+                    self._send(200, {"ok": False, "error": "目标歌单不存在"})
+                    return
+                if not target:
+                    name = str(body.get("name") or "").strip()[:60] or "导入歌单"
+                    src = body.get("source") if isinstance(body.get("source"), dict) else {}
+                    src = dict(src)
+                    src["imported_at"] = int(time.time())
+                    STORE.apply("playlist_create", {"name": name, "source": src})
+                    pls = STORE.data.get("playlists") or []
+                    target = pls[-1]["id"] if pls else ""
+                if not target:
+                    self._send(200, {"ok": False, "error": "歌单创建失败"})
+                    return
+                pl = next((p for p in STORE.data["playlists"]
+                           if p.get("id") == target), None)
+                before = len((pl or {}).get("items") or [])
+                STORE.apply("playlist_add", {"id": target, "items": items})
+                pl = next((p for p in STORE.data["playlists"]
+                           if p.get("id") == target), None)
+                self._send(200, {"ok": True, "data": {
+                    "id": target, "name": (pl or {}).get("name") or "",
+                    "added": len((pl or {}).get("items") or []) - before,
+                    "total": len((pl or {}).get("items") or [])}})
                 return
 
             if path == "/api/feedback":
@@ -3145,6 +3218,10 @@ def _apply_window_chrome():
 
 
 def main():
+    # 导入模块不 import main（避免循环依赖），严格判定统一复用这里的函数，
+    # 保证「歌单导入」与「换源 / 歌手归类」是同一套口径，不会两套标准漂移。
+    importer.bind(search_all=search_all, billed_as=_billed_as,
+                  fold_text=_fold_text, resource_dir=resource_dir)
     args = sys.argv[1:]
     port_arg = 0
     for a in args:

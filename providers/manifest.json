@@ -1,0 +1,8 @@
+{
+  "rules_version": "2026-11-09.1",
+  "client_version": "1.4.0",
+  "update_url": "",
+  "check_on_start": false,
+  "providers": ["netease", "qqmusic", "kugou"],
+  "_note": "update_url 留空表示 notify-only 本地版本检查；填入远端 manifest URL 后 /api/update/check 会比对 rules_version，不自动下载或替换任何文件。"
+}

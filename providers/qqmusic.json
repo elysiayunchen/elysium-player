@@ -1,0 +1,15 @@
+{
+  "id": "qqmusic",
+  "label": "QQ 音乐",
+  "version": "2026-11-09.1",
+  "hosts": ["y.qq.com", "c.y.qq.com", "i.y.qq.com", "c6.y.qq.com"],
+  "patterns": ["ryqq/playlist/(\\d+)", "disstid=(\\d+)", "[?&]id=(\\d+)"],
+  "endpoint": "https://c.y.qq.com/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg?type=1&utf8=1&onlysong=0&disstid={id}&format=jsonp",
+  "referer": "https://y.qq.com/",
+  "probe": {
+    "input": "https://y.qq.com/n/ryqq/playlist/9044196528",
+    "min_tracks": 100
+  },
+  "auth": {"optional": false},
+  "_note": "实测 2026-11-09：该老接口对 637 首大歌单返回完整 637 首，不截断。社区新项目已转 u.y.qq.com/cgi-bin/musicu.fcg（需签名），若此端点失效优先改这里。"
+}

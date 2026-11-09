@@ -27,12 +27,18 @@ def _collect_tree(src, dest):
 _WEB = _collect_tree(os.path.join(SPECPATH, 'web'), 'web')
 assert _WEB, 'web/ 目录为空，美术资源与前端会全部丢失'
 
+# 歌单导入规则（providers/*.json）必须随包带走，否则打包版会静默降级到内置默认规则，
+# 接口追踪 / 热更新就失去意义。目录不存在时留空，不阻断打包。
+_PDIR = os.path.join(SPECPATH, 'providers')
+_PROVIDERS = _collect_tree(_PDIR, 'providers') if os.path.isdir(_PDIR) else []
+
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=_WEB + [(os.path.join(SPECPATH, 'app.png'), '.')],
+    datas=_WEB + _PROVIDERS + [(os.path.join(SPECPATH, 'app.png'), '.')],
     hiddenimports=[
+        'importer',
         'webview.platforms.edgechromium',
         'clr_loader',
         'pythonnet',

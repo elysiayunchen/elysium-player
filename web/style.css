@@ -1313,3 +1313,44 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
   animation:pulse 1.1s ease-in-out infinite;flex:0 0 auto;
 }
 @keyframes pulse{0%,100%{opacity:.25}50%{opacity:1}}
+
+/* ---- 导入歌单（复用主题变量，明暗两套都可读） ---- */
+.drawer.xwide{width:660px}
+.imp-pane{padding:2px 4px}
+.imp-lead{font-size:13px;color:var(--ink-2);margin:2px 0 10px}
+.imp-hint{font-size:11px;color:var(--muted);line-height:1.65;margin:8px 0}
+.imp-ta{width:100%;min-height:96px;resize:vertical;background:var(--card-2);color:var(--ink);
+  border:1px solid var(--line-2);border-radius:var(--radius);padding:10px;font:12px/1.6 inherit}
+.imp-in{width:100%;background:var(--card-2);color:var(--ink);border:1px solid var(--line-2);
+  border-radius:8px;padding:7px 9px;font:12px/1.4 inherit}
+.imp-row{display:flex;align-items:center;gap:10px;margin:10px 0;flex-wrap:wrap}
+.imp-sec{margin-top:18px;padding-top:14px;border-top:1px solid var(--line)}
+.imp-sec h4{margin:0 0 8px;font-size:12px;color:var(--ink)}
+.imp-ver{font-size:11px;color:var(--muted);margin:6px 0}
+.imp-warn{background:var(--gold-dim);color:var(--gold);border:1px solid var(--line-2);
+  border-radius:8px;padding:9px 11px;font-size:11.5px;line-height:1.65;margin:10px 0}
+.imp-sum{display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--ink-2);margin:4px 0 12px}
+.imp-sum b{color:var(--accent);font-variant-numeric:tabular-nums}
+.imp-progress{font-size:12px;color:var(--ink-2);margin:14px 0}
+.imp-bar{height:4px;background:var(--hover-2);border-radius:4px;overflow:hidden;margin:8px 0 12px}
+.imp-bar i{display:block;height:100%;background:var(--accent);transition:width .25s}
+.imp-tier{margin:14px 0 6px;font-size:12px;font-weight:600;color:var(--ink)}
+.imp-tier em{font-style:normal;color:var(--muted);font-weight:400;margin-left:6px;font-size:11px}
+.imp-item{border:1px solid var(--line);border-radius:9px;padding:9px 10px;margin-bottom:7px;background:var(--card)}
+.imp-item.pick{border-color:var(--accent);background:var(--accent-dim)}
+.imp-item-top{display:flex;align-items:flex-start;gap:9px}
+.imp-item-top input[type=checkbox]{margin-top:3px;accent-color:var(--accent);flex:0 0 auto}
+.imp-item-main{flex:1;min-width:0}
+.imp-n{font-size:12.5px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.imp-a{font-size:11px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.imp-cands{margin-top:7px;display:flex;flex-direction:column;gap:4px}
+.imp-cand{display:flex;gap:8px;align-items:center;font-size:11px;color:var(--ink-2);
+  padding:5px 7px;border:1px solid var(--line);border-radius:6px;cursor:pointer;background:var(--card-2)}
+.imp-cand.on{border-color:var(--accent);color:var(--ink)}
+.imp-cand .mono{color:var(--muted);font-size:10px;flex:0 0 auto;margin-left:auto}
+.imp-manual{display:flex;gap:6px;margin-top:7px}
+.imp-manual .imp-in{flex:1}
+.imp-foot{position:sticky;bottom:0;background:var(--bg-soft);border-top:1px solid var(--line);
+  padding:10px 4px 2px;margin-top:14px;display:flex;align-items:center;gap:10px}
+.imp-foot .grow{flex:1;font-size:11.5px;color:var(--muted)}
+.imp-ok{font-size:11px;color:var(--accent);margin-top:6px;line-height:1.6}

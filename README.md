@@ -64,6 +64,15 @@
 
 > 缓存只做后台自动维护，界面不提供「缓存歌曲列表」——占用与规则放在设置里看一眼即可。
 
+**导入歌单**
+- **主通道：本地文件 / 粘贴文本** —— `.kgl`（酷狗客户端「播放列表 → 菜单 → 导出列表」）、`.txt`、`.csv`、`.m3u8`、纯文本「歌名 - 歌手」。零登录、不联网取数，格式多年稳定。文件按 UTF-8 读，遇到替换字符自动改用 GB18030 重读。
+- **次通道：在线链接** —— 网易云 / QQ 音乐 / 酷狗歌单链接，支持分享文案里抠 URL 与短链跳转。网易云、QQ 音乐免登录可拿全量；酷狗旧式 `special/single/{id}` 全量，新版 `gcid_` / H5 分享链接免登录只给 10 首预览，界面会明示并引导改用本地导出文件。
+- **可选增强**：酷狗凭据（token + userid）开关，默认关闭、只作用于当次请求，不写入 `data.json`。
+- **三层筛选**：① 歌名 + 作者都严格对上 → 自动纳入；② 歌名对上、作者对不上 → 逐条声明出来，用户勾选才加入；③ 本地音源未找到 → 同样声明，可手动搜索指定。**不擅自合并、不静默丢弃**，预览全程 dry-run，点「导入所选」才落盘。分隔符方向由整批投票定一次，不逐条猜。
+- 严格判定复用 `_artist_key` / `_billed_as` / `fold_text`，与换源、歌手归类同一套口径；歌单条目只接受 `kuwo` / `wyy`，别的平台原生 id 会在服务端被挡掉。
+- 规则外置 `providers/*.json`（URL 匹配 / 端点 / 字段 / 探针）；`/api/providers/health` 按需自检三家接口，`/api/update/check` 做 notify-only 版本比对。改规则不必重发 exe。
+- 验收：`python verify_import.py`（41 项，需 selenium + Chrome；无界面环境用 `--no-ui`）。
+
 ## 播放内核
 
 播放一律不直连 CDN，而是走本地 `/api/media`：
@@ -107,6 +116,13 @@ main.py                  本地服务 + pywebview 窗口
   /api/cache             缓存用量（今日 / 长期）/ 分层清理
   /api/save-lyric        保存 .lrc
   /api/rpc (fn=artist)   歌手聚合：多源并发深翻页 + 跨源折叠 + 专辑去重，一次给全
+  /api/import/preview    启动导入预览任务（取数 + 三层判定，dry-run 不写数据）
+  /api/import/status     预览进度 / 结果；/api/import/cancel 取消
+  /api/import/commit     只把用户勾选的曲目写进歌单（新建或合并）
+  /api/providers/health  三家接口探针自检（按需，不阻塞启动）
+  /api/update/check      规则版本比对，notify-only
+importer.py              导入管线（解析 / 取数 / 三层判定 / 任务管理）
+providers/*.json         外置规则：URL 匹配、端点、字段、探针、版本号
 web/index.html           界面骨架
 web/style.css            主题变量 + 组件样式
 web/app.js               全部交互逻辑

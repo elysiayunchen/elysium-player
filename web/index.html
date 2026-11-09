@@ -82,7 +82,7 @@
 
     <div class="side-scroll">
       <div class="side-sec">
-        <div class="side-label">我的歌单 <em id="plCount">0</em><button class="side-add" id="plAdd" title="新建歌单"><svg><use href="#i-plus"/></svg></button></div>
+        <div class="side-label">我的歌单 <em id="plCount">0</em><button class="side-add" id="plImport" title="导入歌单"><svg><use href="#i-list"/></svg></button><button class="side-add" id="plAdd" title="新建歌单"><svg><use href="#i-plus"/></svg></button></div>
         <div id="sidePlaylists" class="side-list"></div>
       </div>
       <div class="side-sec">
@@ -199,6 +199,14 @@
     <button class="ic" data-close="settingsDrawer"><svg><use href="#i-close"/></svg></button>
   </div>
   <div class="drawer-body" id="settingsBody"></div>
+</aside>
+
+<aside class="drawer right xwide" id="importDrawer" hidden>
+  <div class="drawer-head">
+    <div class="dtabs"><button class="dtab on">导入歌单</button></div>
+    <button class="ic" data-close="importDrawer"><svg><use href="#i-close"/></svg></button>
+  </div>
+  <div class="drawer-body" id="importBody"></div>
 </aside>
 
 <div class="lyric-layer" id="lyricLayer" hidden>

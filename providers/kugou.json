@@ -1,0 +1,18 @@
+{
+  "id": "kugou",
+  "label": "酷狗音乐",
+  "version": "2026-11-09.1",
+  "hosts": ["kugou.com", "m.kugou.com", "t1.kugou.com"],
+  "patterns": ["special/single/(\\d+)", "songlist/(gcid_[A-Za-z0-9]+)", "global_specialid=(collection_[\\w-]+)", "[?&](?:id|listid|src_cid)=(\\d+)"],
+  "endpoint": "",
+  "referer": "https://www.kugou.com/",
+  "probe": {
+    "input": "https://www.kugou.com/yy/special/single/546903.html",
+    "min_tracks": 20
+  },
+  "auth": {
+    "optional": true,
+    "note": "新版 gcid / H5 分享页免登录只给前 10 首；填 token+userid 后走可选增强通道可取全量。客户端自己的「播放列表 → 菜单 → 导出列表 → .kgl」始终是最稳的免登录通道。"
+  },
+  "_note": "页面曲目是 HTML 转义 JSON（&#34;songname&#34;），需 unescape 后按 songname/author_name 成对提取；实测简单正则会漏 4 首，勿用单纯计数当总数。"
+}

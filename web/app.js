@@ -110,6 +110,8 @@ const state = {
   artistFilling: false,              // 后台补齐全量曲目中
   album: null,
   urlCache: new Map(),
+  imp: null,                       // 导入预览（dry-run，确认后才落盘）
+  impTimer: 0,
 };
 
 const MODES = [
@@ -384,6 +386,399 @@ async function plAddSongs(plid, songs) {
   if (!ok) return false;
   const after = (plById(plid) || { items: [] }).items.length;
   return after - before;                    // 返回实际新增数
+}
+
+/* ------------------------------------------------------------------ 导入歌单 */
+/* 三桶一律「声明 + 用户决定」：L1 默认纳入，L2/L3 默认不选、绝不静默丢弃。
+   预览是 dry-run，只有点「导入所选」才写 data.json。 */
+const IMPORT_ACCEPT = '.kgl,.txt,.csv,.m3u8,.m3u';
+const impSrcLabel = (p) => ({ kuwo: '酷我', wyy: '网易云' }[p] || p || '未知');
+
+function impReset() {
+  if (state.impTimer) { clearInterval(state.impTimer); state.impTimer = 0; }
+  const prev = state.imp && state.imp.enhance;
+  state.imp = {
+    phase: 'input', task: '', done: 0, total: 0, result: null,
+    filename: '', fileText: '',
+    enhance: prev ? { ...prev } : { enabled: false, token: '', userid: '' },
+    manual: {}, name: '', target: '',
+  };
+}
+
+function openImport() {
+  $('#npDrawer').hidden = true;
+  $('#panelDrawer').hidden = true;
+  $('#settingsDrawer').hidden = true;
+  $('#importDrawer').hidden = false;
+  if (!state.imp) impReset();
+  renderImport();
+}
+
+function impInputHtml() {
+  const e = state.imp.enhance;
+  return `<div class="imp-pane">
+    <div class="imp-lead">粘贴歌单链接 / 分享文本，或选择客户端导出的歌单文件</div>
+    <textarea class="imp-ta" id="impText" placeholder="网易云 / QQ音乐 / 酷狗歌单链接、分享文案，或&#10;邓紫棋 - 泡沫&#10;孙燕姿 - 我不难过">${esc(state.imp.fileText || '')}</textarea>
+    <div class="imp-row">
+      <button class="btn sm" data-imp="file">选择文件</button>
+      <input type="file" id="impFile" accept="${IMPORT_ACCEPT}" data-imp-field="file" hidden>
+      <span class="imp-a" id="impFileName">${esc(state.imp.filename || '未选择文件')}</span>
+    </div>
+    <div class="imp-hint">主通道：酷狗客户端「播放列表 → 菜单 → 导出列表」得到的 .kgl，或 .txt / .csv / .m3u8 / 纯文本「歌名 - 歌手」。零登录、零联网取数。<br>次通道：三家歌单链接；酷狗新版分享链接免登录只给前 10 首，会明确提示。</div>
+    <button class="btn primary" data-imp="start">解析并预览</button>
+
+    <div class="imp-sec">
+      <h4>接口自检与更新</h4>
+      <div class="imp-ver" id="impVer">规则版本加载中…</div>
+      <div class="imp-row">
+        <button class="btn sm" data-imp="health">检查三家接口</button>
+        <button class="btn sm" data-imp="update">检查更新</button>
+      </div>
+      <div id="impHealth"></div>
+    </div>
+
+    <div class="imp-sec">
+      <h4>酷狗完整歌单 · 可选增强</h4>
+      <label class="imp-a"><input type="checkbox" id="impEnhanceOn" data-imp-field="enhance" ${e.enabled ? 'checked' : ''}> 启用（默认关闭，仅本次请求带凭据）</label>
+      <div class="imp-row">
+        <input class="imp-in" id="impToken" data-imp-field="token" placeholder="token" value="${esc(e.token)}" style="flex:1">
+        <input class="imp-in" id="impUserid" data-imp-field="userid" placeholder="userid" value="${esc(e.userid)}" style="width:130px">
+      </div>
+      <div class="imp-hint">新版酷狗分享链接免登录只给 10 首预览；填入凭据后可取全量。凭据不写入 data.json、不上传别处。最稳的仍是本地 .kgl 导出文件。</div>
+    </div>
+  </div>`;
+}
+
+function impProgressHtml() {
+  const s = state.imp;
+  const pct = s.total ? Math.round(s.done / s.total * 100) : 0;
+  return `<div class="imp-pane">
+    <div class="imp-progress" id="impProgText">正在逐条核对歌名与作者… ${s.done}/${s.total || '?'}</div>
+    <div class="imp-bar"><i id="impProgBar" style="width:${pct}%"></i></div>
+    <button class="btn sm" data-imp="cancel">取消</button>
+  </div>`;
+}
+
+function impCandHtml(c, attrs, on) {
+  return `<div class="imp-cand${on ? ' on' : ''}" ${attrs}>
+    <span>${esc(c.name || '')}</span>
+    <span class="imp-a">${esc(c.artist || '')}</span>
+    <span class="mono">${esc(impSrcLabel(c.platform))}</span>
+  </div>`;
+}
+
+function impRowHtml(x, tier) {
+  const cands = x.candidates || [];
+  let extra = '';
+  if (tier === 'l2' && cands.length) {
+    extra = `<div class="imp-cands">${cands.map((c, i) => impCandHtml(c,
+      `data-imp="cand" data-tier="l2" data-i="${x.index}" data-c="${i}"`,
+      i === x.selected)).join('')}</div>`;
+  }
+  if (tier === 'l3') {
+    const m = state.imp.manual[x.index] || {};
+    extra = `<div class="imp-manual">
+      <input class="imp-in" data-imp-field="mq" data-i="${x.index}" placeholder="手动搜索歌名" value="${esc(m.q || '')}">
+      <button class="btn sm" data-imp="manual-search" data-i="${x.index}">查找</button>
+    </div>`;
+    if ((m.list || []).length) {
+      extra += `<div class="imp-cands">${m.list.map((c, i) => impCandHtml(c,
+        `data-imp="manual-pick" data-i="${x.index}" data-c="${i}"`,
+        x.item && x.item.id === c.id && x.item.platform === c.platform)).join('')}</div>`;
+    }
+  }
+  return `<div class="imp-item${x.chosen ? ' pick' : ''}">
+    <div class="imp-item-top">
+      <input type="checkbox" data-imp-field="pick" data-tier="${tier}" data-i="${x.index}" ${x.chosen ? 'checked' : ''}>
+      <div class="imp-item-main">
+        <div class="imp-n">${esc(x.name || x.raw || '（未解析出行）')}</div>
+        <div class="imp-a">${esc(x.artist || '作者未知')}${x.raw && x.raw !== x.name ? ' · 原文 ' + esc(x.raw) : ''}</div>
+        ${extra}
+      </div>
+    </div>
+  </div>`;
+}
+
+function impResultHtml() {
+  const r = state.imp.result;
+  const b = r.buckets || {};
+  const src = r.source || {};
+  const n1 = (b.l1 || []).length, n2 = (b.l2 || []).length, n3 = (b.l3 || []).length;
+  const chosen = ['l1', 'l2', 'l3'].reduce((n, t) =>
+    n + (b[t] || []).filter((x) => x.chosen).length, 0);
+  const targets = `<option value="">新建歌单</option>` + state.playlists.map((p) =>
+    `<option value="${esc(p.id)}" ${state.imp.target === p.id ? 'selected' : ''}>合并到「${esc(p.name)}」</option>`).join('');
+  const tier = (t, title, note) => (b[t] || []).length
+    ? `<div class="imp-tier">${title} <em>${note} · ${(b[t] || []).length} 首</em></div>` +
+      (b[t] || []).map((x) => impRowHtml(x, t)).join('')
+    : '';
+  return `<div class="imp-pane">
+    <div class="imp-sum">
+      <span>来源 <b>${esc(src.label || '本地')}</b></span>
+      <span>共 <b>${n1 + n2 + n3}</b> 首</span>
+      <span>精密匹配 <b>${n1}</b></span>
+      <span>待确认 <b>${n2}</b></span>
+      <span>未找到 <b>${n3}</b></span>
+    </div>
+    ${src.partial || src.note ? `<div class="imp-warn">${esc(src.note || '该来源只返回了部分曲目，建议改用本地导出文件导入完整歌单。')}</div>` : ''}
+    ${r.order === 'swap' ? '<div class="imp-hint">已按「歌名 - 歌手」方向解析（自动判定）。</div>' : ''}
+    <div class="imp-row">
+      <input class="imp-in" id="impName" placeholder="歌单名称" value="${esc(state.imp.name)}" style="flex:1">
+      <select class="imp-in" id="impTarget" style="width:190px">${targets}</select>
+    </div>
+    ${tier('l1', '① 精密匹配', '歌名与作者都严格对上，默认纳入')}
+    ${tier('l2', '② 歌名对上、作者对不上', '默认不选，勾选后才加入，绝不擅自合并')}
+    ${tier('l3', '③ 本地音源未找到', '默认不选，可手动搜索指定，绝不静默丢弃')}
+    <div class="imp-foot">
+      <span class="grow">已勾选 <b>${chosen}</b> 首</span>
+      <button class="btn sm" data-imp="reset">重新导入</button>
+      <button class="btn primary" data-imp="commit">导入所选</button>
+    </div>
+  </div>`;
+}
+
+function renderImport() {
+  const box = $('#importBody');
+  if (!box) return;
+  if (!state.imp) impReset();
+  const s = state.imp;
+  // 重绘前把用户已编辑的字段收回来：点候选 / 勾选都会整块重建 DOM，
+  // 不回收的话刚输入的歌单名、凭据会悄悄回到旧值。
+  const nm = box.querySelector('#impName'); if (nm) s.name = nm.value;
+  const tg = box.querySelector('#impTarget'); if (tg) s.target = tg.value;
+  const tk = box.querySelector('#impToken'); if (tk) s.enhance.token = tk.value.trim();
+  const uid = box.querySelector('#impUserid'); if (uid) s.enhance.userid = uid.value.trim();
+  const en = box.querySelector('#impEnhanceOn'); if (en) s.enhance.enabled = en.checked;
+  box.innerHTML = s.phase === 'running' ? impProgressHtml()
+    : s.phase === 'result' && s.result ? impResultHtml() : impInputHtml();
+  if (s.phase === 'input') loadImportVersion();
+}
+
+function renderImportProgress() {
+  const s = state.imp;
+  const t = $('#impProgText'), bar = $('#impProgBar');
+  if (t) t.textContent = `正在逐条核对歌名与作者… ${s.done}/${s.total || '?'}`;
+  if (bar) bar.style.width = (s.total ? Math.round(s.done / s.total * 100) : 0) + '%';
+}
+
+async function loadImportVersion() {
+  try {
+    const d = await getJson('/api/update/check');
+    const u = d.data || {};
+    const el = $('#impVer');
+    if (el) el.textContent = `规则版本 ${u.rules_version || '?'} · 客户端 v${u.client_version || '?'}` +
+      (u.degraded && u.degraded.length ? ' · 规则文件降级' : '');
+  } catch (e) { /* 版本信息只是提示，失败不打断导入 */ }
+}
+
+async function startImportPreview() {
+  const ta = $('#impText');
+  const text = String((ta && ta.value) || '').trim();
+  if (!text) { toast('先粘贴内容或选一个文件', 'err'); return; }
+  const hasUrl = /https?:\/\//i.test(text);
+  const e = state.imp.enhance;
+  state.imp.fileText = text;
+  state.imp.phase = 'running';
+  state.imp.done = 0; state.imp.total = 0; state.imp.task = '';
+  renderImport();
+  try {
+    const d = await post('/api/import/preview', {
+      text, filename: hasUrl ? '' : state.imp.filename,
+      enhance: { enabled: !!e.enabled, token: e.token, userid: e.userid },
+    });
+    state.imp.task = d.data.task_id;
+    pollImport(d.data.task_id);
+  } catch (err) {
+    state.imp.phase = 'input'; renderImport();
+    toast(err.message || '解析失败', 'err');
+  }
+}
+
+function pollImport(tid) {
+  if (state.impTimer) clearInterval(state.impTimer);
+  state.impTimer = setInterval(async () => {
+    let d;
+    try { d = await getJson('/api/import/status?id=' + encodeURIComponent(tid)); }
+    catch (e) { return; }
+    const s = d.data || {};
+    state.imp.done = s.done || 0;
+    state.imp.total = s.total || 0;
+    if (s.state === 'running') { renderImportProgress(); return; }
+    clearInterval(state.impTimer); state.impTimer = 0;
+    if (s.state === 'done') {
+      state.imp.result = s.result;
+      state.imp.phase = 'result';
+      const src = s.result.source || {};
+      state.imp.name = src.name || (state.imp.filename
+        ? state.imp.filename.replace(/\.[^.]+$/, '') : '') || '导入歌单';
+      renderImport();
+    } else if (s.state === 'cancelled') {
+      state.imp.phase = 'input'; renderImport(); toast('已取消');
+    } else {
+      state.imp.phase = 'input'; renderImport();
+      toast(s.error || '解析失败', 'err');
+    }
+  }, 600);
+}
+
+function impFind(tier, i) {
+  const b = (state.imp.result && state.imp.result.buckets) || {};
+  return (b[tier] || []).find((x) => String(x.index) === String(i)) || null;
+}
+
+async function commitImport() {
+  const r = state.imp.result;
+  if (!r) return;
+  const items = [];
+  let skipped = 0;
+  for (const t of ['l1', 'l2', 'l3']) {
+    for (const x of (r.buckets[t] || [])) {
+      if (!x.chosen) continue;
+      const it = x.item || (x.candidates && x.candidates[x.selected]) || null;
+      if (it && it.platform && it.id) items.push(it);
+      else skipped++;
+    }
+  }
+  if (!items.length) { toast('没有勾选任何可导入的曲目', 'err'); return; }
+  const name = String(($('#impName') || {}).value || state.imp.name || '导入歌单').trim();
+  const target = ($('#impTarget') || {}).value || '';
+  const src = r.source || {};
+  try {
+    const d = await post('/api/import/commit', {
+      name, target_id: target, items,
+      source: {
+        mode: src.mode, platform: src.platform, label: src.label,
+        filename: src.filename, name: src.name, partial: src.partial,
+        note: src.note, rules_version: r.rules_version,
+      },
+    });
+    const st = await getJson('/api/store');
+    state.playlists = st.playlists || [];
+    renderSide(); render();
+    $('#importDrawer').hidden = true;
+    go({ name: 'playlist', id: d.data.id });
+    toast(`已导入 ${d.data.added} 首` + (skipped ? ` · ${skipped} 条未选定已跳过` : ''));
+    impReset();
+  } catch (err) {
+    toast(err.message || '导入失败', 'err');
+  }
+}
+
+async function onImportClick(e) {
+  const el = e.target.closest('[data-imp]');
+  if (!el) return;
+  const act = el.dataset.imp;
+  const i = el.dataset.i;
+  switch (act) {
+    case 'file': {
+      const f = $('#impFile');
+      if (f) f.click();
+      break;
+    }
+    case 'start': await startImportPreview(); break;
+    case 'cancel': {
+      if (state.imp.task) { try { await post('/api/import/cancel', { id: state.imp.task }); } catch (e2) {} }
+      if (state.impTimer) { clearInterval(state.impTimer); state.impTimer = 0; }
+      state.imp.phase = 'input'; renderImport(); toast('已取消');
+      break;
+    }
+    case 'reset': impReset(); renderImport(); break;
+    case 'cand': {
+      const x = impFind('l2', i);
+      if (!x) break;
+      x.selected = Number(el.dataset.c);
+      x.item = x.candidates[x.selected] || null;
+      renderImport();
+      break;
+    }
+    case 'manual-search': {
+      const inp = document.querySelector(`[data-imp-field="mq"][data-i="${i}"]`);
+      const q = String((inp && inp.value) || (state.imp.manual[i] || {}).q || '').trim();
+      if (!q) { toast('先输入要查找的歌名', 'err'); break; }
+      try {
+        const d = await rpc('search', { keyword: q, page: 1, size: 10 });
+        state.imp.manual[i] = { q, list: (d.list || []).slice(0, 6) };
+        renderImport();
+      } catch (err) { toast(err.message || '搜索失败', 'err'); }
+      break;
+    }
+    case 'manual-pick': {
+      const x = impFind('l3', i);
+      const m = state.imp.manual[i] || {};
+      const c = (m.list || [])[Number(el.dataset.c)];
+      if (!x || !c) break;
+      x.item = c; x.chosen = true;
+      renderImport();
+      break;
+    }
+    case 'commit': await commitImport(); break;
+    case 'health': {
+      const box = $('#impHealth');
+      if (box) box.textContent = '正在检查三家接口…';
+      try {
+        const d = await getJson('/api/providers/health');
+        const u = d.data || {};
+        if (box) box.innerHTML = (u.providers || []).map((p) =>
+          `<div class="imp-ok">${p.ok ? '✓' : '!'} ${esc(p.label)} · ${p.tracks} 首 ${esc(p.error || '')}</div>`).join('')
+          + `<div class="imp-ver">规则 ${esc(u.rules_version || '?')} · ${u.ok ? '全部正常' : '有通道降级（不影响本地文件导入）'}</div>`;
+      } catch (err) { if (box) box.textContent = '检查失败：' + err.message; }
+      break;
+    }
+    case 'update': {
+      try {
+        const d = await getJson('/api/update/check');
+        const u = d.data || {};
+        const rm = u.remote;
+        toast(rm && rm.has_update ? '发现新规则版本，请更新客户端或替换 providers/ 规则文件'
+          : (rm === 'not_configured' ? `已是本地最新 · 规则 ${u.rules_version}` : '远端版本检查暂不可用'));
+      } catch (err) { toast(err.message || '检查失败', 'err'); }
+      break;
+    }
+    default: break;
+  }
+}
+
+function onImportChange(e) {
+  const el = e.target.closest('[data-imp-field]');
+  if (!el) return;
+  const f = el.dataset.impField;
+  if (f === 'file') {
+    const file = el.files && el.files[0];
+    if (!file) return;
+    file.arrayBuffer().then((buf) => {
+      let text = new TextDecoder('utf-8').decode(buf);
+      // 酷狗旧版 .kgl 常见 GBK / windows-1252，UTF-8 解码会出现替换字符，换编码重读
+      if ((text.match(/\uFFFD/g) || []).length > 0) {
+        try { text = new TextDecoder('gb18030').decode(buf); } catch (e2) { /* 保留 UTF-8 结果 */ }
+      }
+      state.imp.filename = file.name;
+      state.imp.fileText = text;
+      const ta = $('#impText'); if (ta) ta.value = text;
+      const fn = $('#impFileName');
+      if (fn) fn.textContent = `${file.name} · ${text.length} 字`;
+    }).catch(() => toast('文件读取失败', 'err'));
+    return;
+  }
+  if (f === 'enhance') { state.imp.enhance.enabled = !!el.checked; return; }
+  if (f === 'token') { state.imp.enhance.token = String(el.value || '').trim(); return; }
+  if (f === 'userid') { state.imp.enhance.userid = String(el.value || '').trim(); return; }
+  if (f === 'mq') {
+    state.imp.manual[el.dataset.i] = Object.assign({}, state.imp.manual[el.dataset.i], { q: el.value });
+    return;
+  }
+  if (f === 'pick') {
+    const x = impFind(el.dataset.tier, el.dataset.i);
+    if (!x) return;
+    // L3 没有选定曲目时不许勾上，避免「勾了却导不进去」的假状态
+    if (el.checked && el.dataset.tier === 'l3' && !x.item) {
+      el.checked = false;
+      toast('先手动查找并选中一首歌', 'err');
+      return;
+    }
+    x.chosen = !!el.checked;
+    if (x.chosen && !x.item && (x.candidates || []).length) x.item = x.candidates[x.selected || 0];
+    renderImport();
+  }
 }
 
 /* ------------------------------------------------------------------ 播放 */
@@ -2662,6 +3057,7 @@ async function refreshCache() {
 function openPanel(tab) {
   $('#npDrawer').hidden = true;
   $('#settingsDrawer').hidden = true;
+  $('#importDrawer').hidden = true;
   $('#panelDrawer').hidden = false;
   setPanelTab(tab || state.panelTab || 'queue');
 }
@@ -2675,6 +3071,7 @@ function setPanelTab(tab) {
 function openSettings() {
   $('#npDrawer').hidden = true;
   $('#panelDrawer').hidden = true;
+  $('#importDrawer').hidden = true;
   $('#settingsBody').innerHTML = viewSettings();
   $('#settingsDrawer').hidden = false;
   fillSettings();
@@ -3047,6 +3444,9 @@ function bind() {
   $('#plArt').addEventListener('click', () => openNp('lyric'));
   $('#settingsBtn').addEventListener('click', openSettings);
   $('#backBtn').addEventListener('click', goBack);
+  $('#plImport').addEventListener('click', openImport);
+  $('#importBody').addEventListener('click', onImportClick);
+  $('#importBody').addEventListener('change', onImportChange);
   $('#plAdd').addEventListener('click', () => {
     const name = prompt('新歌单名称');
     if (name == null) return;
