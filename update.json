@@ -7,13 +7,13 @@
       "name": "Windows 便携版（免安装）",
       "url": "https://github.com/elysiayunchen/elysium-player/releases/latest/download/Elysium.exe",
       "mirrors": [],
-      "sha256": "9121612283aaf5c252644d05a923e53c4ba82def5c16429fbfb3a458ce3c4b2e"
+      "sha256": "419048dcf68fad30a877f8b6b7c7e447841f85570455522a00ac1bfa21b6a55a"
     },
     {
       "name": "Windows 安装版（按用户安装，免管理员权限）",
       "url": "https://github.com/elysiayunchen/elysium-player/releases/latest/download/Elysium-setup.exe",
       "mirrors": [],
-      "sha256": "487da84c8c8b2d7ac3bf6dc5b9cac7b909b710b147dbb3bae280376bf0a78e53"
+      "sha256": "9326c8e281477a5e30e520585e9d3ea9e58956c3d5f70de4f455511fd99dcd42"
     }
   ],
   "_note": "发布新版本时随 release commit 一起更新本文件：version / notes / 各资产直链、国内可达的 mirrors（网盘、自建 OSS、ghproxy 前缀等）、sha256。GitHub 打不开的用户靠 jsDelivr 读这份文件 + mirrors 直链拿更新，客户端检查链见 main.py update_tracker。"

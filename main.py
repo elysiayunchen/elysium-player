@@ -2717,11 +2717,15 @@ def _check_remote(prefer_github=False, timeout=8):
 
     update.json（jsDelivr）形状：{version, notes, page, assets}；
     GitHub API 形状：{tag_name, name, html_url}。分头识别、归一成同一种返回。
+    GitHub API 先通时不立即返回：版本号以它为准（权威、无 CDN 缓存），
+    但再扫一遍 jsDelivr 把 assets（直链 / mirrors / sha256）补上——
+    API 本身不带这些，少了它们应用内下载就没有资产行。
     """
     api = "https://api.github.com/repos/" + GITHUB_REPO + "/releases/latest"
     jsd = ["https://" + h + "/gh/" + GITHUB_REPO + "@main/update.json"
            for h in JSDELIVR_HOSTS]
     chain = ([api] + jsd) if prefer_github else (jsd + [api])
+    result = None
     last_err = None
     for url in chain:
         try:
@@ -2731,15 +2735,26 @@ def _check_remote(prefer_github=False, timeout=8):
             continue
         if isinstance(j, dict) and j.get("tag_name") is not None:
             tag = str(j.get("tag_name") or "").strip()
-            return {"latest": tag, "name": str(j.get("name") or "")[:120],
-                    "url": str(j.get("html_url") or "") or RELEASE_URL,
-                    "assets": [], "source": "github"}
+            result = {"latest": tag, "name": str(j.get("name") or "")[:120],
+                      "url": str(j.get("html_url") or "") or RELEASE_URL,
+                      "assets": [], "source": "github"}
+            break                                           # 版本已定，出去补资产
         if isinstance(j, dict) and str(j.get("version") or "").strip():
             return {"latest": str(j["version"]).strip(),
                     "name": str(j.get("notes") or "")[:120],
                     "url": str(j.get("page") or "") or RELEASE_URL,
                     "assets": _norm_assets(j.get("assets")), "source": "manifest"}
-    raise last_err or RuntimeError("所有更新源都不可达")
+    if result is None:
+        raise last_err or RuntimeError("所有更新源都不可达")
+    for url in jsd:                                         # GitHub 先通：补资产清单
+        try:
+            j = _fetch_json(url, timeout)
+        except Exception:                                   # noqa: BLE001
+            continue
+        if isinstance(j, dict) and str(j.get("version") or "").strip():
+            result["assets"] = _norm_assets(j.get("assets"))
+            break
+    return result
 
 
 def update_check_now(prefer_github=False):
