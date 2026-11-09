@@ -70,6 +70,7 @@ const ARTIST_ALBUM_PAGE = 30;
 
 const state = {
   settings: {},
+  version: '',                     // 后端 /api/store 带来的 _version，设置页展示用
   favs: [],
   playlists: [],                    // 用户自建歌单 [{id,name,items:[...]}]
   recent: [],
@@ -134,7 +135,29 @@ function toast(msg, kind = '') {
     el.style.opacity = '0';
     el.style.transform = 'translateY(6px)';
     setTimeout(() => el.remove(), 260);
-  }, kind === 'err' ? 3600 : 2400);
+  }, 2600);
+}
+
+/* 主题化输入浮层，替代原生 prompt()（原生对话框不受主题控制、与整体风格断裂）。
+   返回 Promise<string|null>：确定给字符串（未trim，调用方自行处理），取消/关层给 null。 */
+let _askResolve = null;
+function askText(title, value = '') {
+  return new Promise((resolve) => {
+    if (_askResolve) _askResolve(null);      // 上一次没答完的按取消处理
+    _askResolve = resolve;
+    $('#askTitle').textContent = title;
+    const inp = $('#askInput');
+    inp.value = value || '';
+    $('#askLayer').hidden = false;
+    inp.focus();
+    inp.select();
+  });
+}
+function _askDone(val) {
+  const r = _askResolve;
+  _askResolve = null;
+  $('#askLayer').hidden = true;
+  if (r) r(val);
 }
 
 /* ------------------------------------------------------------------ 主题 */
@@ -245,13 +268,20 @@ function paintProbeCells(items) {
   });
 }
 
+/* 探测结果条目带 at 时间戳：失效/超时的结果 10 分钟后允许重测，
+   不然网络恢复后那一列永远停在「失效」。 */
+const PROBE_TTL = 10 * 60 * 1000;
+
 /* 渲染完一批就并发探一遍，回来只改对应格子，不重排。
    分片串行：前一片回来先回填，尾部的条目不会永远停在骨架屏。 */
 async function probeRows(items) {
   const all = (items || []).filter((it) => it && it.id && it.platform);
   if (!all.length) return;
   const seq = ++_probeSeq;
-  const list = all.filter((it) => !PROBE.has(pk(it)));
+  const list = all.filter((it) => {
+    const hit = PROBE.get(pk(it));
+    return !hit || Date.now() - (hit.at || 0) > PROBE_TTL;
+  });
   if (!list.length) return;                       // 全部已有实测结果，不重复探测
   for (let off = 0; off < list.length; off += PROBE_CHUNK) {
     if (seq !== _probeSeq) return;
@@ -263,14 +293,15 @@ async function probeRows(items) {
     try {
       const res = await post('/api/probe', { items: payload, limit: PROBE_CHUNK });
       if (seq !== _probeSeq) return;
-      Object.entries(res.data || {}).forEach(([k, v]) => PROBE.set(k, v));
+      Object.entries(res.data || {}).forEach(([k, v]) =>
+        PROBE.set(k, Object.assign({ at: Date.now() }, v)));
       chunk.forEach((it) => {
         const k = pk(it);
-        if (!PROBE.has(k)) PROBE.set(k, { unresolved: true, reason: '探测未返回结果' });
+        if (!PROBE.has(k)) PROBE.set(k, { at: Date.now(), unresolved: true, reason: '探测未返回结果' });
       });
     } catch (e) {
       if (seq !== _probeSeq) return;
-      chunk.forEach((it) => PROBE.set(pk(it), { unresolved: true, reason: '探测请求失败' }));
+      chunk.forEach((it) => PROBE.set(pk(it), { at: Date.now(), unresolved: true, reason: '探测请求失败' }));
     }
     paintProbeCells(chunk);
   }
@@ -308,6 +339,26 @@ function playCandidates(item) {
 }
 
 const songKey = (it) => `${it.platform}_${it.id}`;
+
+/* 歌单条目落盘时只存了展示字段（无 minfo/time/sign），直接播/下会报
+   「没有可用音质」。回源取一次完整条目补全，再写回原数组，下次不必重取。 */
+async function ensureMinfo(item) {
+  if (!item || !item.platform || !item.id) return item;
+  if ((item.minfo || []).length) return item;
+  try {
+    const d = await rpc('song', { platform: item.platform, id: item.id });
+    const full = ((d && d.list) || [])[0];
+    if (full && (full.minfo || []).length) {
+      const merged = Object.assign({}, item, full, { name: item.name || full.name });
+      if (Array.isArray(state.list)) {
+        const i = state.list.indexOf(item);
+        if (i >= 0) state.list[i] = merged;
+      }
+      return merged;
+    }
+  } catch (e) { /* 回源失败按原样返回，播放侧再报错 */ }
+  return item;
+}
 
 async function fetchUrl(item, q) {
   const key = `${item.platform}:${item.id}:${q.format}:${q.bitrate}`;
@@ -910,8 +961,9 @@ const QUEUE_SRC = {
 };
 
 async function playAt(list, index, opts = {}) {
-  const item = list[index];
+  let item = list[index];
   if (!item) return;
+  item = await ensureMinfo(item);       // 歌单条目缺 minfo：回源补全再播
   const cands = playCandidates(item);
   if (!cands.length) { toast('这首歌没有可用音质', 'err'); return; }
   state.resumePos = 0;             // 换歌/重播都用新的位置，旧的待续位置作废
@@ -1953,7 +2005,7 @@ function viewArtist() {
         ${plats.map((p) => srcOf({ platform: p }).label).join(' · ')}
         ${state.artistFilling ? '<span class="sep"></span><span class="mono" style="opacity:.6">正在补齐全部曲目…</span>' : ''}
       </div>
-      <p class="rule-note">归类口径：仅以上游记名歌手为准，仅作词 / 作曲 / 编曲参与的不归入${d.artist_id ? ` · 记名 ID <span class="mono">${esc(d.artist_id)}</span>` : ''}${d.reason ? ` · ${esc(d.reason)}` : ''}</p>
+      <p class="rule-note">归类口径：仅以上游记名歌手为准，仅作词 / 作曲 / 编曲参与的不归入${d.reason ? ` · ${esc(d.reason)}` : ''}</p>
       <div class="hero-acts">
         <button class="btn primary" data-act="artist-play-all">${icon('play')}播放热门</button>
         <button class="btn${fav ? ' on' : ''}" data-act="fav-artist">${icon(fav ? 'heart' : 'heart-o')}${fav ? '已收藏' : '收藏歌手'}</button>
@@ -2294,8 +2346,9 @@ function renderPlaying() {
 }
 
 function syncNav() {
-  const name = state.route.name === 'album' || state.route.name === 'artist' ? 'search' : state.route.name;
-  $$('#snav .snav-i').forEach((b) => b.classList.toggle('on', b.dataset.nav === name));
+  // 高亮只跟主分区（首页/搜索/收藏库/设置）；歌手 / 专辑 / 歌单等详情页
+  // 不属于任何分区，全部熄灭 —— 从侧栏进来高亮残留在「搜索」会误导。
+  $$('#snav .snav-i').forEach((b) => b.classList.toggle('on', b.dataset.nav === state.route.name));
   $('#backBtn').disabled = !state.stack.length;
 }
 
@@ -2716,7 +2769,6 @@ function openQualityMenu(anchor, items) {
   if (!minfo.length) { toast('这首没有可用音质', 'err'); return; }
   const opts = minfo.map((m) => `<button data-act="pick-q" data-q="${m.format}:${m.bitrate}">
       <span>${m.format === 'flac' ? '无损 FLAC' : 'MP3 ' + m.bitrate + 'k'}</span>
-      <span class="mono">${esc(m.size || '')}</span>
     </button>`).join('');
   menu.innerHTML = `<div class="qm-t">选择下载音质${items.length > 1 ? ` · ${items.length} 首` : ''}</div>${opts}`;
   positionMenu(menu, anchor);
@@ -2738,7 +2790,6 @@ function openPlayQualityMenu(anchor) {
     const label = q.format === 'flac' ? '无损 FLAC' : 'MP3 ' + q.bitrate + 'k';
     return `<button data-act="pick-q" data-q="${q.format}:${q.bitrate}"${on ? ' class="on"' : ''}>
       <span>${label}${on ? ' · 当前' : ''}</span>
-      <span class="mono">${esc(q.size || '')}</span>
     </button>`;
   }).join('');
   menu.innerHTML = `<div class="qm-t">播放音质 · ${esc(it.name || '')}</div>${opts}`;
@@ -2839,18 +2890,24 @@ function openPlaylistPicker(target) {
   positionCtxMenu(m._px || 40, m._py || 40);
 }
 
-/* 收集目标对应的曲目列表（单曲本身 / 专辑曲目 / 歌手曲目） */
+/* 收集目标对应的曲目列表（单曲本身 / 专辑曲目 / 歌手曲目）。
+   直接 rpc 取数：复用 openArtist/openAlbum 会把当前页面导航走 ——
+   用户右键「加入歌单」后突然发现页面跳了，这是导航副作用不是他要的。 */
 async function collectForAdd(target) {
   if (target.kind === 'song') {
     return target.item ? [target.item] : [];
   }
   if (target.kind === 'album') {
-    await openAlbum(target.id, target.platform);
-    return (state.album && state.album.list) || [];
+    const d = await rpc('album', { platform: target.platform || state.platform, id: target.id });
+    return (d && d.list) || [];
   }
   if (target.kind === 'artist') {
-    await openArtist(target.name, target.platform, target.artist_id);
-    return (state.artist && state.artist.list) || [];
+    const d = await rpc('artist', {
+      platform: target.platform || state.platform,
+      name: target.name,
+      artist_id: target.artist_id || '',
+    });
+    return (d && d.list) || [];
   }
   return [];
 }
@@ -3004,7 +3061,7 @@ function viewSettings() {
     </div>
   </div>
 
-  <div class="set-ver">ELYSIUM v1.3.0 · 本机运行</div>`;
+  <div class="set-ver">ELYSIUM ${state.version ? 'v' + esc(state.version) : ''} · 本机运行</div>`;
 }
 
 function fillSettings() {
@@ -3443,12 +3500,30 @@ function bind() {
   $('#panelBtn2').addEventListener('click', () => openNp('queue'));
   $('#plArt').addEventListener('click', () => openNp('lyric'));
   $('#settingsBtn').addEventListener('click', openSettings);
+  /* 抽屉遮罩：任一抽屉打开即压暗主区；点遮罩全部关闭。
+     用 MutationObserver 盯 hidden 属性，覆盖所有开关路径（互斥切换 / data-close / Escape），免得逐点插桩。 */
+  const _drawers = ['#panelDrawer', '#npDrawer', '#settingsDrawer', '#importDrawer'].map((s) => $(s));
+  const syncDrawerMask = () => { $('#drawerMask').hidden = !_drawers.some((d) => !d.hidden); };
+  const drawerObs = new MutationObserver(syncDrawerMask);
+  _drawers.forEach((d) => drawerObs.observe(d, { attributes: true, attributeFilter: ['hidden'] }));
+  $('#drawerMask').addEventListener('click', () => _drawers.forEach((d) => { d.hidden = true; }));
+
+  /* 输入浮层（askText） */
+  $('#askOk').addEventListener('click', () => _askDone($('#askInput').value));
+  $('#askCancel').addEventListener('click', () => _askDone(null));
+  $('#askLayer').addEventListener('click', (e) => { if (e.target === e.currentTarget) _askDone(null); });
+  $('#askInput').addEventListener('keydown', (e) => {
+    e.stopPropagation();                       // 别让全局快捷键（Esc 收起抽屉等）抢走
+    if (e.key === 'Enter') { e.preventDefault(); _askDone($('#askInput').value); }
+    else if (e.key === 'Escape') { e.preventDefault(); _askDone(null); }
+  });
+
   $('#backBtn').addEventListener('click', goBack);
   $('#plImport').addEventListener('click', openImport);
   $('#importBody').addEventListener('click', onImportClick);
   $('#importBody').addEventListener('change', onImportChange);
-  $('#plAdd').addEventListener('click', () => {
-    const name = prompt('新歌单名称');
+  $('#plAdd').addEventListener('click', async () => {
+    const name = await askText('新歌单名称');
     if (name == null) return;
     const n = String(name).trim();
     if (!n) { toast('名称不能为空', 'err'); return; }
@@ -3572,6 +3647,13 @@ function bind() {
     updateLyricTick();
     if (!a.paused) {
       const d = a.duration || 0;
+      // 重听检测：计过数后又回到前 20% 段（单曲循环 / 拖回开头 / 重播），
+      // 清掉计数标志，这次听完再计一次 —— 否则同一会话内永远只计 1 次，
+      // 「当天听完 2 次进今日缓存」在循环播放下凑不齐。
+      const k = state.playing ? songKey(state.playing) : '';
+      if (lastCountedKey && lastCountedKey === k && d && a.currentTime < d * 0.2) {
+        lastCountedKey = '';
+      }
       if (d && a.currentTime / d >= 0.98 && !lastCountedKey) reportPlay(true);
     }
   });
@@ -3877,7 +3959,7 @@ document.addEventListener('click', async (e) => {
     case 'pl-pick-new': {
       const t = _ctxTarget;
       closeCtxMenu();
-      const name = prompt('新歌单名称');
+      const name = await askText('新歌单名称');
       if (name == null) return;
       const n = String(name).trim();
       if (!n) { toast('名称不能为空', 'err'); return; }
@@ -3894,7 +3976,7 @@ document.addEventListener('click', async (e) => {
     case 'pl-rename': {
       const pl = plById(el.dataset.id);
       if (!pl) break;
-      const name = prompt('歌单名称', pl.name);
+      const name = await askText('歌单名称', pl.name);
       if (name == null) break;
       const n = String(name).trim();
       if (!n) { toast('名称不能为空', 'err'); break; }
@@ -3986,13 +4068,16 @@ document.addEventListener('click', async (e) => {
     case 'dl': {
       const it = state.list[idx];
       if (!it) break;
-      openQualityMenu(el, [it]);
+      openQualityMenu(el, [await ensureMinfo(it)]);
       break;
     }
     case 'dl-all': {
       const list = state.list;
       if (!list.length) break;
-      openQualityMenu(el, list);
+      // 菜单选项由首条的 minfo 生成；歌单条目没有 minfo，回源补一条，
+      // 其余条目交给后端的合成降级档兜底
+      const first = await ensureMinfo(list[0]);
+      openQualityMenu(el, [first].concat(list.slice(1)));
       break;
     }
     case 'dl-artist': {
@@ -4070,7 +4155,7 @@ document.addEventListener('click', async (e) => {
         if (window.pywebview && window.pywebview.api && window.pywebview.api.choose_dir) {
           path = await window.pywebview.api.choose_dir();
         } else {
-          path = prompt('输入下载目录的完整路径', state.settings.download_dir || '') || '';
+          path = await askText('输入下载目录的完整路径', state.settings.download_dir || '') || '';
           if (path) {
             state.settings.download_dir = path;
             await post('/api/store', { op: 'settings', payload: { download_dir: path } });
@@ -4122,6 +4207,7 @@ async function refreshStore() {
   try {
     const d = await getJson('/api/store');
     state.settings = d.settings || {};
+    state.version = d._version || '';    // 单一来源：别在前端再写死一份版本号
     state.favs = d.favorites || [];
     state.playlists = d.playlists || [];
     state.recent = d.recent || [];

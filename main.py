@@ -199,10 +199,15 @@ class Store:
                 json.dump(self.data, f, ensure_ascii=False, indent=2)
             os.replace(tmp, self.path)
 
+    @staticmethod
+    def _snapshot(v):
+        """深拷贝快照：给 HTTP 层的返回值用，见 apply 尾注。"""
+        return json.loads(json.dumps(v))
+
     def apply(self, op, payload):
         with self.lock:
             if op == "load":
-                return self.data
+                return self._snapshot(self.data)
             if op == "settings":
                 self.data["settings"].update(payload or {})
             elif op == "history_add":
@@ -229,7 +234,7 @@ class Store:
                     favs.insert(0, item)
                     active = True
                 self.save()
-                return {"favorites": self.data["favorites"], "active": active}
+                return {"favorites": self._snapshot(self.data["favorites"]), "active": active}
             elif op == "fav_remove":
                 key = fav_key(payload or {})
                 self.data["favorites"] = [f for f in self.data["favorites"]
@@ -292,7 +297,10 @@ class Store:
             elif op == "playlist_reorder":
                 self._pl_reorder(payload or {})
             self.save()
-            return self.data
+            # 返回快照而不是活引用：序列化在锁外进行，交出活引用会和
+            # /api/play 之类的并发写撞「dictionary changed size」；
+            # /api/store GET 还会往返回值里塞 _data_path，活引用等于污染本体并落盘。
+            return self._snapshot(self.data)
 
     # ------------------------------------------------------------ 用户歌单
     # 与 favorites 完全独立：加歌到歌单不写 favorites，反之亦然。
@@ -349,13 +357,15 @@ class Store:
         if srcs is None:
             srcs = [payload.get("item")] if payload.get("item") else []
         added = 0
+        existing = {pl_item_key(x) for x in items}      # 大批量导入时别 O(n·m) 逐条扫
         for src in srcs:
             it = pl_item_of(src)
             if not it["platform"] or not it["id"]:
                 continue
             key = pl_item_key(it)
-            if any(pl_item_key(x) == key for x in items):
+            if key in existing:
                 continue                       # 已在歌单里，不重复加
+            existing.add(key)
             it["added_at"] = int(time.time())
             items.append(it)
             added += 1
@@ -882,6 +892,10 @@ def artist_page(params):
             "reason": " · ".join(reasons)}
     with _PAGE_LOCK:
         _ARTIST_CACHE[cache_key] = (now, data)
+        # 每项最多装 ARTIST_MAX 首歌 + 专辑卡，是所有缓存里最重的：不裁会一直涨。
+        if len(_ARTIST_CACHE) > 24:
+            for k in sorted(_ARTIST_CACHE, key=lambda k: _ARTIST_CACHE[k][0])[:12]:
+                _ARTIST_CACHE.pop(k, None)
     return data
 
 
@@ -1190,7 +1204,9 @@ def _style_weight():
 # 全风格卡片的基础缓存：卡片元数据 + 每张卡的完整候选池（不含轮次窗口）。
 # 「换一批」不重建这份东西，只从池子里重新切窗口 —— 所以换批是纯切片，
 # 既不碰上游，也不重复跑去重/记名校验。
-_STYLE_BASE = {"at": 0, "data": None, "key": ""}
+# empty_at：上游整体挂掉时记个时间，60 秒内换批不再重打（空结果不进 data 缓存，
+# 否则上游恢复后的 30 分钟里用户拿到的还是空卡）。
+_STYLE_BASE = {"at": 0, "data": None, "key": "", "empty_at": 0.0}
 _STYLE_ROUND = 0
 # 上游「按歌手搜一页」的结果缓存：seed -> (取回时间, 曲目列表)
 _STYLE_SEEDS = {}
@@ -1258,57 +1274,62 @@ def style_playlists(limit=8, per=6, round_=0):
     if b["data"] is not None and b["key"] == key and now - b["at"] < 1800:
         base = b["data"]
     if base is None:
-        w = _style_weight()
-        seed = _day_seed()
-        gs = genre_list()["genres"]
+        if now - _STYLE_BASE.get("empty_at", 0.0) < 60:
+            base = []                    # 刚刚整体取空过：60 秒内不重打上游
+        else:
+            w = _style_weight()
+            seed = _day_seed()
+            gs = genre_list()["genres"]
 
-        # 轮换：用当日种子给每个风格算一个伪随机位次，
-        # 权重高的整体往前挪一点，而不是硬按权重排死。
-        scored = []
-        for i, g in enumerate(gs):
-            jitter = int(hashlib.md5(("%s|%s" % (seed, g["id"])).encode()).hexdigest()[:6], 16)
-            scored.append((g, w.get(g["id"], 0), jitter))
-        scored.sort(key=lambda x: (-x[1], x[2]))
+            # 轮换：用当日种子给每个风格算一个伪随机位次，
+            # 权重高的整体往前挪一点，而不是硬按权重排死。
+            scored = []
+            for i, g in enumerate(gs):
+                jitter = int(hashlib.md5(("%s|%s" % (seed, g["id"])).encode()).hexdigest()[:6], 16)
+                scored.append((g, w.get(g["id"], 0), jitter))
+            scored.sort(key=lambda x: (-x[1], x[2]))
 
-        hot = [x for x in scored if x[1] > 0]
-        cold = [x for x in scored if x[1] <= 0]
-        order = hot + cold if hot else cold
+            hot = [x for x in scored if x[1] > 0]
+            cold = [x for x in scored if x[1] <= 0]
+            order = hot + cold if hot else cold
 
-        # 并发检索各风格的曲目：串行 8 张卡要 30s 以上。
-        # 这里把所有 (风格, 歌手) 组合摊平后一次性并发取回，
-        # 再按风格归组 —— 8 风格 × 3 seed = 24 个请求一起打，而不是 8×3 轮串行。
-        import concurrent.futures as _cf
-        head = order[:limit]
+            # 并发检索各风格的曲目：串行 8 张卡要 30s 以上。
+            # 这里把所有 (风格, 歌手) 组合摊平后一次性并发取回，
+            # 再按风格归组 —— 8 风格 × 3 seed = 24 个请求一起打，而不是 8×3 轮串行。
+            import concurrent.futures as _cf
+            head = order[:limit]
 
-        jobs = []                       # (entry, seed)
-        for entry in head:
-            for s in _genre_seeds(entry[0]):
-                jobs.append((entry, s))
+            jobs = []                       # (entry, seed)
+            for entry in head:
+                for s in _genre_seeds(entry[0]):
+                    jobs.append((entry, s))
 
-        fetched = {}
+            fetched = {}
 
-        def grab(job):
-            entry, seed = job
-            return job, _seed_search(seed)
+            def grab(job):
+                entry, seed = job
+                return job, _seed_search(seed)
 
-        if jobs:
-            with _cf.ThreadPoolExecutor(max_workers=12) as ex:
-                for job, lst in ex.map(grab, jobs):
-                    fetched.setdefault(job[0][0]["id"], []).append((job[1], lst))
+            if jobs:
+                with _cf.ThreadPoolExecutor(max_workers=12) as ex:
+                    for job, lst in ex.map(grab, jobs):
+                        fetched.setdefault(job[0][0]["id"], []).append((job[1], lst))
 
-        base = []
-        for entry in head:
-            g, weight, jitter = entry
-            # window=False：这里只攒候选池，切窗口留给下面统一做。
-            pool = _assemble_genre(g, jitter, fetched.get(g["id"], []), per, 0,
-                                   window=False)
-            if not pool:
-                continue
-            base.append({"genre": g["id"], "name": g["name"], "en": g["en"],
-                         "group": g["group"], "weight": weight,
-                         "jitter": jitter, "pool": pool})
-        if base:
-            _STYLE_BASE.update(at=now, data=base, key=key)
+            base = []
+            for entry in head:
+                g, weight, jitter = entry
+                # window=False：这里只攒候选池，切窗口留给下面统一做。
+                pool = _assemble_genre(g, jitter, fetched.get(g["id"], []), per, 0,
+                                       window=False)
+                if not pool:
+                    continue
+                base.append({"genre": g["id"], "name": g["name"], "en": g["en"],
+                             "group": g["group"], "weight": weight,
+                             "jitter": jitter, "pool": pool})
+            if base:
+                _STYLE_BASE.update(at=now, data=base, key=key)
+            else:
+                _STYLE_BASE["empty_at"] = now
 
     # 换批只走到这里：池子已经在了，按轮次切一段即可。
     cards = []
@@ -1504,10 +1525,28 @@ def _ibr(m):
 
 
 def quality_candidates(item, want):
-    """返回按优先级排列的候选音质列表；目标缺失时依次降级。"""
+    """返回按优先级排列的候选音质列表；目标缺失时依次降级。
+
+    want 兼容两种写法：设置里的「320」和音质菜单传来的「mp3:320」/「flac:999」。
+    之前菜单的 format:bitrate 写法不匹配任何分支，落进 else 变成 FLAC 优先 ——
+    用户显式选 MP3 却下回无损，体积差 3~5 倍。
+    """
+    want = str(want or "").strip().lower()
+    if ":" in want:                      # 前端音质菜单的 format:bitrate 写法
+        fmt, _, br = want.partition(":")
+        if fmt in ("mp3", "flac"):
+            want = br
     minfo = item.get("minfo") or []
     if not minfo:
-        return []
+        # 歌单条目落盘时裁掉了 minfo（pl_item_of 只留展示字段）：按标准档位给一条
+        # 降级顺序兜底，getUrl 解析不出的档位会在 _resolve 里自动落到下一个。
+        synth = [{"format": "flac", "bitrate": "2000"},
+                 {"format": "mp3", "bitrate": "320"},
+                 {"format": "mp3", "bitrate": "128"}]
+        if want in ("320", "128"):
+            n = int(want)
+            synth.sort(key=lambda m: (m["format"] != "mp3", abs(int(m["bitrate"]) - n)))
+        return synth
     flacs = sorted((m for m in minfo if m.get("format") == "flac"), key=_ibr, reverse=True)
     mp3s = sorted((m for m in minfo if m.get("format") == "mp3"), key=_ibr, reverse=True)
 
@@ -1537,22 +1576,16 @@ def pick_quality(item, want):
 
 
 def sniff_ext(url, fallback="bin"):
-    """接口标的 format 常常不准（128k 给 m4a），靠 magic 定后缀。"""
+    """接口标的 format 常常不准（128k 给 m4a），靠 magic 定后缀。
+    判定统一走 sniff_container，别维护两份魔数表。"""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": UA, "Range": "bytes=0-15"})
         with urllib.request.urlopen(req, timeout=20) as r:
             head = r.read(16)
     except Exception:
         return fallback
-    if head[:4] == b"fLaC":
-        return "flac"
-    if head[:3] == b"ID3" or (head[:1] and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0):
-        return "mp3"
-    if head[4:8] == b"ftyp":
-        return "m4a" if head[8:12] in (b"M4A ", b"mp42", b"isom") else "aac"
-    if head[:3] == b"Ogg":
-        return "ogg"
-    return fallback
+    fmt, _ = sniff_container(head)
+    return fmt if fmt and fmt != "bin" else fallback
 
 
 def safe_name(s):
@@ -1635,6 +1668,10 @@ class MediaCache:
         self.lock = threading.RLock()
         self.warming = set()
         self._day = None
+        # 缓存维护节流：evict/enforce 都要全量扫盘（读 index / walk 两棵树），
+        # 之前每次听完、每首歌下完都跑一遍，2GB 小文件在 HDD 上是几千次 stat。
+        self._last_evict = 0.0
+        self._last_enforce = 0.0
         self._purge_legacy()
         self.roll()
         self.evict_long()
@@ -1681,6 +1718,11 @@ class MediaCache:
     @staticmethod
     def safe_key(raw):
         return re.sub(r"[^A-Za-z0-9_-]", "_", str(raw))[:120] or "x"
+
+    @staticmethod
+    def key_of(url):
+        """没有 play_key 时（/api/media 直接给 url）的兜底身份：直链的散列。"""
+        return hashlib.md5(str(url).encode("utf-8")).hexdigest()
 
     @staticmethod
     def _ext(ext):
@@ -1744,7 +1786,11 @@ class MediaCache:
                 self.save_index(idx)
 
     def evict_long(self, days=3):
-        """长期缓存：超过 N 天没听过就删掉。"""
+        """长期缓存：超过 N 天没听过就删掉。每次听完都会被调，60 秒内不重复扫。"""
+        now = time.time()
+        if now - self._last_evict < 60:
+            return 0
+        self._last_evict = now
         cutoff = time.time() - days * 86400
         removed = 0
         with self.lock:
@@ -1785,6 +1831,11 @@ class MediaCache:
                 "long_size": l_size, "long_count": l_count}
 
     def enforce(self, limit_mb):
+        """缓存体积超限时按最久未用淘汰。每首歌下完都会被调，120 秒内不重复扫。"""
+        now = time.time()
+        if now - self._last_enforce < 120:
+            return
+        self._last_enforce = now
         limit = max(64, int(limit_mb or 2048)) * 1024 * 1024
         st = self.stat()
         if st["size"] <= limit:
@@ -1952,6 +2003,8 @@ def sniff_container(head):
 
 _PROBE_CACHE = {}
 _PROBE_LOCK = threading.Lock()
+# 探测专用常驻池：每批新建/销毁 8 个线程纯属浪费，线程留着还能白捡 HTTP keep-alive
+_PROBE_POOL = _cf.ThreadPoolExecutor(max_workers=8, thread_name_prefix="probe")
 
 
 def probe_one(platform, sid, fmt, br, sign_time=None, sign=None, duration=0, name=None):
@@ -2040,7 +2093,7 @@ def probe_batch(items, limit=64, workers=8, deadline=20.0):
         res["key"] = "%s|%s|%s|%s" % (plat, sid, fmt, br)
         return (plat, str(sid), res)
 
-    ex = _cf.ThreadPoolExecutor(max_workers=max(1, min(8, workers)))
+    ex = _PROBE_POOL
     futs = {ex.submit(run, t): (t[1], str(t[2])) for t in todo}
     try:
         for fut in _cf.as_completed(futs, timeout=deadline):
@@ -2057,8 +2110,6 @@ def probe_batch(items, limit=64, workers=8, deadline=20.0):
                     "valid": False, "unresolved": True, "reason": "探测超时，可稍后重试",
                     "fmt": "", "label": "", "size": 0, "kbps": 0, "container": "",
                     "declared": "", "mismatch": False}
-    finally:
-        ex.shutdown(wait=False)
     # 没进结果的（请求异常 / 被取消）也补一个待测态，别留空格子
     for t in todo:
         k = "%s:%s" % (t[1], str(t[2]))
@@ -2167,6 +2218,10 @@ def record_play(payload):
                 plays[key] = legacy
         rec = _migrate_play_record(plays.get(key), day)
         days = rec["days"]
+        # 跨天重置：今天还没听过却挂着「已进今日缓存」标志，说明是之前哪天留下的 ——
+        # 今日缓存文件早随 roll() 清掉了，标志不重置的话这首歌当天永远不会再进缓存。
+        if rec.get("cached_today") and not days.get(day):
+            rec["cached_today"] = False
         if completed:
             days[day] = int(days.get(day) or 0) + 1
             rec["last_at"] = int(time.time())
@@ -2241,7 +2296,9 @@ def write_tags(path, item, lyric=None, cover=None):
             if cover:
                 pic = Picture()
                 pic.type = 3
-                pic.mime = "image/jpeg"
+                # 封面不一定是 jpeg：上游经常直接给 PNG，mime 写错部分播放器不显示
+                pic.mime = ("image/png" if cover[:8] == b"\x89PNG\r\n\x1a\n"
+                            else "image/jpeg")
                 pic.data = cover
                 f.add_picture(pic)
             f.save()
@@ -2281,7 +2338,9 @@ def write_tags(path, item, lyric=None, cover=None):
             if lyric:
                 m["\xa9lyr"] = [lyric]
             if cover:
-                m["covr"] = [MP4Cover(cover, imageformat=MP4Cover.FORMAT_JPEG)]
+                fmt = (MP4Cover.FORMAT_PNG if cover[:8] == b"\x89PNG\r\n\x1a\n"
+                       else MP4Cover.FORMAT_JPEG)
+                m["covr"] = [MP4Cover(cover, imageformat=fmt)]
             m.save()
         return True
     except Exception:
@@ -2299,6 +2358,9 @@ class DownloadManager:
     def __init__(self, store):
         self.store = store
         self.lock = threading.RLock()
+        # 槽位等待用 Condition：原来 0.2s 轮询抢锁（4 线程忙等），
+        # 且 waited>300 跳出后任务照样执行，超时语义名存实亡。
+        self._can_run = threading.Condition(self.lock)
         self.tasks = {}
         self.order = []
         self.q = queue.Queue()
@@ -2318,23 +2380,18 @@ class DownloadManager:
             tid = self.q.get()
             task = None
             try:
-                with self.lock:
+                with self._can_run:
                     task = self.tasks.get(tid)
-                    if not task or task["state"] != "queued":
+                    if not task or task["state"] != "queued" or task.get("cancel"):
                         continue
                     limit = max(1, int(self.store.data["settings"].get("concurrency") or 2))
-                    waited = 0.0
+                    # 等槽位：被唤醒或超 1s 重查一次（并发数被调大时要能及时感知）
                     while self.running >= limit:
-                        self.lock.release()
-                        try:
-                            time.sleep(0.2)
-                            waited += 0.2
-                        finally:
-                            self.lock.acquire()
+                        self._can_run.wait(timeout=1)
                         task = self.tasks.get(tid)
-                        if not task or task["state"] != "queued" or waited > 300:
+                        if not task or task["state"] != "queued" or task.get("cancel"):
                             break
-                    if not task or task["state"] != "queued":
+                    if not task or task["state"] != "queued" or task.get("cancel"):
                         continue
                     task["state"] = "running"
                     task["started"] = time.time()
@@ -2346,15 +2403,17 @@ class DownloadManager:
                         task["state"] = "error"
                         task["error"] = str(e)
             finally:
-                with self.lock:
+                with self._can_run:
                     t = self.tasks.get(tid)
                     if t and t["state"] in ("done", "error", "cancelled", "skipped", "running"):
                         if t.get("started") and t["state"] != "queued":
                             self.running = max(0, self.running - 1)
-                    try:
-                        self.q.task_done()
-                    except ValueError:
-                        pass
+                    # 释放槽位 / 任务被取消时，把排队中的 worker 叫醒
+                    self._can_run.notify_all()
+                try:
+                    self.q.task_done()
+                except ValueError:
+                    pass
 
     def _resolve(self, item, want):
         """按降级顺序解析直链，返回 (url, quality, ext)。"""
@@ -2526,12 +2585,13 @@ class DownloadManager:
         return [self.add(it, want, dir_) for it in items]
 
     def cancel(self, tid):
-        with self.lock:
+        with self._can_run:
             task = self.tasks.get(tid)
             if not task:
                 return False
             if task["state"] == "queued":
                 task.update(state="cancelled", error="已取消")
+                self._can_run.notify_all()       # 等着这个 tid 的 worker 醒来后直接跳过
                 return True
             if task["state"] == "running":
                 task["cancel"] = True
@@ -2549,10 +2609,16 @@ class DownloadManager:
         return True
 
     def remove(self, tid):
-        with self.lock:
+        with self._can_run:
             task = self.tasks.get(tid)
-            if task and task["state"] in ("running", "queued"):
+            if task and task["state"] == "running":
                 task["cancel"] = True
+                return False
+            if task and task["state"] == "queued":
+                # 排队中的直接置终态：原来只挂 cancel 标志，worker 照样会解析
+                # 直链、建 .part，然后才在下载循环里取消 —— 白付一次解析。
+                task.update(state="cancelled", error="已取消")
+                self._can_run.notify_all()
                 return False
             self.tasks.pop(tid, None)
             if tid in self.order:
@@ -2611,6 +2677,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         pass
+
+    def _local_request(self):
+        """只服务本机回环发起的请求。服务虽然只绑 127.0.0.1，但显式校验 Host
+        可以挡住 DNS rebinding（恶意网页把域名解析到 127.0.0.1 后摸 API）。"""
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host.count(":") == 1:            # host:port（IPv4 写法）
+            host = host.rsplit(":", 1)[0]
+        return host.strip("[]") in ("127.0.0.1", "localhost", "::1")
 
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
         if isinstance(body, (dict, list)):
@@ -2745,6 +2819,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, data, MIME.get(ext, "application/octet-stream"))
 
     def do_GET(self):
+        if not self._local_request():
+            self._send(403, {"error": "forbidden"})
+            return
         path = urllib.parse.urlparse(self.path).path
         if path == "/api/store":
             data = STORE.apply("load", None)
@@ -2784,6 +2861,11 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             key = (qs.get("key") or [""])[0]
             url = (qs.get("url") or [""])[0]
+            # 直链只接受 http/https：urllib 认得 file:// 等本地 scheme，
+            # 放进来等于让任何本机页面借这个端点读任意文件。
+            if url and urllib.parse.urlparse(url).scheme not in ("http", "https"):
+                self._send(400, {"error": "仅支持 http/https 直链"})
+                return
             ext = (qs.get("ext") or ["bin"])[0]
             if not url:
                 sid = (qs.get("sid") or [""])[0]
@@ -2855,6 +2937,9 @@ class Handler(BaseHTTPRequestHandler):
         self._static(path)
 
     def do_POST(self):
+        if not self._local_request():
+            self._send(403, {"error": "forbidden"})
+            return
         path = urllib.parse.urlparse(self.path).path
         try:
             if path == "/api/rpc":

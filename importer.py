@@ -453,7 +453,10 @@ def _candidates(title):
             out.append(a)
     with _CAND_LOCK:
         if len(_CAND_CACHE) >= _CAND_MAX:
-            _CAND_CACHE.clear()
+            # 只淘汰最旧的三分之一，别整表清空：2000 首的歌单超过上限时，
+            # clear() 会把刚取回的候选全抖掉，后面每条都重复回源。
+            for k in list(_CAND_CACHE)[:_CAND_MAX // 3]:
+                _CAND_CACHE.pop(k, None)
         _CAND_CACHE[key] = out
     return out
 
@@ -488,9 +491,22 @@ def _choose_order(tracks):
     sample = [t for t in tracks if t.get("alt")][:8]
     if not sample:
         return "normal"
-    normal = sum(1 for t in sample if _strict_hit(t["name"], t["artist"]))
-    swap = sum(1 for t in sample
-               if _strict_hit(t["alt"]["name"], t["alt"]["artist"]))
+    # 两种解释 × 抽样 8 条 = 最多 16 次上游检索：串行跑能把进度条钉在 0，
+    # 并发 4 路（与 classify 的匹配并发一致）缩到 1/4 时间。
+    with _cf.ThreadPoolExecutor(max_workers=4, thread_name_prefix="vote") as ex:
+        futs = [(ex.submit(_strict_hit, t["name"], t["artist"]),
+                 ex.submit(_strict_hit, t["alt"]["name"], t["alt"]["artist"]))
+                for t in sample]
+        normal = swap = 0
+        for fn_, fs in futs:
+            try:
+                normal += 1 if fn_.result() else 0
+            except Exception:                                    # noqa: BLE001
+                pass
+            try:
+                swap += 1 if fs.result() else 0
+            except Exception:                                    # noqa: BLE001
+                pass
     return "swap" if swap > normal else "normal"
 
 

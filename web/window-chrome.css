@@ -87,7 +87,9 @@ html[data-chrome="on"]:not([data-platform="android"]) .drawer{top:var(--wc-title
 .wc-title{
   height:var(--wc-title-h);
   display:flex;align-items:center;gap:12px;
-  padding-left:16px;position:relative;z-index:20;
+  padding-left:16px;position:relative;z-index:60;
+  /* 60 = .toasts/.ask-layer 同层：抽屉遮罩(29)压不暗标题栏，窗口按钮永远可点；
+     浮层菜单(50/55)都在标题栏以下区域弹出，不重叠。 */
   background:color-mix(in srgb,var(--bg) 58%,transparent);
   box-shadow:inset 0 -1px 0 var(--line);
   -webkit-app-region:drag;   /* 预留给未来 Electron 壳；WebView2 忽略 */

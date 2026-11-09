@@ -168,6 +168,9 @@
   </footer>
 </div>
 
+<!-- 抽屉遮罩：任一抽屉打开时压暗主区，点按关闭（行为在 app.js 的 MutationObserver） -->
+<div class="drawer-mask" id="drawerMask" hidden></div>
+
 <aside class="drawer right" id="panelDrawer" hidden>
   <div class="drawer-head">
     <div class="dtabs">
@@ -221,6 +224,18 @@
     <div class="lyric-body" id="lyricBody"></div>
     <div class="lyric-foot">
       <button class="btn ghost" id="lyricSave">保存 .lrc</button>
+    </div>
+  </div>
+</div>
+
+<!-- 输入浮层：替代原生 prompt()（新建/重命名歌单、下载目录），样式随主题 -->
+<div class="ask-layer" id="askLayer" hidden>
+  <div class="ask-card">
+    <div class="ask-title" id="askTitle"></div>
+    <input id="askInput" type="text" autocomplete="off"/>
+    <div class="ask-acts">
+      <button class="btn sm" id="askCancel">取消</button>
+      <button class="btn sm primary" id="askOk">确定</button>
     </div>
   </div>
 </div>
