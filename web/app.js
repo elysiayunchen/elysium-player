@@ -71,6 +71,9 @@ const ARTIST_ALBUM_PAGE = 30;
 const state = {
   settings: {},
   version: '',                     // 后端 /api/store 带来的 _version，设置页展示用
+  update: null,                    // /api/update/status 的缓存：{latest, has_update, url, error…}
+  updateDl: null,                  // /api/update/download 的进度：{state, url, path, got, total, speed, verified…}
+  _updToastShown: false,           // 本次运行只弹一次新版本 toast，之后只靠红点
   favs: [],
   playlists: [],                    // 用户自建歌单 [{id,name,items:[...]}]
   recent: [],
@@ -620,6 +623,159 @@ async function loadImportVersion() {
     if (el) el.textContent = `规则版本 ${u.rules_version || '?'} · 客户端 v${u.client_version || '?'}` +
       (u.degraded && u.degraded.length ? ' · 规则文件降级' : '');
   } catch (e) { /* 版本信息只是提示，失败不打断导入 */ }
+}
+
+/* ------------------------------------------------------------------ 更新追踪
+   后台线程每 6h 查一次 GitHub Releases，这里只轮询它缓存的结论（秒回、不打 GitHub）。
+   提醒三层：左侧「设置」红点 → 启动 toast → 设置页「更新」区块；绝不自动下载。 */
+function updDismissed() {
+  return state.settings.update_dismissed || '';
+}
+
+function updTipText() {
+  const u = state.update;
+  const cur = state.version ? `当前 v${state.version}` : '';
+  if (!u) return `还没检查过${cur ? ' · ' + cur : ''}`;
+  if (u.has_update) return `发现新版本 ${u.latest}${cur ? ' · ' + cur : ''}，去发布页下载`;
+  if (u.error) return `上次检查失败（网络不可达）${cur ? ' · ' + cur : ''}`;
+  if (u.latest) return `已是最新${cur ? ' · ' + cur : ''}`;
+  return `还没检查过${cur ? ' · ' + cur : ''}`;
+}
+
+function paintUpdateBadge() {
+  const u = state.update;
+  const on = !!(u && u.has_update && u.latest !== updDismissed());
+  document.querySelectorAll('[data-nav="settings"]').forEach((el) => {
+    el.classList.toggle('has-update', on);
+  });
+}
+
+function paintUpdateSection() {
+  const tip = $('#updTip');
+  if (tip) tip.textContent = updTipText();
+  const show = !!(state.update && state.update.has_update);
+  const open = $('#updOpen');
+  if (open) open.hidden = !show;
+  const dismiss = $('#updDismiss');
+  if (dismiss) dismiss.hidden = !(show && state.update.latest !== updDismissed());
+  paintUpdateAssets();
+  paintUpdateBadge();     // 忽略/发现新版本都可能改红点，统一在这里兜一遍
+}
+
+/* 直链 / 镜像行：打不开 GitHub 的用户也能拿链接去任意下载器。
+   「下载」走应用内通道：后端流式下载 + SHA-256 强制校验，文件落到下载目录，
+   替换 / 运行由用户手动完成（不碰运行中的 exe，砖不了机）。 */
+function dlLabel(url) {
+  const d = state.updateDl;
+  if (d && d.url === url) {
+    if (d.state === 'running') {
+      const pct = d.total ? Math.min(100, Math.round(d.got / d.total * 100)) : null;
+      return pct === null ? '下载中…' : `${pct}%`;
+    }
+    if (d.state === 'done') return '重新下载';
+    if (d.state === 'error') return '重试';
+  }
+  return '下载';
+}
+
+function paintUpdateAssets() {
+  const box = $('#updAssets');
+  if (!box) return;
+  const u = state.update;
+  const assets = (u && u.has_update ? (u.assets || []) : []);
+  const dl = state.updateDl;
+  const rows = assets.map((a) => {
+    const urls = [{ label: 'GitHub 直链', url: a.url }].concat(
+      (a.mirrors || []).map((m, i) => ({ label: `镜像 ${i + 1}`, url: m })));
+    const sha = a.sha256
+      ? `<p class="tip">SHA-256 前 16 位 <code>${esc(String(a.sha256).slice(0, 16))}…</code>，下载完成后自动比对</p>`
+      : '<p class="tip">远端未提供 SHA-256，请留意下载来源</p>';
+    const prog = dl && dl.state === 'running'
+      ? `<p class="tip">${fmtSize(dl.got)}${dl.total ? ' / ' + fmtSize(dl.total) : ''} · ${fmtSpeed(dl.speed) || '…'}</p>`
+      : '';
+    const doneTip = dl && dl.state === 'done' && dl.path
+      ? `<p class="tip">已下载：${esc(dl.path)} · 手动运行即可完成更新${dl.verified ? ' · SHA-256 已通过' : ''}</p>`
+      : '';
+    const errTip = dl && dl.state === 'error'
+      ? `<p class="tip">下载失败：${esc(dl.error || '')}（可换镜像再试）</p>`
+      : '';
+    const lines = urls.map((x) => `
+      <div class="field-acts" style="margin-top:4px">
+        <button class="btn sm" data-act="upd-open-url" data-url="${esc(x.url)}">${esc(x.label)}</button>
+        <button class="btn sm ghost" data-act="upd-dl" data-url="${esc(x.url)}" data-sha="${esc(a.sha256 || '')}"${dl && dl.state === 'running' ? ' disabled' : ''}>${dlLabel(x.url)}</button>
+        <button class="btn sm ghost" data-act="upd-copy" data-url="${esc(x.url)}">复制</button>
+      </div>`).join('');
+    return `
+      <div class="field" style="display:block">
+        <div><label>${esc(a.name || '下载')}</label>${sha}${prog}${doneTip}${errTip}</div>
+        ${lines}
+      </div>`;
+  });
+  const none = u && u.has_update && !assets.length
+    ? '<p class="tip">远端未提供直链，请从发布页下载</p>' : '';
+  box.innerHTML = rows.join('') + none;
+}
+
+function openExternal(url) {
+  const u = String(url || '');
+  if (!/^https?:\/\//i.test(u)) return;
+  if (window.pywebview && window.pywebview.api && window.pywebview.api.open_url) {
+    window.pywebview.api.open_url(u);      // WebView2 里交给系统默认浏览器
+  } else {
+    window.open(u, '_blank');
+  }
+}
+
+async function copyText(t) {
+  try {
+    await navigator.clipboard.writeText(t);
+    return true;
+  } catch (e) {
+    // WebView2 旧内核 / 非安全上下文兜底：隐藏 textarea + execCommand
+    const ta = document.createElement('textarea');
+    ta.value = t;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e2) { ok = false; }
+    ta.remove();
+    return ok;
+  }
+}
+
+let updDlTimer = null;
+function pollUpdateDl() {
+  clearTimeout(updDlTimer);
+  getJson('/api/update/download').then((d) => {
+    const prev = state.updateDl;
+    state.updateDl = d.data || { state: 'idle' };
+    if (prev && prev.state === 'running') {          // 只在状态跃迁时弹，刷新页面不重复打扰
+      if (state.updateDl.state === 'done') toast('新版本已下载到下载目录，手动运行即可完成更新');
+      if (state.updateDl.state === 'error') toast('下载失败：' + (state.updateDl.error || ''), 'err');
+    }
+    paintUpdateAssets();
+    if (state.updateDl.state === 'running') updDlTimer = setTimeout(pollUpdateDl, 1000);
+  }).catch(() => {
+    if (state.updateDl && state.updateDl.state === 'running') {
+      updDlTimer = setTimeout(pollUpdateDl, 3000);   // 网络抖动重试，别把进度条弄丢
+    }
+  });
+}
+
+async function loadUpdateStatus(refresh) {
+  try {
+    const d = await getJson('/api/update/status' + (refresh ? '?refresh=1' : ''));
+    state.update = d.data || null;
+    paintUpdateBadge();
+    paintUpdateSection();
+    const u = state.update;
+    if (u && u.has_update && !state._updToastShown && u.latest !== updDismissed()) {
+      state._updToastShown = true;
+      toast(`发现新版本 ${u.latest}，设置页可查看`);
+    }
+  } catch (e) { /* 更新提示失败不打扰主流程 */ }
 }
 
 async function startImportPreview() {
@@ -3061,6 +3217,23 @@ function viewSettings() {
     </div>
   </div>
 
+  <div class="set-sec">
+    <h4>更新</h4>
+    <div class="field">
+      <div><label>版本状态</label><p class="tip" id="updTip">${esc(updTipText())}</p></div>
+      <div class="field-acts">
+        <button class="btn sm" data-act="upd-check" id="updBtn">检查更新</button>
+        <button class="btn sm ghost" data-act="upd-open" id="updOpen" hidden>发布页 ›</button>
+        <button class="btn sm ghost" data-act="upd-dismiss" id="updDismiss" hidden>忽略此版本</button>
+      </div>
+    </div>
+    <div id="updAssets"></div>
+    <div class="field">
+      <div><label>自动检查</label><p class="tip">启动后和每 6 小时各查一次；只提醒，绝不自动下载</p></div>
+      <input type="checkbox" class="switch" id="setAutoUpdate"/>
+    </div>
+  </div>
+
   <div class="set-ver">ELYSIUM ${state.version ? 'v' + esc(state.version) : ''} · 本机运行</div>`;
 }
 
@@ -3081,6 +3254,7 @@ function fillSettings() {
   chk('#setLrc', !!s.save_lyric);
   chk('#setAutoCache', s.auto_cache !== false);
   chk('#setPersonalized', s.personalized !== false);
+  chk('#setAutoUpdate', s.auto_check_update !== false);
   const tn = $('#setTasteNote');
   if (tn) tn.value = (state.taste && state.taste.note) || '';
   getJson('/api/taste').then((d) => {
@@ -3156,6 +3330,10 @@ function bindSettings() {
   on('#setPersonalized', 'change', (e) => {
     save('personalized', e.target.checked);
     loadRecommend(true);
+  });
+  on('#setAutoUpdate', 'change', (e) => {
+    save('auto_check_update', e.target.checked);
+    paintUpdateBadge();
   });
   on('#setTasteNote', 'change', async (e) => {
     try {
@@ -4149,6 +4327,54 @@ document.addEventListener('click', async (e) => {
       break;
     }
 
+    case 'upd-check': {
+      const btn = $('#updBtn');
+      if (btn) { btn.disabled = true; btn.textContent = '检查中…'; }
+      try {
+        await loadUpdateStatus(true);
+        const u = state.update;
+        if (u && u.has_update) toast(`发现新版本 ${u.latest}`);
+        else if (u && u.latest && !u.error) toast('已是最新版本');
+      } catch (err) {
+        state.update = null;
+        paintUpdateSection();
+        const tip = $('#updTip');
+        if (tip) tip.textContent = '检查失败：' + err.message;
+      }
+      if (btn) { btn.disabled = false; btn.textContent = '检查更新'; }
+      break;
+    }
+    case 'upd-open':
+    case 'upd-open-url': {
+      openExternal(el.dataset.url);
+      break;
+    }
+    case 'upd-dl': {
+      try {
+        const d = await post('/api/update/download', {
+          url: el.dataset.url || '', sha256: el.dataset.sha || '',
+        });
+        state.updateDl = d.data || { state: 'idle' };
+        paintUpdateAssets();
+        pollUpdateDl();                      // 立刻接管轮询（页面刷新后也靠它恢复进度）
+      } catch (err) { toast(err.message || '下载启动失败', 'err'); }
+      break;
+    }
+    case 'upd-copy': {
+      const ok = await copyText(el.dataset.url || '');
+      toast(ok ? '已复制直链，可粘贴到浏览器或下载器' : '复制失败，请手动选中链接复制', ok ? '' : 'err');
+      break;
+    }
+    case 'upd-dismiss': {
+      const u = state.update;
+      if (!u || !u.latest) break;
+      state.settings.update_dismissed = u.latest;
+      await post('/api/store', { op: 'settings', payload: { update_dismissed: u.latest } });
+      paintUpdateBadge();
+      paintUpdateSection();
+      toast(`已忽略 ${u.latest}，下个新版本会再提醒`);
+      break;
+    }
     case 'set-dir': {
       try {
         let path = '';
@@ -4239,6 +4465,9 @@ async function boot() {
   refreshTasks();
   restoreLast();
   loadRecommend().then(() => paintReco());   // 首页推荐：异步，不挡首屏
+  loadUpdateStatus();                        // 更新追踪：读后端缓存 + 每 30 分钟轮询一次
+  setInterval(() => loadUpdateStatus(), 30 * 60 * 1000);
+  pollUpdateDl();                            // 若有进行中的版本下载（如刷新页面），恢复进度条
   $('#kw').focus();
 }
 

@@ -51,7 +51,7 @@ def bind(**kw):
 # --------------------------------------------------------------------------
 DEFAULT_MANIFEST = {
     "rules_version": "2026-11-09.1",
-    "client_version": "1.4.0",
+    "client_version": "1.5.0",
     "update_url": "",
     "check_on_start": False,
     "providers": ["netease", "qqmusic", "kugou"],

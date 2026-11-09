@@ -64,6 +64,17 @@
 
 > 缓存只做后台自动维护，界面不提供「缓存歌曲列表」——占用与规则放在设置里看一眼即可。
 
+**更新追踪**
+- 双源检查：仓库内 `update.json` 走 jsDelivr 分发（国内可达性远好于 GitHub，且唯一携带直链 / 镜像 / SHA-256），GitHub Releases API 作兜底；谁先通用谁。启动 8 秒后查一次、之后每 6 小时一轮，结果缓存在后端，前端每 30 分钟轮询结论，不打爆 API
+- 手动「检查更新」反向优先 GitHub API（最权威、无 CDN 缓存延迟），不通自动落到 jsDelivr（`/api/update/status?refresh=1`）
+- 只提醒、**不自动下载或替换任何文件**：有新版时左侧「设置」亮红点、启动弹 toast、设置页「更新」区块显示「版本状态」
+- 打不开 GitHub 也能拿更新：设置页直接列出各直链与镜像，每条都带「打开 / 下载 / 复制」；「下载」走应用内通道——后端流式下载 + SHA-256 强制校验（不匹配立即删除半成品），文件落到下载目录，**替换 / 运行由用户手动完成**，不碰运行中的 exe，砖不了机
+- mirrors 是否可信由发布者在 `update.json` 里把关；远端没给 sha256 时界面会明示「未提供校验值」；下载进度按秒轮询，刷新页面自动恢复
+- 「发布页 ›」经系统默认浏览器直达 GitHub Releases；不想要某个版本的提醒可「忽略此版本」，下个版本会再提示
+- 设置页可关「自动检查」；版本号只比数字段（`v1.4.2-beta` → `1.4.2`），`/latest` 天然排除 draft 与 prerelease
+- **发布清单**：发 release 时随 release commit 一起更新根目录 `update.json`（version / notes / 直链 / mirrors / sha256）；jsDelivr 对分支文件缓存约 12 小时，着急可在 jsdelivr.com 手动 purge
+- 规则版本（歌单导入）沿用 `providers/manifest.json` 的 `update_url` notify-only 通道，与 `/api/update/check` 同一套
+
 **导入歌单**
 - **主通道：本地文件 / 粘贴文本** —— `.kgl`（酷狗客户端「播放列表 → 菜单 → 导出列表」）、`.txt`、`.csv`、`.m3u8`、纯文本「歌名 - 歌手」。零登录、不联网取数，格式多年稳定。文件按 UTF-8 读，遇到替换字符自动改用 GB18030 重读。
 - **次通道：在线链接** —— 网易云 / QQ 音乐 / 酷狗歌单链接，支持分享文案里抠 URL 与短链跳转。网易云、QQ 音乐免登录可拿全量；酷狗旧式 `special/single/{id}` 全量，新版 `gcid_` / H5 分享链接免登录只给 10 首预览，界面会明示并引导改用本地导出文件。
@@ -142,6 +153,13 @@ web/app.js               全部交互逻辑
 `GET /api/store/export` —— 会把 `download_dir` 换成占位符、去掉内部字段。
 
 ## 运行
+
+**直接用成品**：到 [Releases](https://github.com/elysiayunchen/elysium-player/releases/latest) 下载
+`Elysium.exe`（便携版，免安装）或 `Elysium-setup.exe`（按用户安装，免管理员权限）。
+需要 Windows 10/11 与 Microsoft Edge WebView2 Runtime。应用内置更新追踪，
+有新版本会在「设置」亮红点并支持应用内下载。
+
+**源码运行**：
 
 ```bash
 pip install pywebview mutagen

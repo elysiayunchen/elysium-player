@@ -37,7 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "Elysium"
 APP_TITLE = "Elysium - 在线音乐"
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 LEGACY_NAME = "FlacMusic"
 UPSTREAM = "https://flac.music.hi.cn/"
 API_URL = UPSTREAM + "ajax.php?act="
@@ -94,6 +94,7 @@ DEFAULT_STORE = {
         "dup_policy": "rename",     # rename / overwrite / skip
         "write_tags": True,
         "save_lyric": False,
+        "auto_check_update": True,  # 自动追踪新版本：只提醒，不下载
         "theme": "dark",            # light / dark / auto（默认深色）
         "volume": 80,
         "cache_limit_mb": 2048,     # 试听缓存上限（当天）
@@ -2656,6 +2657,200 @@ DM = DownloadManager(STORE)
 
 
 # --------------------------------------------------------------------------
+# 更新追踪（notify-only）
+#
+# 和规则热更新同一个原则：只比对版本号、点亮提示，绝不自动下载或替换任何文件。
+# 应用版本走 GitHub Releases（/releases/latest 本身就排除 draft/prerelease），
+# 规则版本沿用 providers/manifest.json 的 update_url 通道（留空则报 not_configured）。
+# 结果缓存在 UPDATE_STATE，前端轮询 /api/update/status，不打爆 GitHub。
+# --------------------------------------------------------------------------
+GITHUB_REPO = "elysiayunchen/elysium-player"
+RELEASE_URL = "https://github.com/" + GITHUB_REPO + "/releases/latest"
+UPDATE_PERIOD = 6 * 3600        # 周期检查间隔：6 小时
+# 更新源链（国内可达性优先）：仓库内 update.json 走 jsDelivr 分发，是唯一携带
+# 资产直链 / mirrors / sha256 的源；GitHub Releases API 只提供 tag 与发布页，作兜底。
+# 两个源经常一个通一个不通，所以谁先通用谁；手动「检查更新」反向优先（见 do_GET）。
+JSDELIVR_HOSTS = ["cdn.jsdelivr.net", "fastly.jsdelivr.net", "gcore.jsdelivr.net"]
+UPDATE_STATE = {
+    "last_check": 0,            # 上次检查的 epoch 秒（0 = 还没查过）
+    "latest": "",               # 远端最新版本号，如 v1.5.0
+    "has_update": False,        # latest 比本地 VERSION 新
+    "url": RELEASE_URL,         # 发布页，前端「发布页 ›」直达
+    "assets": [],               # [{name, url, mirrors[], sha256}]，打不开 GitHub 时给直链
+    "source": "",               # 本次结果来自哪个源：manifest / github
+    "error": "",                # 上次检查失败原因（全部源不可达时非空）
+}
+
+
+def _ver_tuple(v):
+    """'v1.4.2-beta' -> (1, 4, 2)。只认数字段，后缀不参与比较。"""
+    return tuple(int(x) for x in re.findall(r"\d+", str(v or "").split("-")[0])) or (0,)
+
+
+def _fetch_json(url, timeout=8):
+    req = urllib.request.Request(url, headers={"User-Agent": "Elysium/" + VERSION})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def _norm_assets(raw):
+    """update.json 的 assets 数组 → 干净的展示列表；url 必须是 http(s)，镜像最多 6 个。"""
+    out = []
+    for a in raw or []:
+        if not isinstance(a, dict):
+            continue
+        url = str(a.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        out.append({
+            "name": str(a.get("name") or "下载"),
+            "url": url,
+            "mirrors": [str(m).strip() for m in (a.get("mirrors") or [])
+                        if str(m).startswith(("http://", "https://"))][:6],
+            "sha256": str(a.get("sha256") or "").strip(),
+        })
+    return out[:4]
+
+
+def _check_remote(prefer_github=False, timeout=8):
+    """沿源链逐个试，返回归一化的远端信息；全挂就抛最后一个异常。
+
+    update.json（jsDelivr）形状：{version, notes, page, assets}；
+    GitHub API 形状：{tag_name, name, html_url}。分头识别、归一成同一种返回。
+    """
+    api = "https://api.github.com/repos/" + GITHUB_REPO + "/releases/latest"
+    jsd = ["https://" + h + "/gh/" + GITHUB_REPO + "@main/update.json"
+           for h in JSDELIVR_HOSTS]
+    chain = ([api] + jsd) if prefer_github else (jsd + [api])
+    last_err = None
+    for url in chain:
+        try:
+            j = _fetch_json(url, timeout)
+        except Exception as e:                              # noqa: BLE001
+            last_err = e
+            continue
+        if isinstance(j, dict) and j.get("tag_name") is not None:
+            tag = str(j.get("tag_name") or "").strip()
+            return {"latest": tag, "name": str(j.get("name") or "")[:120],
+                    "url": str(j.get("html_url") or "") or RELEASE_URL,
+                    "assets": [], "source": "github"}
+        if isinstance(j, dict) and str(j.get("version") or "").strip():
+            return {"latest": str(j["version"]).strip(),
+                    "name": str(j.get("notes") or "")[:120],
+                    "url": str(j.get("page") or "") or RELEASE_URL,
+                    "assets": _norm_assets(j.get("assets")), "source": "manifest"}
+    raise last_err or RuntimeError("所有更新源都不可达")
+
+
+def update_check_now(prefer_github=False):
+    """同步查一次（应用 + 规则），结果写进 UPDATE_STATE 并返回。最多阻塞 8s。"""
+    out = {"client_version": VERSION, "checked_at": int(time.time())}
+    try:
+        r = _check_remote(prefer_github=prefer_github)
+        out["app"] = {"latest": r["latest"], "name": r["name"],
+                      "has_update": _ver_tuple(r["latest"]) > _ver_tuple(VERSION),
+                      "url": r["url"], "source": r["source"]}
+        out["assets"] = r["assets"]
+        UPDATE_STATE.update(last_check=out["checked_at"], latest=r["latest"],
+                            has_update=out["app"]["has_update"], url=r["url"],
+                            assets=r["assets"], source=r["source"], error="")
+    except Exception as e:                                  # noqa: BLE001
+        out["app"] = "unavailable"
+        out["error"] = str(e)[:160]
+        UPDATE_STATE.update(last_check=out["checked_at"], error=str(e)[:160])
+    try:
+        out["rules"] = importer.update_check()
+    except Exception:                                       # noqa: BLE001
+        out["rules"] = None
+    return out
+
+
+def update_tracker():
+    """后台循环：启动 8s 后首查（让首屏先起来），之后每 6h 一次。
+
+    设置里关掉自动检查就只睡不查；手动「检查更新」走 /api/update/status?refresh=1。
+    """
+    time.sleep(8)
+    while True:
+        try:
+            if STORE.data.get("settings", {}).get("auto_check_update", True):
+                update_check_now()
+        except Exception:                                   # noqa: BLE001
+            pass                                            # 追踪器绝不影响主服务
+        time.sleep(UPDATE_PERIOD)
+
+
+# ---- 应用内下载新版本 -------------------------------------------------------
+# 下载 + SHA-256 校验后就停：文件落在本机下载目录，替换/运行由用户手动完成，
+# 不碰运行中的 exe，不写注册表，砖不了机。第三方镜像可能被替换文件，
+# 所以 update.json 里给了 sha256 就强制校验，不匹配直接删掉半成品。
+UPDATE_DL = {
+    "state": "idle",            # idle / running / done / error
+    "url": "",                  # 本次下载的直链（可能是镜像）
+    "path": "",                 # 完成后的本地路径
+    "got": 0, "total": 0,       # 字节进度
+    "speed": 0,                 # B/s
+    "verified": None,           # True=校验通过 / False=不匹配 / None=远端未提供 sha256
+    "error": "",
+}
+_DL_LOCK = threading.Lock()
+
+
+def _download_update(url, sha256):
+    """流式下载资产到下载目录，边下边算 SHA-256。任何失败都清理 .part 半成品。"""
+    tmp = None
+    try:
+        with _DL_LOCK:
+            if UPDATE_DL["state"] == "running":
+                return
+            UPDATE_DL.update(state="running", url=url, path="", got=0, total=0,
+                             speed=0, verified=None, error="")
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("只支持 http(s) 直链")
+        latest = UPDATE_STATE.get("latest") or "new"
+        ext = os.path.splitext(urllib.parse.urlparse(url).path)[1].lower()
+        if ext not in (".exe", ".apk", ".zip", ".7z"):
+            ext = ".exe"
+        ddir = STORE.data.get("settings", {}).get("download_dir") or default_download_dir()
+        os.makedirs(ddir, exist_ok=True)
+        path = os.path.join(ddir, "Elysium-%s%s" % (latest, ext))
+        tmp = path + ".part"
+        req = urllib.request.Request(url, headers={"User-Agent": "Elysium/" + VERSION})
+        t0 = time.time()
+        h = hashlib.sha256()
+        with urllib.request.urlopen(req, timeout=30) as resp, open(tmp, "wb") as f:
+            UPDATE_DL["total"] = int(resp.headers.get("Content-Length") or 0)
+            while True:
+                chunk = resp.read(1 << 16)
+                if not chunk:
+                    break
+                f.write(chunk)
+                h.update(chunk)
+                dt = time.time() - t0
+                UPDATE_DL.update(got=f.tell(), speed=int(f.tell() / dt) if dt > 0.5 else 0)
+        if sha256:
+            ok = h.hexdigest().lower() == str(sha256).strip().lower()
+            UPDATE_DL["verified"] = ok
+            if not ok:
+                os.remove(tmp)
+                tmp = None
+                UPDATE_DL.update(state="error", path="",
+                                 error="SHA-256 校验不通过，文件已删除（来源可能被替换）")
+                return
+        os.replace(tmp, path)
+        tmp = None
+        UPDATE_DL.update(state="done", path=path, speed=0)
+    except Exception as e:                                  # noqa: BLE001
+        UPDATE_DL.update(state="error", speed=0, error=str(e)[:160])
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+# --------------------------------------------------------------------------
 # HTTP 服务
 # --------------------------------------------------------------------------
 MIME = {
@@ -2842,6 +3037,21 @@ class Handler(BaseHTTPRequestHandler):
             # notify-only：只比版本号，绝不自动下载 / 替换文件
             self._send(200, {"ok": True, "data": importer.update_check()})
             return
+        if path == "/api/update/status":
+            # 更新追踪状态；?refresh=1 当场查一次（最多 8s，给手动按钮用）。
+            # 手动检查反向优先 GitHub API（最权威、无 CDN 缓存延迟），不通自动落到 jsDelivr。
+            # 两种情况都吐 UPDATE_STATE 同一种扁平形状，前端不用分叉。
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            if q.get("refresh"):
+                update_check_now(prefer_github=True)
+            st = dict(UPDATE_STATE)
+            st["client_version"] = VERSION
+            st["auto"] = bool(STORE.data.get("settings", {}).get("auto_check_update", True))
+            self._send(200, {"ok": True, "data": st})
+            return
+        if path == "/api/update/download":
+            self._send(200, {"ok": True, "data": dict(UPDATE_DL)})
+            return
         if path == "/api/store/export":
             # 导出脱敏副本：去掉含用户名的本机绝对路径，
             # 分享给别人时不会泄漏磁盘结构与用户名。
@@ -2954,6 +3164,22 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/store":
                 body = self._json_body()
                 self._send(200, {"ok": True, "data": STORE.apply(body.get("op"), body.get("payload"))})
+                return
+
+            if path == "/api/update/download":
+                # 应用内下载新版本：只下载 + 校验，替换由用户手动完成
+                body = self._json_body()
+                url = str(body.get("url") or "").strip()
+                if not url.startswith(("http://", "https://")):
+                    self._send(400, {"ok": False, "error": "只支持 http(s) 直链"})
+                    return
+                if UPDATE_DL["state"] == "running":
+                    self._send(409, {"ok": False, "error": "已有下载在进行"})
+                    return
+                threading.Thread(target=_download_update, name="update-dl",
+                                 args=(url, str(body.get("sha256") or "").strip()),
+                                 daemon=True).start()
+                self._send(200, {"ok": True, "data": dict(UPDATE_DL)})
                 return
 
             if path == "/api/import/preview":
@@ -3104,6 +3330,7 @@ def serve(port=0):
         raise OSError("端口 %d 已被占用（Elysium 可能已经在运行）" % int(port))
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    threading.Thread(target=update_tracker, name="update-tracker", daemon=True).start()
     return httpd, httpd.server_address[1]
 
 
@@ -3139,6 +3366,17 @@ class Bridge:
 
     def reveal(self, path):
         return self.open_path(path)
+
+    def open_url(self, url):
+        """只放行 http(s)，交给系统默认浏览器（更新发布页等外链）。"""
+        u = str(url or "")
+        if not u.startswith(("http://", "https://")):
+            return False
+        try:
+            webbrowser.open(u)
+            return True
+        except Exception:
+            return False
 
     # ---- 窗口壳 API（只服务 window-chrome.js）------------------------------
     def win_material_state(self):

@@ -52,6 +52,10 @@ TEXT_EXTS = (".py", ".js", ".html", ".css", ".md", ".bat", ".spec", ".txt", ".js
 # 扫描时跳过它，避免自指误报。
 SELF = os.path.basename(__file__)
 
+# 本应用自己的公开仓库 slug 是有意写进源码的（更新追踪要访问它的 Releases API），
+# 仓库本身就是公开的，不算泄漏 —— 扫描前先替换成占位符，避免误报账号名。
+PUBLIC_REPO_SLUG = "elysiayunchen/elysium-player"
+
 
 def sh(*args):
     try:
@@ -62,6 +66,7 @@ def sh(*args):
 
 
 def scan_text(text, where, hits):
+    text = text.replace(PUBLIC_REPO_SLUG, "<APP_REPO>")
     for pat, label in PATTERNS:
         for m in re.finditer(pat, text):
             frag = m.group(0)

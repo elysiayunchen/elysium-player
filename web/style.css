@@ -141,6 +141,11 @@ a{color:inherit;text-decoration:none}
   margin-left:auto;font-style:normal;font-size:10.5px;color:var(--muted);
   font-family:ui-monospace,Consolas,monospace;
 }
+/* 有新版本时「设置」入口右上角的小红点（更新追踪，见 app.js paintUpdateBadge） */
+.snav-i.has-update::after{
+  content:"";position:absolute;top:7px;right:7px;width:7px;height:7px;
+  border-radius:50%;background:var(--accent);
+}
 
 .side-scroll{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;min-height:0;padding-bottom:10px}
 .side-sec{margin-bottom:16px}
