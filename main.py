@@ -37,7 +37,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "Elysium"
 APP_TITLE = "Elysium - 在线音乐"
-VERSION = "1.5.1"
+VERSION = "1.6.0"
+_BASE_URL = ""            # main() 里落值；桌面歌词小窗据此建页
+_LYRIC_WIN = None         # 桌面歌词小窗句柄（pywebview window 或 None）
 LEGACY_NAME = "FlacMusic"
 UPSTREAM = "https://flac.music.hi.cn/"
 API_URL = UPSTREAM + "ajax.php?act="
@@ -2173,6 +2175,214 @@ def cache_track(item, quality, tier="today"):
     return CACHE.warm(key, url, fmt, tier=tier, meta=meta)
 
 
+# --------------------------------------------------------------------------
+# 本地曲库：把下载目录里已有的文件接回应用内
+#
+# 范围刻意克制（最小可用版）：只扫 download_dir 一个目录，不碰系统其它位置；
+# 标签读得出就用标签，读不出就整段用文件名，绝不因单个文件失败中断。
+# 播放直连 /api/local/file（本地盘 Range 流式），不走在线代理、不进缓存、不计数缓存。
+# --------------------------------------------------------------------------
+LOCAL_AUDIO_EXTS = (".mp3", ".m4a", ".flac", ".ogg", ".oga", ".opus",
+                    ".wav", ".wma", ".ape")
+_LOCAL_SCAN = {"at": 0.0, "dir": "", "sig": None, "items": []}
+_LOCAL_TAGS = {}          # path -> (mtime, tags tuple)；重扫时只读新增/变过的文件
+_LOCAL_COVER = {"key": "", "blob": None, "mime": ""}
+
+
+def _local_dir():
+    return STORE.data.get("settings", {}).get("download_dir") or default_download_dir()
+
+
+def local_resolve(rel):
+    """相对路径 -> 下载目录内的绝对路径。越界（.. / 绝对路径 / 目录外）一律拒绝。"""
+    rel = str(rel or "").replace("\\", "/").strip("/")
+    if not rel or any(seg in ("", ".", "..") for seg in rel.split("/")):
+        return None
+    base = os.path.realpath(_local_dir())
+    p = os.path.realpath(os.path.join(base, *rel.split("/")))
+    low_p, low_b = p.lower(), base.lower()
+    if not (low_p == low_b or low_p.startswith(low_b + os.sep)):
+        return None
+    if os.path.splitext(p)[1].lower() not in LOCAL_AUDIO_EXTS or not os.path.isfile(p):
+        return None
+    return p
+
+
+def _local_fmt_of(m):
+    """mutagen 探到的真实封装 -> 本项目口径的格式名（下载侧同一思路）。"""
+    try:
+        mime = (m.mime or [""])[0].lower()
+    except Exception:                                       # noqa: BLE001
+        mime = ""
+    if "flac" in mime:
+        return "flac"
+    if "mp4" in mime or "aac" in mime or "m4a" in mime:
+        return "m4a"
+    if "mpeg" in mime or "mp3" in mime:
+        return "mp3"
+    if "ogg" in mime or "opus" in mime:
+        return "opus" if "opus" in mime else "ogg"
+    if "ape" in mime or "monkey" in mime:
+        return "ape"
+    if "wav" in mime or "x-wav" in mime:
+        return "wav"
+    if "ms-wma" in mime or "wma" in mime:
+        return "wma"
+    return ""
+
+
+def _local_read_tags(path, stem):
+    """标签读取（带 per-file 缓存）：标题/艺人/专辑/真实格式/时长/码率。"""
+    try:
+        mt = int(os.path.getmtime(path))
+    except OSError:
+        mt = 0
+    hit = _LOCAL_TAGS.get(path)
+    if hit and hit[0] == mt:
+        return hit[1]
+    title, artist, album, fmt, dur, br = stem, "", "", "", 0, 0
+    try:
+        from mutagen import File as MFile
+        m = MFile(path, easy=True)
+        if m is not None:
+            tags = m.tags or {}
+
+            def first(k):
+                v = tags.get(k)
+                return str(v[0]).strip() if v else ""
+
+            title = first("title") or title
+            artist = first("artist")
+            album = first("album")
+            fmt = _local_fmt_of(m)
+            dur = int(getattr(m.info, "length", 0) or 0)
+            br = int((getattr(m.info, "bitrate", 0) or 0) // 1000)
+    except Exception:                                       # noqa: BLE001
+        pass                                                # 单文件坏标签不影响整库
+    if " - " in title and not artist:                       # 「歌手 - 歌名」文件名兜底
+        artist, _, rest = title.partition(" - ")
+        title, artist = rest.strip() or title, artist.strip()
+    out = (title, artist, album, fmt, dur, br)
+    if len(_LOCAL_TAGS) > 8000:                             # 防极端目录把内存吃穿
+        _LOCAL_TAGS.clear()
+    _LOCAL_TAGS[path] = (mt, out)
+    return out
+
+
+def local_scan(force=False):
+    """扫描下载目录。签名（目录 + 文件数 + 最新 mtime）没变且 120s 内直接用缓存。"""
+    d = _local_dir()
+    entries = []
+    try:
+        for root, dirs, files in os.walk(d):
+            dirs[:] = [x for x in dirs if not x.startswith((".", "$"))]
+            for fn in files:
+                if os.path.splitext(fn)[1].lower() not in LOCAL_AUDIO_EXTS:
+                    continue
+                p = os.path.join(root, fn)
+                try:
+                    st = os.stat(p)
+                except OSError:
+                    continue
+                entries.append((p, st.st_size, st.st_mtime))
+    except OSError:
+        entries = []
+    sig = (d, len(entries), int(max([e[2] for e in entries], default=0)))
+    fresh = (not force and _LOCAL_SCAN["dir"] == d and _LOCAL_SCAN["sig"] == sig
+             and time.time() - _LOCAL_SCAN["at"] < 120)
+    if fresh:
+        return {"dir": d, "items": _LOCAL_SCAN["items"], "cached": True}
+    items = []
+    for p, size, mtime in sorted(entries, key=lambda e: -e[2]):
+        rel = os.path.relpath(p, d).replace("\\", "/")
+        stem = os.path.splitext(os.path.basename(p))[0]
+        title, artist, album, fmt, dur, br = _local_read_tags(p, stem)
+        if not fmt:
+            fmt = os.path.splitext(p)[1].lower().lstrip(".") or "mp3"
+        items.append({
+            "platform": "local", "id": rel, "name": title, "artist": artist,
+            "album_name": album, "duration": dur, "size": size,
+            "format": fmt, "bitrate": br,
+            "minfo": [{"format": fmt, "bitrate": br or 320}],
+        })
+    _LOCAL_SCAN.update(at=time.time(), dir=d, sig=sig, items=items)
+    return {"dir": d, "items": items, "cached": False}
+
+
+def _sniff_image(b):
+    if b[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if b[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if b[:4] == b"RIFF" and b[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
+
+
+def local_cover(rel):
+    """内嵌封面 -> 图片字节。单槽缓存（当前在放的那张）。"""
+    p = local_resolve(rel)
+    if not p:
+        return None, ""
+    try:
+        key = p + "|" + str(int(os.path.getmtime(p)))
+    except OSError:
+        return None, ""
+    if _LOCAL_COVER["key"] == key and _LOCAL_COVER["blob"]:
+        return _LOCAL_COVER["blob"], _LOCAL_COVER["mime"]
+    blob, mime = None, ""
+    try:
+        from mutagen import File as MFile
+        m = MFile(p)
+        if m is not None:
+            pics = list(getattr(m, "pictures", None) or [])      # FLAC / Ogg
+            tags = getattr(m, "tags", None)
+            if tags is not None:                                  # MP3 (ID3)
+                try:
+                    pics += list(tags.getall("APIC"))
+                except Exception:                               # noqa: BLE001
+                    pass
+                covr = None
+                try:
+                    covr = tags.get("covr")                     # MP4
+                except Exception:                               # noqa: BLE001
+                    covr = None
+                for c in covr or []:
+                    pics.append(type("P", (), {"data": bytes(c)})())
+            if pics:
+                blob = bytes(pics[0].data)
+                mime = (getattr(pics[0], "mime", "") or "").lower()
+                if mime not in ("image/jpeg", "image/png", "image/webp"):
+                    mime = _sniff_image(blob)
+                if mime not in ("image/jpeg", "image/png", "image/webp"):
+                    blob = None
+    except Exception:                                       # noqa: BLE001
+        blob = None
+    if blob:
+        _LOCAL_COVER.update(key=key, blob=blob, mime=mime)
+    return blob, mime
+
+
+# 桌面歌词小窗中继：主页面把当前行推过来，歌词窗轮询拉走。纯内存，不落盘。
+_LYRIC_NOW = {"data": {}, "lock": threading.Lock()}
+
+
+def lyric_now_set(payload):
+    p = payload or {}
+    out = {}
+    for k in ("title", "artist", "line", "next", "cover"):
+        out[k] = str(p.get(k) or "")[:200]
+    out["playing"] = bool(p.get("playing"))
+    with _LYRIC_NOW["lock"]:
+        _LYRIC_NOW["data"] = out
+    return {"ok": True}
+
+
+def lyric_now_get():
+    with _LYRIC_NOW["lock"]:
+        return dict(_LYRIC_NOW["data"])
+
+
 def _migrate_play_record(rec, day):
     """兼容旧版 {day,count,cached} 结构。"""
     if not isinstance(rec, dict):
@@ -2202,6 +2412,7 @@ def record_play(payload):
     plat, sid = item.get("platform"), item.get("id")
     if not plat or not sid:
         return {"ok": False, "error": "缺少曲目信息"}
+    local = plat == "local"             # 本地文件只计数，不进在线缓存那套
 
     key = song_key(item)                  # 计数按「歌」，换音质不重置
     cache_key = play_key(item, quality)   # 缓存文件仍按音质分开
@@ -2247,7 +2458,7 @@ def record_play(payload):
     week_count = sum(int(n) for n in rec["days"].values())
 
     triggered = None
-    if completed and auto:
+    if completed and auto and not local:
         if today_count >= need_today and not rec.get("cached_today"):
             if cache_track(item, quality, "today"):
                 triggered = "today"
@@ -2260,7 +2471,7 @@ def record_play(payload):
                 with STORE.lock:
                     STORE.data["plays"][key]["cached_long"] = True
                     STORE.save()
-    elif rec.get("cached_long"):
+    elif not local and rec.get("cached_long"):
         CACHE.touch_long(cache_key)           # 长期缓存续命（按音质文件）
 
     CACHE.evict_long(int(st.get("cache_keep_days") or 3))
@@ -3156,6 +3367,41 @@ class Handler(BaseHTTPRequestHandler):
             })
             self._send(200, {"ok": True, "data": st})
             return
+        if path == "/api/local/list":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                self._send(200, {"ok": True,
+                                 "data": local_scan(force=(q.get("refresh") or [""])[0] == "1")})
+            except Exception as e:  # noqa: BLE001
+                self._send(200, {"ok": False, "error": str(e)})
+            return
+        if path == "/api/local/file":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            p = local_resolve((qs.get("p") or [""])[0])
+            if not p:
+                self._send(404, {"error": "文件不在下载目录里（或已被移动 / 删除）"})
+                return
+            self._serve_cached(p, os.path.splitext(p)[1].lstrip(".").lower())
+            return
+        if path == "/api/local/cover":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            blob, mime = local_cover((qs.get("p") or [""])[0])
+            if not blob:
+                self._send(404, {"error": "no cover"})
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", mime or "image/jpeg")
+            self.send_header("Content-Length", str(len(blob)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            try:
+                self.wfile.write(blob)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            return
+        if path == "/api/lyric/now":
+            self._send(200, {"ok": True, "data": lyric_now_get()})
+            return
         if path.startswith("/api/"):
             self._send(404, {"error": "not found"})
             return
@@ -3278,6 +3524,11 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/play":
                 self._send(200, record_play(self._json_body()))
+                return
+
+            if path == "/api/lyric/now":
+                # 桌面歌词小窗的数据源：主页面推当前行，纯内存中继
+                self._send(200, lyric_now_set(self._json_body()))
                 return
 
             if path in ("/api/download", "/api/downloads/add"):
@@ -3455,6 +3706,57 @@ class Bridge:
             _dwm_set(hwnd, 38, 3)
         return True
 
+    # ---- 桌面歌词小窗 ------------------------------------------------------
+    def lyric_window(self, on=True):
+        """开 / 关桌面歌词小窗（仅桌面端；--serve 与 Android 没有窗口栈，no-op）。"""
+        global _LYRIC_WIN
+        try:
+            import webview
+            if not on:
+                if _LYRIC_WIN is not None:
+                    try:
+                        _LYRIC_WIN.destroy()
+                    except Exception:                       # noqa: BLE001
+                        pass
+                    _LYRIC_WIN = None
+                return True
+            if _LYRIC_WIN is not None:
+                return True
+            if not _BASE_URL:
+                return False
+            x = y = None
+            try:                                            # 贴屏幕右下角
+                sc = webview.screens[0]
+                x, y = sc.x + sc.width - 620, sc.y + sc.height - 190
+            except Exception:                               # noqa: BLE001
+                pass
+            kw = {"width": 600, "height": 96, "on_top": True,
+                  "frameless": True, "easy_drag": True,
+                  "background_color": "#101014", "js_api": LyricApi()}
+            if x is not None:
+                kw.update(x=x, y=y)
+            _LYRIC_WIN = webview.create_window(
+                "Elysium 歌词", _BASE_URL + "lyrics.html", **kw)
+            return True
+        except Exception:                                   # noqa: BLE001
+            return False
+
+
+class LyricApi:
+    """歌词小窗自己的桥：只有一个「关掉自己」。"""
+
+    def close(self):
+        global _LYRIC_WIN
+        try:
+            import webview
+            for w in list(webview.windows):
+                if getattr(w, "title", "") == "Elysium 歌词":
+                    w.destroy()
+            _LYRIC_WIN = None
+            return True
+        except Exception:                                   # noqa: BLE001
+            return False
+
 
 def startup_bg():
     """窗口首帧底色必须跟用户上次选的主题一致。
@@ -3579,6 +3881,8 @@ def main():
     except OSError:
         pass
     url = f"http://127.0.0.1:{port}/"
+    global _BASE_URL
+    _BASE_URL = url
     if headless:
         print(f"[{APP_NAME}] 本地服务已启动：{url}", flush=True)
         if "--browser" in args:

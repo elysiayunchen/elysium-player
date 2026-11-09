@@ -1,6 +1,6 @@
 {
-  "version": "1.5.1",
-  "notes": "自动追踪更新 + 应用内下载校验 + 首个安装版",
+  "version": "1.6.0",
+  "notes": "本地音乐曲库 + Windows 系统媒体集成(SMTC/媒体键) + Android 后台播放(通知栏/线控) + 规则热更新接线 + 睡眠定时 + 桌面歌词小窗",
   "page": "https://github.com/elysiayunchen/elysium-player/releases/latest",
   "assets": [
     {
@@ -16,7 +16,7 @@
       "sha256": "17fe8179f53d7b7d9ced5a62793e99dbdfc1f138c4f816e0f6c13b2f46c3fa9e"
     },
     {
-      "name": "Android APK（arm64 / armv7，v1.5.0）",
+      "name": "Android APK（arm64 / armv7）",
       "url": "https://github.com/elysiayunchen/elysium-player/releases/latest/download/Elysium.apk",
       "mirrors": [],
       "sha256": "f4ed6bec2917ee48e9745d29ae73a3c3287ed227bdeee518daabe890a89986eb"

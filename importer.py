@@ -51,8 +51,9 @@ def bind(**kw):
 # --------------------------------------------------------------------------
 DEFAULT_MANIFEST = {
     "rules_version": "2026-11-09.1",
-    "client_version": "1.5.1",
-    "update_url": "",
+    "client_version": "1.6.0",
+    "update_url": "https://cdn.jsdelivr.net/gh/elysiayunchen/elysium-player@main/providers/manifest.json",
+    "update_url_mirrors": [],
     "check_on_start": False,
     "providers": ["netease", "qqmusic", "kugou"],
 }
@@ -137,7 +138,10 @@ def load_rules(force=False):
 
 
 def update_check():
-    """notify-only：只比对本地规则版本与可选远端 manifest，绝不自动下载或替换。"""
+    """notify-only：只比对本地规则版本与可选远端 manifest，绝不自动下载或替换。
+
+    主址不通时按 update_url_mirrors 顺序兜底（jsDelivr 多 CDN，谁先通用谁）。
+    """
     r = load_rules()
     m = r["manifest"]
     out = {"client_version": m.get("client_version"),
@@ -147,17 +151,25 @@ def update_check():
     url = str(m.get("update_url") or "").strip()
     if not url:
         return out
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            j = json.loads(resp.read().decode("utf-8", "replace"))
-        rv = str((j or {}).get("rules_version") or "")
-        out["remote"] = {"rules_version": rv,
-                         "client_version": str((j or {}).get("client_version") or ""),
-                         "has_update": bool(rv and rv != m.get("rules_version"))}
-    except Exception as e:                                  # noqa: BLE001
+    chain = [url] + [str(u).strip() for u in (m.get("update_url_mirrors") or [])
+                     if str(u).strip() and str(u).strip() != url]
+    j, last_err = None, None
+    for u in chain:
+        try:
+            req = urllib.request.Request(u, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                j = json.loads(resp.read().decode("utf-8", "replace"))
+            break
+        except Exception as e:                              # noqa: BLE001
+            last_err = e
+    if j is None:
         out["remote"] = "unavailable"
-        out["error"] = str(e)[:160]
+        out["error"] = str(last_err)[:160]
+        return out
+    rv = str((j or {}).get("rules_version") or "")
+    out["remote"] = {"rules_version": rv,
+                     "client_version": str((j or {}).get("client_version") or ""),
+                     "has_update": bool(rv and rv != m.get("rules_version"))}
     return out
 
 

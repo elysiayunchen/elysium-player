@@ -1,8 +1,12 @@
 {
   "rules_version": "2026-11-09.1",
-  "client_version": "1.5.1",
-  "update_url": "",
+  "client_version": "1.6.0",
+  "update_url": "https://cdn.jsdelivr.net/gh/elysiayunchen/elysium-player@main/providers/manifest.json",
+  "update_url_mirrors": [
+    "https://fastly.jsdelivr.net/gh/elysiayunchen/elysium-player@main/providers/manifest.json",
+    "https://gcore.jsdelivr.net/gh/elysiayunchen/elysium-player@main/providers/manifest.json"
+  ],
   "check_on_start": false,
   "providers": ["netease", "qqmusic", "kugou"],
-  "_note": "update_url 留空表示 notify-only 本地版本检查；填入远端 manifest URL 后 /api/update/check 会比对 rules_version，不自动下载或替换任何文件。"
+  "_note": "update_url 指向仓库 main 分支的 manifest（jsDelivr 分发，缓存约 12h，发版后需 purge）；主址不通时按 mirrors 顺序兜底。仍是 notify-only：只比对 rules_version 点亮提示，绝不自动下载或替换任何文件。"
 }

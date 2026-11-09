@@ -416,6 +416,7 @@ input::placeholder,textarea::placeholder{color:var(--muted);opacity:1}
 .src-migu{border-color:rgba(40,185,135,.55)}
 .src-qq{border-color:rgba(215,165,35,.55)}
 .src-kugou{border-color:rgba(55,165,215,.5)}
+.src-loc{border-color:rgba(140,110,220,.55)}
 .src-x{border-color:var(--line-2);opacity:.7}
 /* 同一首还有另一源版本：徽章变可点开关，不新增一行 */
 .src.swap{

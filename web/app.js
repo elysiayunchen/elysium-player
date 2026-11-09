@@ -110,6 +110,7 @@ const state = {
   tabs: { search: 'song', artist: 'song', library: 'song' },
   panelTab: 'queue',
   loading: false,
+  local: { items: [], dir: '', loaded: false, loading: false, error: '' },
   artist: null,
   artistShown: ARTIST_PAGE,          // 歌手页曲目：先渲这么多，剩下的滚动再补
   artistAlbumShown: ARTIST_ALBUM_PAGE,
@@ -199,6 +200,7 @@ const srcOf = (it) => SRC[(it && it.platform) || '']
 /* 来源只做标注，不分成两个渠道。同一首在另一源也有时（alts），
    徽章变成可点的换源开关 —— 两个源都拿得到，但屏幕上永远只有一行。 */
 function srcBadge(it, idx) {
+  if (it.platform === 'local') return `<span class="src src-loc" title="本地文件 · 下载目录">本地</span>`;
   const s = srcOf(it);
   const alt = (it && it.alts && it.alts.length) ? it.alts[0] : null;
   if (alt && idx != null && idx >= 0) {
@@ -224,6 +226,13 @@ const pk = (it) => `${it.platform}:${it.id}`;
 
 /* 列表里的音质格子：只认实测结果，上游声称不算数 */
 function qualityChip(it, idx) {
+  if (it.platform === 'local') {            // 本地文件：mutagen 读出的就是真实值
+    const fmt = (it.format === 'flac' ? 'FLAC' : String(it.format || '').toUpperCase());
+    const br = it.bitrate ? ' ' + it.bitrate + 'k' : '';
+    const size = it.size ? `<span class="mono">${fmtSize(it.size)}</span>` : '';
+    return `<span class="chip ${it.format === 'flac' ? 'flac' : (it.bitrate || 0) >= 192 ? 'hi' : 'lo'}"
+      title="本地文件 · ${esc(it.id)}">${esc(fmt || '音轨')}${br}</span>${size}`;
+  }
   const p = PROBE.get(pk(it));
   if (!p) {
     const q = bestQuality(it);
@@ -281,7 +290,7 @@ const PROBE_TTL = 10 * 60 * 1000;
 /* 渲染完一批就并发探一遍，回来只改对应格子，不重排。
    分片串行：前一片回来先回填，尾部的条目不会永远停在骨架屏。 */
 async function probeRows(items) {
-  const all = (items || []).filter((it) => it && it.id && it.platform);
+  const all = (items || []).filter((it) => it && it.id && it.platform && it.platform !== 'local');
   if (!all.length) return;
   const seq = ++_probeSeq;
   const list = all.filter((it) => {
@@ -383,6 +392,9 @@ async function fetchUrl(item, q) {
 
 const mediaKey = (item, q) => `${item.platform}_${item.id}_${q.bitrate}_${q.format}`;
 function mediaSrc(item, q) {
+  if (item.platform === 'local') {          // 本地文件直连磁盘，不走在线代理与缓存
+    return '/api/local/file?p=' + encodeURIComponent(item.id);
+  }
   const p = new URLSearchParams({
     key: mediaKey(item, q), ext: q.format, platform: item.platform,
     sid: item.id, fmt: q.format, br: q.bitrate, name: item.name || '',
@@ -1006,6 +1018,179 @@ function setBuffering(on) {
   if (el) el.hidden = !on;
 }
 
+/* ------------------------------------------------------------------ 系统媒体集成
+   页面只维护一份「对外播放状态」，两端各走各的原生通道：
+   · 桌面：navigator.mediaSession → Windows SMTC（任务栏媒体浮层 / 锁屏 /
+     键盘媒体键 / 蓝牙耳机控制）。WebView2 是 Chromium 内核，原生支持。
+   · Android：window.ElysiumAndroid.mediaUpdate → 原生 PlaybackService
+     （前台服务 + MediaStyle 通知 + 线控），原生命令经 window.__elysiumMedia
+     打回页面 —— Android WebView 的媒体会话归原生管，避免出现两套控制。 */
+const MS_ON = ('mediaSession' in navigator)
+  && document.documentElement.dataset.platform !== 'android';
+const ANDROID_BR = !!(window.ElysiumAndroid && window.ElysiumAndroid.mediaUpdate);
+let _msPosAt = 0;
+let _andPosAt = 0;
+let _msMetaKey = '';
+
+function mediaPushMeta(force) {
+  const it = state.playing;
+  const a = audio();
+  const key = it ? `${it.platform}:${it.id}:${it.name || ''}` : '';
+  if (MS_ON && it && (force || key !== _msMetaKey)) {
+    _msMetaKey = key;
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: it.name || '',
+        artist: it.artist || '',
+        album: it.album_name || '',
+        artwork: it.cover ? [{ src: it.cover, sizes: '512x512' }] : [],
+      });
+    } catch (e) { /* 老内核没有 MediaMetadata 构造器就静默降级 */ }
+  }
+  if (MS_ON) {
+    try { navigator.mediaSession.playbackState = a.paused ? 'paused' : 'playing'; } catch (e) {}
+  }
+  if (ANDROID_BR && it) {
+    const now = Date.now();
+    if (force || now - _andPosAt >= 3000) {
+      _andPosAt = now;
+      try {
+        window.ElysiumAndroid.mediaUpdate(JSON.stringify({
+          title: it.name || '', artist: it.artist || '', album: it.album_name || '',
+          cover: it.cover || '', playing: !a.paused && !a.ended,
+          position: Math.floor(a.currentTime || 0), duration: Math.floor(a.duration || 0),
+        }));
+      } catch (e) { /* 桥暂时不通（页面比原生先加载）下个 tick 再试 */ }
+    }
+  }
+}
+
+function mediaPushTick(force) {
+  const a = audio();
+  const d = a.duration;
+  if (MS_ON && isFinite(d) && d > 0) {
+    const now = Date.now();
+    if (force || now - _msPosAt >= 5000) {
+      _msPosAt = now;
+      try {
+        navigator.mediaSession.setPositionState({
+          duration: d, position: Math.min(a.currentTime || 0, d),
+          playbackRate: a.playbackRate || 1,
+        });
+      } catch (e) { /* position 越界等边界值，下个 tick 会修正 */ }
+    }
+  }
+  if (force) mediaPushMeta(true);   // seek 后两端进度都立即校正
+}
+
+/* 原生（Android PlaybackService）→ 页面的命令入口；桌面端不会被调用 */
+window.__elysiumMedia = (cmd, arg) => {
+  const a = audio();
+  switch (String(cmd || '')) {
+    case 'toggle': if (a.paused) a.play().catch(() => {}); else a.pause(); break;
+    case 'play': a.play().catch(() => {}); break;
+    case 'pause': a.pause(); break;
+    case 'next': playNext(1); break;
+    case 'prev': playNext(-1); break;
+    case 'seek': {
+      if (a.duration) a.currentTime = Math.min(a.duration, Math.max(0, Number(arg) || 0));
+      break;
+    }
+    case 'stop': a.pause(); try { a.currentTime = 0; } catch (e) { /* ignore */ } break;
+    default: break;
+  }
+};
+
+if (MS_ON) {
+  const msAct = {
+    play: () => audio().play().catch(() => {}),
+    pause: () => audio().pause(),
+    previoustrack: () => playNext(-1),
+    nexttrack: () => playNext(1),
+    seekbackward: (d) => {
+      const a = audio();
+      a.currentTime = Math.max(0, a.currentTime - ((d && d.seekOffset) || 10));
+    },
+    seekforward: (d) => {
+      const a = audio();
+      if (a.duration) a.currentTime = Math.min(a.duration, a.currentTime + ((d && d.seekOffset) || 10));
+    },
+    seekto: (d) => {
+      const a = audio();
+      if (d && (d.fastSeek || d.hasDuration !== false)) {
+        try { a.currentTime = d.seekTime; } catch (e) { /* ignore */ }
+      }
+    },
+    stop: () => {
+      const a = audio();
+      a.pause();
+      try { a.currentTime = 0; } catch (e) { /* ignore */ }
+    },
+  };
+  Object.keys(msAct).forEach((k) => {
+    try { navigator.mediaSession.setActionHandler(k, msAct[k]); } catch (e) { /* 内核不认就算了 */ }
+  });
+}
+
+/* ------------------------------------------------------------------ 睡眠定时
+   两种口径：until = 到点就暂停（倒计时）；track = 播完当前这首就停。
+   会话级设置，不落盘 —— 定时睡觉是每次的行为，不是偏好。 */
+const SLEEP = { mode: 'off', at: 0, timer: null };
+
+function setSleep(mode, minutes) {
+  if (SLEEP.timer) { clearInterval(SLEEP.timer); SLEEP.timer = null; }
+  if (mode !== 'until' && mode !== 'track') {
+    SLEEP.mode = 'off'; SLEEP.at = 0;
+    toast('睡眠定时已取消');
+    syncSleepUI();
+    return;
+  }
+  SLEEP.mode = mode;
+  if (mode === 'track') {
+    SLEEP.at = 0;
+    toast('睡眠定时：播完当前这首就停');
+  } else {
+    SLEEP.at = Date.now() + minutes * 60000;
+    toast(`睡眠定时：${minutes} 分钟后暂停播放`);
+    SLEEP.timer = setInterval(() => {
+      if (Date.now() >= SLEEP.at) fireSleep();
+    }, 1000);
+  }
+  syncSleepUI();
+}
+
+function fireSleep() {
+  if (SLEEP.timer) { clearInterval(SLEEP.timer); SLEEP.timer = null; }
+  SLEEP.mode = 'off'; SLEEP.at = 0;
+  const a = audio();
+  if (a && !a.paused) a.pause();
+  toast('睡眠时间到，已暂停播放');
+  syncSleepUI();
+}
+
+function syncSleepUI() {
+  const sel = $('#setSleep');
+  if (sel) sel.value = SLEEP.mode;
+}
+
+/* 桌面歌词小窗的数据推送：行变化时把当前行推给本地中继（纯内存）。 */
+let _lyricPostAt = 0;
+function postLyricNow() {
+  if (document.documentElement.dataset.platform === 'android') return;
+  const now = Date.now();
+  if (now - _lyricPostAt < 300) return;
+  _lyricPostAt = now;
+  const it = state.playing || {};
+  const i = lyricIdx;
+  const cur = (lyricLines && i >= 0 && lyricLines[i] && lyricLines[i].text) || '';
+  const nxt = (lyricLines && i >= 0 && lyricLines[i + 1] && lyricLines[i + 1].text) || '';
+  post('/api/lyric/now', {
+    title: it.name || '', artist: it.artist || '',
+    line: cur, next: nxt, cover: it.cover || '',
+    playing: !audio().paused,
+  }).catch(() => {});
+}
+
 function paintPlayer(item) {
   const art = $('#plArt');
   art.innerHTML =
@@ -1018,6 +1203,7 @@ function paintPlayer(item) {
   fb.innerHTML = icon(fav ? 'heart' : 'heart-o');
   fb.classList.toggle('on', fav);
   paintSpec();
+  mediaPushMeta(true);            // SMTC 元数据 + Android 通知栏同步换曲
 }
 
 function paintSpec() {
@@ -1123,7 +1309,7 @@ async function startTrack(item, cands, i, position, opts = {}) {
 
 const QUEUE_SRC = {
   search: '搜索结果', home: '首页', library: '收藏本',
-  artist: '歌手页', album: '专辑', taste: '口味画像',
+  artist: '歌手页', album: '专辑', taste: '口味画像', local: '本地音乐',
 };
 
 async function playAt(list, index, opts = {}) {
@@ -1137,6 +1323,9 @@ async function playAt(list, index, opts = {}) {
   state.playList = list.slice();
   state.playIndex = index;
   state.playing = item;
+  if (item.platform === 'local' && !item.cover) {   // 封面惰性取：只取真正开播的这首
+    item.cover = '/api/local/cover?p=' + encodeURIComponent(item.id);
+  }
   state.queueSource = opts.source || (
     list === (state.reco && state.reco.list) ? '为你推荐'
       : list === state.recent ? '最近播放'
@@ -1303,6 +1492,7 @@ function rowHtml(it, i, opt = {}) {
   const pr = PROBE.get(pk(it));
   const spec = qualityChip(it, i);
   const fav = isFav('song', it.id, it.platform);
+  const loc = it.platform === 'local';
   const albumCell = opt.hideAlbum ? ''
     : `<div class="tr-album">${it.album_id
       ? `<button data-act="album" data-id="${esc(it.album_id)}" data-platform="${esc(it.platform)}" title="${esc(it.album_name || '')}">${esc(it.album_name || '—')}</button>`
@@ -1327,7 +1517,7 @@ function rowHtml(it, i, opt = {}) {
     <div class="tr-dur mono">${fmtTime(it.duration)}</div>
     <div class="tr-act">
       <button class="ic${fav ? ' on' : ''}" data-act="fav" data-kind="song" data-i="${i}" title="收藏">${icon(fav ? 'heart' : 'heart-o')}</button>
-      <button class="ic" data-act="dl" data-i="${i}" title="下载">${icon('dl')}</button>
+      ${loc ? '' : `<button class="ic" data-act="dl" data-i="${i}" title="下载">${icon('dl')}</button>`}
     </div>
   </div>`;
 }
@@ -2246,6 +2436,60 @@ function viewAlbum() {
   return `<div class="page">${hero}${desc}${trackListHtml(list, { hideAlbum: true, empty: '这张专辑没有曲目' })}</div>`;
 }
 
+/* ------------------------------------------------------------------ 视图 · 本地曲库 */
+/* 最小可用版：只扫下载目录，最新下载的排最前。点行直放本地文件，
+   收听计数照走 /api/play（platform=local 只计数、不进在线缓存）。 */
+async function loadLocal(force) {
+  const L = state.local;
+  if (L.loading) return;
+  L.loading = true;
+  L.error = '';
+  if (state.route.name === 'local') render();
+  try {
+    const r = await getJson('/api/local/list' + (force ? '?refresh=1' : ''));
+    if (!(r && r.ok)) throw new Error((r && r.error) || '扫描失败');
+    L.items = r.data.items || [];
+    L.dir = r.data.dir || '';
+    L.loaded = true;
+  } catch (e) {
+    L.loaded = true;
+    L.error = e.message || '扫描失败';
+  }
+  L.loading = false;
+  const c = $('#localCount');
+  if (c) c.textContent = L.items.length || '';
+  if (state.route.name === 'local') render();
+}
+
+function viewLocal() {
+  const L = state.local;
+  if (!L.loaded && !L.loading) loadLocal();
+  const dirShort = (L.dir || '').replace(/^([A-Za-z]):\\/, '$1:\\');
+  const head = `<div class="vhead vhead-row">
+    <div>
+      <div class="kicker">LOCAL LIBRARY</div>
+      <h1>本地音乐</h1>
+      <p class="sub">${L.loading
+        ? '正在扫描下载目录…'
+        : L.error
+          ? `扫描失败：${esc(L.error)}`
+          : L.items.length
+            ? `<span class="mono">${L.items.length}</span> 个本地文件 · ${esc(dirShort)}`
+            : '下载目录里还没有音频文件'}</p>
+    </div>
+    <div class="vhead-acts">
+      <button class="btn" data-act="local-refresh" title="重新扫描下载目录">${icon('retry')}重新扫描</button>
+      ${L.items.length ? `<button class="btn primary" data-act="local-playall">${icon('play')}播放全部</button>` : ''}
+    </div>
+  </div>`;
+  let body;
+  if (L.loading && !L.items.length) body = emptyHtml('disc', '正在扫描…', '读取下载目录里的音频文件');
+  else if (L.error && !L.items.length) body = emptyHtml('folder', '扫不到这个目录', '可以在「设置 → 下载」里换一个目录再试');
+  else if (!L.items.length) body = emptyHtml('folder', '这里是空的', '下载几首歌之后，它们会自动出现在这里');
+  else body = trackListHtml(L.items, { empty: '' });
+  return `<div class="page">${head}${body}</div>`;
+}
+
 /* ------------------------------------------------------------------ 视图 · 收藏库 */
 function viewLibrary() {
   const tab = state.tabs.library;
@@ -2331,6 +2575,7 @@ function currentViewHtml() {
     case 'artist': return viewArtist();
     case 'album': return viewAlbum();
     case 'library': return viewLibrary();
+    case 'local': return viewLocal();
     case 'playlist': return viewPlaylist();
     case     'taste': return viewTaste();
     case 'styles': return viewStyles();
@@ -2479,6 +2724,7 @@ function render(enter) {
   if (state.route.name === 'artist') state.list = (state.artist && state.artist.list) || [];
   else if (state.route.name === 'album') state.list = (state.album && state.album.list) || [];
   else if (state.route.name === 'library') state.list = favsOf('song');
+  else if (state.route.name === 'local') state.list = (state.local && state.local.items) || [];
   else if (state.route.name === 'playlist') {
     const pl = plById(state.route.id);
     state.list = (pl && pl.items) || [];
@@ -2541,6 +2787,8 @@ function renderSide() {
   $('#albCount').textContent = albs.length || '';
   $('#libCount').textContent = state.favs.length || '';
   $('#plCount').textContent = state.playlists.length || '';
+  { const lc = $('#localCount');                 // 本地曲库计数：扫过了才显示数字
+    if (lc) { lc.textContent = state.local.items.length || ''; lc.hidden = !state.local.loaded; } }
 
   $('#sidePlaylists').innerHTML = state.playlists.length
     ? state.playlists.slice(0, 20).map((p) => `<button class="side-item" data-act="playlist" data-id="${esc(p.id)}">
@@ -3117,6 +3365,18 @@ function viewSettings() {
       <div><label>音量</label><p class="tip">也可以直接拖播放条右侧的滑杆</p></div>
       <input type="range" id="setVol" min="0" max="100" style="width:130px"/>
     </div>
+    <div class="field">
+      <div><label>睡眠定时</label><p class="tip">到点暂停播放；「播完当前这首」计完收听后停在曲末。本次会话有效，不保存</p></div>
+      <select id="setSleep">
+        <option value="off">不启用</option>
+        <option value="track">播完当前这首就停</option>
+        <option value="15">15 分钟</option>
+        <option value="30">30 分钟</option>
+        <option value="45">45 分钟</option>
+        <option value="60">60 分钟</option>
+        <option value="90">90 分钟</option>
+      </select>
+    </div>
   </div>
 
   <div class="set-sec">
@@ -3129,6 +3389,11 @@ function viewSettings() {
         <option value="auto">跟随系统</option>
       </select>
     </div>
+    ${document.documentElement.dataset.platform === 'android' ? '' : `
+    <div class="field">
+      <div><label>桌面歌词</label><p class="tip">开一个置顶小窗显示当前歌词行，整窗可拖动；数据只在本机回环里转</p></div>
+      <input type="checkbox" class="switch" id="setLyricWin"/>
+    </div>`}
   </div>
 
   <div class="set-sec">
@@ -3360,6 +3625,21 @@ function bindSettings() {
     state.settings.volume = v;
   });
   on('#setVol', 'change', (e) => save('volume', Number(e.target.value)));
+  on('#setSleep', 'change', (e) => {
+    const v = e.target.value;
+    if (v === 'off' || v === 'track') setSleep(v);
+    else setSleep('until', Number(v));
+  });
+  on('#setLyricWin', 'change', (e) => {
+    // pywebview 的 js_api 返回 Promise，普通调用也兼容
+    const api = window.pywebview && window.pywebview.api;
+    if (!api || typeof api.lyric_window !== 'function') {
+      e.target.checked = false;
+      toast('这个环境不支持桌面歌词小窗', 'err');
+      return;
+    }
+    try { api.lyric_window(e.target.checked); } catch (err) { /* 静默 */ }
+  });
 }
 
 /* ------------------------------------------------------------------ 歌词 */
@@ -3828,11 +4108,23 @@ function bind() {
 
   /* 媒体事件 */
   const a = audio();
-  a.addEventListener('play', () => { $('#playBtn').innerHTML = icon('pause'); renderPlaying(); });
-  a.addEventListener('pause', () => { $('#playBtn').innerHTML = icon('play'); saveLastTrack(true); });
+  a.addEventListener('play', () => {
+    $('#playBtn').innerHTML = icon('pause');
+    renderPlaying();
+    mediaPushMeta(true);           // SMTC / Android 通知栏状态 → playing（即时，不吃节流）
+    postLyricNow();
+  });
+  a.addEventListener('pause', () => {
+    $('#playBtn').innerHTML = icon('play');
+    saveLastTrack(true);
+    mediaPushMeta(true);
+    postLyricNow();
+  });
   a.addEventListener('timeupdate', () => {
     paintSeek();
     updateLyricTick();
+    postLyricNow();
+    mediaPushTick(false);
     if (!a.paused) {
       const d = a.duration || 0;
       // 重听检测：计过数后又回到前 20% 段（单曲循环 / 拖回开头 / 重播），
@@ -3847,6 +4139,12 @@ function bind() {
   });
   a.addEventListener('ended', () => {
     reportPlay(true);
+    if (SLEEP.mode === 'track') {  // 睡眠定时「播完这首就停」：计完数就地停下
+      SLEEP.mode = 'off';
+      syncSleepUI();
+      toast('睡眠定时：已按约定停在曲末');
+      return;
+    }
     if (state.mode === 'one') {
       a.currentTime = 0;
       a.play().catch(() => {});
@@ -3864,7 +4162,8 @@ function bind() {
   a.addEventListener('seeking', () => setBuffering(false));
   a.addEventListener('waiting', () => setBuffering(true));
   a.addEventListener('playing', () => setBuffering(false));
-  a.addEventListener('loadedmetadata', () => { setBuffering(false); paintSeek(); });
+  a.addEventListener('loadedmetadata', () => { setBuffering(false); paintSeek(); mediaPushTick(true); });
+  a.addEventListener('seeked', () => { mediaPushTick(true); postLyricNow(); });
 
   /* 歌词容器：用户手动滚动后停止自动跟随，滚回当前行才恢复。
      程序自己触发的 smooth 滚动也会冒出 wheel 事件，所以用 lyricScrolling 排除掉，
@@ -4188,6 +4487,12 @@ document.addEventListener('click', async (e) => {
     case 'play-all': {
       const list = state.list;
       if (list.length) playAt(list, 0);
+      break;
+    }
+    case 'local-refresh': loadLocal(true); break;
+    case 'local-playall': {
+      const list = state.local.items;
+      if (list.length) playAt(list, 0, { source: '本地音乐' });
       break;
     }
     case 'card-play': {

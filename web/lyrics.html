@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<title>Elysium 歌词</title>
+<style>
+  /* 桌面歌词小窗：frameless + easy_drag，整窗可拖动。
+     固定深色玻璃底 —— 悬浮在任何桌面上都要看得清，不跟随应用主题。 */
+  * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    font: 13px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: linear-gradient(160deg, rgba(18,18,24,.97), rgba(10,10,14,.97));
+    color: #eef0f4;
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 10px;
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 14px;
+  }
+  .art {
+    width: 52px; height: 52px; flex: 0 0 auto;
+    border-radius: 8px; object-fit: cover;
+    background: rgba(255,255,255,.06) center/24px no-repeat;
+  }
+  .mid { flex: 1 1 auto; min-width: 0; }
+  .meta {
+    display: flex; align-items: baseline; gap: 8px;
+    white-space: nowrap; overflow: hidden;
+  }
+  .meta .t { font-weight: 600; font-size: 12px; opacity: .78; }
+  .meta .a { font-size: 11px; opacity: .45; overflow: hidden; text-overflow: ellipsis; }
+  .l1 {
+    font-size: 17px; font-weight: 650; line-height: 1.35;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    text-shadow: 0 1px 8px rgba(0,0,0,.6);
+  }
+  .l2 {
+    font-size: 12.5px; opacity: .48; line-height: 1.4;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .idle .l1 { opacity: .35; font-size: 14px; }
+  .idle .l2 { display: none; }
+  .bar { position: absolute; top: 6px; right: 8px; display: flex; gap: 6px; }
+  .bar button {
+    width: 20px; height: 20px; border: 0; border-radius: 6px;
+    background: rgba(255,255,255,.08); color: #cfd3da;
+    font: 11px/20px sans-serif; cursor: pointer;
+  }
+  .bar button:hover { background: rgba(255,255,255,.18); color: #fff; }
+</style>
+</head>
+<body>
+  <img class="art" id="art" alt="" hidden/>
+  <div class="mid idle" id="mid">
+    <div class="meta"><span class="t" id="mTitle">Elysium</span><span class="a" id="mArtist"></span></div>
+    <div class="l1" id="l1">暂无正在播放的歌词</div>
+    <div class="l2" id="l2"></div>
+  </div>
+  <div class="bar"><button id="closeBtn" title="关闭桌面歌词">✕</button></div>
+<script>
+(function () {
+  'use strict';
+  var el1 = document.getElementById('l1');
+  var el2 = document.getElementById('l2');
+  var mid = document.getElementById('mid');
+  var art = document.getElementById('art');
+  var mT = document.getElementById('mTitle');
+  var mA = document.getElementById('mArtist');
+  var lastKey = '';
+
+  function esc(s) {
+    return String(s || '').replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function paint(d) {
+    var line = d.line || '';
+    var key = (d.title || '') + '|' + (d.artist || '') + '|' + line + '|' + (d.playing ? 1 : 0);
+    if (key === lastKey) return;               // 内容没变不重排，省得起抖动
+    lastKey = key;
+    mT.textContent = d.title || 'Elysium';
+    mA.textContent = d.artist || '';
+    el1.textContent = line || (d.playing ? '（纯音乐 · 无歌词）' : '已暂停');
+    el2.textContent = d.next || '';
+    mid.classList.toggle('idle', !line);
+    var cov = d.cover || '';
+    if (cov && art.getAttribute('src') !== cov) art.src = cov;
+    art.hidden = !cov;
+  }
+
+  function tick() {
+    fetch('/api/lyric/now', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) { paint((j && j.data) || {}); })
+      .catch(function () {});
+  }
+
+  document.getElementById('closeBtn').addEventListener('click', function () {
+    try { window.pywebview.api.close(); } catch (e) { /* 无桥时留着窗口 */ }
+  });
+
+  tick();
+  setInterval(tick, 400);
+})();
+</script>
+</body>
+</html>

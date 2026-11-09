@@ -39,10 +39,15 @@
 
 **播放**
 - 在线试听，自动挑可用音质（优先 mp3 320，省流量）
-- 播放队列侧栏，点哪首放哪首
+- 播放队列侧栏，点哪首放哪首；队列内拖拽重排，正在播的那首不受影响
 - 三种播放模式：顺序 / 单曲循环 / 随机
 - 进度拖动、音量、上一首 / 下一首
 - 快捷键：空格播放暂停、←/→ 快退快进 5s、↑/↓ 音量、Ctrl+F 聚焦搜索
+- **系统媒体集成**：桌面端经 `navigator.mediaSession` 直通 Windows SMTC ——
+  任务栏媒体浮层、锁屏、键盘媒体键、蓝牙耳机控制全可用；
+  Android 端由原生前台服务（通知栏 MediaStyle + 线控 + 音频焦点 + 拔耳机暂停）承接，
+  页面里的 `<audio>` 始终是播放的唯一真相源，原生侧只做中转
+- **睡眠定时**：15~90 分钟到点暂停，或「播完当前这首就停」（计完收听停在曲末）；会话级，不落盘
 
 **下载**
 - 并发队列（1~4 个任务并行），实时速度、剩余时间、进度条
@@ -53,6 +58,18 @@
 - 自动识别真实封装（元数据标 mp3 的经常其实是 m4a）
 - 可选写入歌曲标签：标题 / 歌手 / 专辑 / 封面 / 歌词
 - 可选同时保存 `.lrc`
+
+**本地音乐**
+- 侧栏「本地音乐」扫下载目录（含子目录），把已下载的歌接回应用内：标签读标题 / 歌手 /
+  专辑 / 时长，读不出就整段用文件名，绝不因单个文件失败中断
+- 点行直放本地文件（`/api/local/file` 本地盘 Range 流式，不走在线代理、不进缓存），
+  规格 chip 直接显示 mutagen 读出的真实格式与码率，内嵌封面惰性提取
+- 收听计数照走 `/api/play`（`platform=local` 只计数，不进在线缓存那套），最近播放 / 继续收听通吃
+- 范围刻意克制：只扫下载目录这一个地方，不做全盘扫描、不做标签编辑
+
+**桌面歌词**
+- 设置里开关一个置顶小窗（frameless、整窗可拖动、贴屏幕右下角），显示当前行 + 下一行 + 封面
+- 数据走本地回环中继（`/api/lyric/now`，纯内存），不落盘、不出本机
 
 **其他**
 - 首页：继续收听（带上次进度）、最近播放、我的歌手、我的专辑、快捷搜索
@@ -83,6 +100,8 @@
 - 严格判定复用 `_artist_key` / `_billed_as` / `fold_text`，与换源、歌手归类同一套口径；歌单条目只接受 `kuwo` / `wyy`，别的平台原生 id 会在服务端被挡掉。
 - 规则外置 `providers/*.json`（URL 匹配 / 端点 / 字段 / 探针）；`/api/providers/health` 按需自检三家接口，`/api/update/check` 做 notify-only 版本比对。改规则不必重发 exe。
 - 验收：`python verify_import.py`（41 项，需 selenium + Chrome；无界面环境用 `--no-ui`）。
+- 回归自检：`python verify_ui.py`（需先起一个 18777 隔离实例）、`python verify_drag.py`（队列拖拽）、
+  `python verify_local.py`（本地曲库 / SMTC / 睡眠定时 / 歌词中继，自带隔离实例）。
 
 ## 播放内核
 
@@ -131,12 +150,17 @@ main.py                  本地服务 + pywebview 窗口
   /api/import/status     预览进度 / 结果；/api/import/cancel 取消
   /api/import/commit     只把用户勾选的曲目写进歌单（新建或合并）
   /api/providers/health  三家接口探针自检（按需，不阻塞启动）
-  /api/update/check      规则版本比对，notify-only
+  /api/update/check      规则版本比对，notify-only（远端 manifest 走 jsDelivr + 镜像兜底）
+  /api/local/list        本地曲库扫描（下载目录，标签解析 + 签名缓存）
+  /api/local/file        本地文件播放（磁盘直读，支持 Range，拒绝越界路径）
+  /api/local/cover       本地文件内嵌封面惰性提取
+  /api/lyric/now         桌面歌词小窗中继（主页面推、小窗轮询，纯内存）
 importer.py              导入管线（解析 / 取数 / 三层判定 / 任务管理）
 providers/*.json         外置规则：URL 匹配、端点、字段、探针、版本号
 web/index.html           界面骨架
 web/style.css            主题变量 + 组件样式
 web/app.js               全部交互逻辑
+web/lyrics.html          桌面歌词小窗页（独立轮询，不依赖主页面）
 ```
 
 下载走 `DownloadManager`：固定 4 个线程的池子，按设置里的并发数限流；
