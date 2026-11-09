@@ -11,8 +11,8 @@ android {
         applicationId "com.elysium.player"
         minSdk 24
         targetSdk 34
-        versionCode 16
-        versionName "1.5.1"
+        versionCode 17
+        versionName "1.6.0"
         python {
             version "3.10"
         }
@@ -49,6 +49,7 @@ android {
 
 dependencies {
     implementation 'androidx.core:core:1.13.1'   // FileProvider：把下载好的 APK 共享给系统安装器
+    implementation 'androidx.media:media:1.7.0'  // MediaStyle：通知栏媒体控制模板
 }
 
 chaquopy {
