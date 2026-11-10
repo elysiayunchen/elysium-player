@@ -113,6 +113,9 @@ const state = {
   panelTab: 'queue',
   loading: false,
   local: { items: [], dir: '', roots: [], scanning: null, loaded: false, loading: false, error: '' },
+  works: [],                       // K 歌作品（懒加载：进「我的作品」才拉）
+  worksLoaded: false,
+  worksLoading: false,
   artist: null,
   artistShown: ARTIST_PAGE,          // 歌手页曲目：先渲这么多，剩下的滚动再补
   artistAlbumShown: ARTIST_ALBUM_PAGE,
@@ -352,6 +355,7 @@ function bestFor(item, mode) {
 }
 
 function playCandidates(item) {
+  if (item && item.platform === 'work') return [{ format: 'wav', bitrate: 0 }];   // K 歌作品：wav 一种
   return qualityRank(item);
 }
 
@@ -361,6 +365,7 @@ const songKey = (it) => `${it.platform}_${it.id}`;
    「没有可用音质」。回源取一次完整条目补全，再写回原数组，下次不必重取。 */
 async function ensureMinfo(item) {
   if (!item || !item.platform || !item.id) return item;
+  if (item.platform === 'work') return item;   // 作品没有在线音质可补
   if ((item.minfo || []).length) return item;
   try {
     const d = await rpc('song', { platform: item.platform, id: item.id });
@@ -394,6 +399,9 @@ async function fetchUrl(item, q) {
 
 const mediaKey = (item, q) => `${item.platform}_${item.id}_${q.bitrate}_${q.format}`;
 function mediaSrc(item, q) {
+  if (item.platform === 'work') {           // K 歌作品：本机 works/ 目录里的 wav
+    return '/api/works/file?id=' + encodeURIComponent(item.id);
+  }
   if (item.platform === 'local') {          // 本地文件直连磁盘，不走在线代理与缓存
     return '/api/local/file?p=' + encodeURIComponent(item.id);
   }
@@ -1669,6 +1677,7 @@ function paintSpec() {
   const q = state.currentQuality;
   const el = $('#plSpec');
   if (!q) { el.textContent = '—'; return; }
+  if (state.playing && state.playing.platform === 'work') { el.textContent = '作品 · WAV'; return; }
   el.textContent = (q.format === 'flac' ? 'FLAC' : 'MP3') + ' · ' + q.bitrate + 'k';
 }
 
@@ -3153,6 +3162,7 @@ function currentViewHtml() {
     case 'album': return viewAlbum();
     case 'library': return viewLibrary();
     case 'local': return viewLocal();
+    case 'works': return viewWorks();
     case 'playlist': return viewPlaylist();
     case     'taste': return viewTaste();
     case 'styles': return viewStyles();
@@ -3366,6 +3376,8 @@ function renderSide() {
   $('#plCount').textContent = state.playlists.length || '';
   { const lc = $('#localCount');                 // 本地曲库计数：扫过了才显示数字
     if (lc) { lc.textContent = state.local.items.length || ''; lc.hidden = !state.local.loaded; } }
+  { const wc = $('#worksCount');                 // 作品计数：进过作品页才显示
+    if (wc) { wc.textContent = (state.works || []).length || ''; wc.hidden = !state.worksLoaded; } }
 
   $('#sidePlaylists').innerHTML = state.playlists.length
     ? state.playlists.slice(0, 20).map((p) => `<button class="side-item" data-act="playlist" data-id="${esc(p.id)}">
@@ -3549,6 +3561,7 @@ function renderNp() {
       <button class="btn ghost sm" data-act="lrc-off" data-d="0.5" title="歌词延后半秒（歌词比人声快时用）">+0.5s</button>
       <button class="btn ghost sm" data-act="lrc-off" data-d="0" data-reset hidden>复位</button>
       <span class="lrc-gap"></span>
+      <button class="btn ghost sm" data-act="karaoke">${icon('mic')}去K歌</button>
       <button class="btn ghost sm" data-act="lyric-full">放大歌词</button>
     </div>`;
   syncLrcOffUI();
@@ -3884,6 +3897,7 @@ function openCtxMenu(x, y, target) {
   let html = '';
   if (target.kind === 'song') {
     html = `<div class="qm-t">${esc(target.name || '')}</div>
+      <button data-act="ctx-karaoke">${icon('mic')}K歌这一首</button>
       <button data-act="ctx-add-pl" data-kind="song">${icon('list')}加入歌单…</button>`;
   } else if (target.kind === 'album') {
     html = `<div class="qm-t">${esc(target.name || '')} · 专辑</div>
@@ -5488,6 +5502,36 @@ document.addEventListener('click', async (e) => {
     case 'ltab': state.tabs.library = el.dataset.tab; render(); break;
     case 'more': loadMore(); break;
 
+    /* ------------------------------------------------------ K 歌 / 作品 */
+    case 'karaoke': karaokeStart(state.playing); break;
+    case 'ctx-karaoke': {
+      const t = _ctxTarget;
+      closeCtxMenu();
+      if (t && t.item) karaokeStart(t.item);
+      break;
+    }
+    case 'k-begin': karaokeBegin(); break;
+    case 'k-finish': karStop(); break;
+    case 'k-save': karSave(); break;
+    case 'k-discard':
+      karClose();
+      toast('已丢弃，没有保存');
+      break;
+    case 'k-close':
+      // 唱到一半点关闭：先转回顾页（录音还在），别一把丢掉用户的真声
+      if (KAR.phase === 'sing') karStop();
+      else karClose();
+      break;
+    case 'w-play': {
+      const i = (state.works || []).findIndex((w) => w.id === el.dataset.id);
+      if (i >= 0) playAt(state.works.map(workAsTrack), i, { source: '我的作品' });
+      break;
+    }
+    case 'w-playall':
+      if ((state.works || []).length) playAt(state.works.map(workAsTrack), 0, { source: '我的作品' });
+      break;
+    case 'w-del': workDelete(el.dataset.id); break;
+
     case 'playlist': go({ name: 'playlist', id: el.dataset.id }); break;
     case 'ctx-add-pl': {
       const t = _ctxTarget;
@@ -5852,6 +5896,472 @@ async function refreshStore() {
   } catch (e) {
     toast('读取本地数据失败：' + e.message, 'err');
   }
+}
+
+/* ------------------------------------------------------------------ K 歌（P8）
+   任选曲库里的歌开口唱。三条边界一开始就定死：
+   1. 音频图与播放器完全隔离：专用 <audio> + 专用 AudioContext，关层即
+      ctx.close() —— 浏览器对 AudioContext 实例数有上限（约 6 个），不还就饿死。
+   2. 录音只录 K 歌自己的混音总线（伴奏 + 人声），不碰播放器链路、不写
+      听歌统计 —— 唱歌不是「听歌」，不进 plays。
+   3. 消人声是经典中置相减（L−R），对「人声居中、两侧乐器」的混音有效，
+      效果因歌而异 —— UI 如实说，且随时可切回原声跟唱，不假装是 AI 分离。 */
+const KAR = {
+  open: false, item: null, phase: '',     // '' | 'ready' | 'count' | 'sing' | 'review'
+  ctx: null, el: null, cancel: null, orig: null, acc: null,
+  micGain: null, wet: null, micLevel: 0, micStream: null,
+  chunks: [], lines: [], sung: [], lastLine: -1, raf: 0,
+  accVol: 0.9, micVol: 1.0, vocalOff: false,
+  resume: null, t0: 0, saving: false, duration: 0,
+};
+const KAR_SING_THR = 0.035;   // 跟唱判定：行内 mic RMS 超过它算「唱了」（假麦正弦 ≈ 0.7）
+/* getUserMedia 必须绑在 mediaDevices 上调用：摘成裸函数再调会 Illegal invocation。 */
+const KAR_MON = () => (navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
+  ? navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices) : null;
+
+function karLineAt(t) {
+  const ls = KAR.lines;
+  let lo = 0, hi = ls.length - 1, ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (ls[mid].t <= t) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  return ans;
+}
+
+async function karaokeStart(item) {
+  if (!item || !item.id) return;
+  if (KAR.open) { toast('已经在 K 歌了'); return; }
+  if (!KAR_MON()) {
+    toast('这个窗口拿不到麦克风。用系统浏览器打开 ' + location.origin + ' 就能 K 歌', 'err');
+    return;
+  }
+  // 播放器让位：暂停并记下位置，退出 K 歌回到原位（不自动续播，避免惊喜）
+  const a = audio();
+  if (state.playing && a.src) {
+    KAR.resume = { position: a.currentTime || 0 };
+    a.pause();
+  } else KAR.resume = null;
+  KAR.item = item;
+  KAR.phase = 'ready';
+  KAR.chunks = [];
+  KAR.lastLine = -1;
+  KAR.saving = false;
+  // 歌词尽力取：拿不到（本地文件多数没有）就纯伴奏唱，不阻塞开唱
+  try {
+    const d = await rpc('getlyric', {
+      platform: item.platform, id: item.id, time: item.time, sign: item.sign,
+    });
+    const raw = (d && (d.lyric || d.lrc)) || (typeof d === 'string' ? d : '');
+    const trans = (d && (d.tlyric || d.tLyric || d.trans)) || '';
+    KAR.lines = parseLrc(raw, trans);
+  } catch (e) { KAR.lines = []; }
+  KAR.sung = KAR.lines.map(() => false);
+  KAR.open = true;
+  $('#singLayer').hidden = false;
+  karPaintReady();
+  karBindOnce();
+}
+
+function karPaintReady() {
+  const it = KAR.item || {};
+  $('#kTitle').textContent = it.name || '';
+  $('#kArtist').textContent = it.artist || '本地伴奏';
+  const bg = $('#kBg');
+  if (it.cover) { bg.style.backgroundImage = `url("${String(it.cover).replace(/"/g, '')}")`; }
+  else bg.style.backgroundImage = 'none';
+  $('#kStage').innerHTML = `
+    <div class="k-ready">
+      <div class="k-ready-t">准备好开嗓</div>
+      <div class="k-ready-s">${KAR.lines.length
+        ? `已就位 ${KAR.lines.length} 行歌词 · 建议戴耳机（避免伴奏串进麦克风）`
+        : '这首歌没找到带时间轴的歌词 · 纯伴奏模式'}</div>
+      <button class="btn primary lg" id="kBegin" data-act="k-begin">${icon('mic')}开始演唱</button>
+      <div class="k-hint">全程录音只保存在本机，唱完由你决定保存或丢弃</div>
+    </div>`;
+  karPaintCtl(true);
+}
+
+/** 控制条只绑一次（oninput/onclick 赋值，重复 open 不叠加） */
+function karBindOnce() {
+  const acc = $('#kAccVol'), mic = $('#kMicVol'), voc = $('#kVocal');
+  acc.oninput = () => {
+    KAR.accVol = Number(acc.value) / 100;
+    if (KAR.acc) KAR.acc.gain.setTargetAtTime(KAR.accVol, KAR.ctx.currentTime, 0.03);
+  };
+  mic.oninput = () => {
+    KAR.micVol = Number(mic.value) / 100;
+    if (KAR.micGain) KAR.micGain.gain.setTargetAtTime(KAR.micVol, KAR.ctx.currentTime, 0.03);
+  };
+  voc.onchange = () => {
+    KAR.vocalOff = voc.checked;
+    karSetVocal(!KAR.vocalOff);
+    toast(voc.checked ? '已切回原声（跟原唱一起唱）' : '已减弱原声（中置消人声，效果因歌而异）');
+  };
+}
+
+function karSetVocal(cancelOn) {
+  if (!KAR.ctx) return;
+  const now = KAR.ctx.currentTime;
+  try {
+    KAR.cancel.gain.setTargetAtTime(cancelOn ? 1 : 0, now, 0.05);
+    KAR.orig.gain.setTargetAtTime(cancelOn ? 0 : 1, now, 0.05);
+  } catch (e) {
+    KAR.cancel.gain.value = cancelOn ? 1 : 0;
+    KAR.orig.gain.value = cancelOn ? 0 : 1;
+  }
+}
+
+/** 音频图 + 录音抽头。全程 try 包死：K 歌失败不能把整个播放器拖下水 */
+function karBuild(stream) {
+  try {
+    const CE = window.AudioContext || window.webkitAudioContext;
+    if (!CE) return false;
+    const ctx = new CE();
+    const el = document.createElement('audio');
+    el.id = 'kAudio';
+    el.preload = 'auto';
+    el.setAttribute('playsinline', '');
+    document.body.appendChild(el);
+    el.src = mediaSrc(KAR.item, playCandidates(KAR.item)[0]);
+
+    const src = ctx.createMediaElementSource(el);
+    const split = ctx.createChannelSplitter(2);
+    const l = ctx.createGain(); l.gain.value = 0.5;
+    const r = ctx.createGain(); r.gain.value = -0.5;
+    const cancel = ctx.createGain(); cancel.gain.value = 1;
+    const orig = ctx.createGain(); orig.gain.value = 0;
+    const acc = ctx.createGain(); acc.gain.value = KAR.accVol;
+    src.connect(split);
+    split.connect(l, 0); split.connect(r, 1);
+    l.connect(cancel); r.connect(cancel);
+    src.connect(orig);
+    cancel.connect(acc); orig.connect(acc);
+
+    const bus = ctx.createGain(); bus.gain.value = 1;
+    acc.connect(bus);
+
+    const micSrc = ctx.createMediaStreamSource(stream);
+    const micGain = ctx.createGain(); micGain.gain.value = KAR.micVol;
+    micSrc.connect(micGain);
+    // 「房间感」：120ms 反馈延迟 + 低通，当湿润层，默认全干（0）
+    const wet = ctx.createGain(); wet.gain.value = 0;
+    const dly = ctx.createDelay(0.5); dly.delayTime.value = 0.12;
+    const fb = ctx.createGain(); fb.gain.value = 0.25;
+    const damp = ctx.createBiquadFilter(); damp.type = 'lowpass'; damp.frequency.value = 3200;
+    micGain.connect(dly); dly.connect(damp); damp.connect(fb); fb.connect(dly);
+    damp.connect(wet);
+    micGain.connect(bus); wet.connect(bus);
+
+    const rec = ctx.createScriptProcessor(4096, 2, 2);
+    const sink = ctx.createGain(); sink.gain.value = 0;    // SP 必须连到 destination 才会跑
+    bus.connect(rec); rec.connect(sink); sink.connect(ctx.destination);
+    bus.connect(ctx.destination);                          // 监听：伴奏 + 自己的声音
+
+    // 麦克风电平抽头：走与录音同构的 ScriptProcessor，读到的就是真正进
+    // 混音总线的那一路 —— 电平条与成品录音同源，不会出现「看着有电平、
+    // 存下来却是静音」。人声是断续的，加一点峰值保持让条子不闪成 0。
+    const micTap = ctx.createScriptProcessor(1024, 1, 1);
+    const micSink = ctx.createGain(); micSink.gain.value = 0;
+    micSrc.connect(micTap); micTap.connect(micSink); micSink.connect(ctx.destination);
+    micTap.onaudioprocess = (e) => {
+      const d = e.inputBuffer.getChannelData(0);
+      let s = 0;
+      for (let i = 0; i < d.length; i += 1) s += d[i] * d[i];
+      const rms = Math.sqrt(s / d.length);
+      KAR.micLevel = Math.max(rms, (KAR.micLevel || 0) * 0.82);
+    };
+
+    rec.onaudioprocess = (e) => {
+      if (KAR.phase !== 'sing') return;      // 倒数 / 回顾不进录音
+      KAR.chunks.push([new Float32Array(e.inputBuffer.getChannelData(0)),
+                       new Float32Array(e.inputBuffer.getChannelData(1))]);
+    };
+
+    Object.assign(KAR, { ctx, el, cancel, orig, acc, micGain, wet,
+      micLevel: 0, micStream: stream });
+    el.addEventListener('ended', () => { if (KAR.phase === 'sing') karStop(); });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function karaokeBegin() {
+  if (!KAR.open || KAR.phase === 'sing' || KAR.phase === 'count') return;
+  let stream;
+  try {
+    stream = await KAR_MON()({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+    });
+  } catch (e) {
+    toast('拿不到麦克风：' + (e && (e.name || e.message) || '权限被拒绝'), 'err');
+    return;
+  }
+  if (!karBuild(stream)) {
+    toast('K 歌音频初始化失败', 'err');
+    stream.getTracks().forEach((t) => t.stop());
+    return;
+  }
+  karSetVocal(!KAR.vocalOff);
+  KAR.phase = 'count';
+  $('#kStage').innerHTML = '<div class="k-count" id="kCount">3</div>';
+  karPaintCtl(false);
+  try { await KAR.ctx.resume(); } catch (e) { /* ignore */ }
+  for (const n of [3, 2, 1]) {
+    const c = $('#kCount');
+    if (!c) return;                        // 期间关了层
+    c.textContent = n;
+    await new Promise((res) => setTimeout(res, 700));
+  }
+  karGo();
+}
+
+function karGo() {
+  if (!KAR.open || !KAR.el) return;
+  KAR.phase = 'sing';
+  KAR.t0 = Date.now();
+  KAR.chunks = [];
+  const p = KAR.el.play();
+  if (p && p.catch) p.catch(() => { toast('伴奏没能播出来', 'err'); });
+  karPaintCtl(false, true);
+  cancelAnimationFrame(KAR.raf);
+  KAR.raf = requestAnimationFrame(karLoop);
+}
+
+function karLoop() {
+  if (!KAR.open) return;
+  KAR.raf = requestAnimationFrame(karLoop);
+  if (KAR.phase !== 'sing' || !KAR.el) return;
+  const el = KAR.el;
+  const pos = el.currentTime || 0;
+  const dur = (isFinite(el.duration) && el.duration) || KAR.item.duration || 0;
+  $('#kRecTime').textContent = fmtTime(pos) + (dur ? ' / ' + fmtTime(dur) : '');
+  if (dur) $('#kProgFill').style.width = Math.min(100, (pos / dur) * 100).toFixed(2) + '%';
+
+  // 电平条（麦克风）：与录音同构的 SP 抽头读到的 RMS
+  const rms = KAR.micLevel || 0;
+  const lvl = $('#kMicLvl');
+  if (lvl) lvl.style.width = Math.min(100, rms * 220).toFixed(1) + '%';
+
+  // 行进 + 跟唱判定
+  const t = pos + LRC_OFF;
+  const idx = KAR.lines.length ? karLineAt(t) : -1;
+  if (idx !== KAR.lastLine) {
+    KAR.lastLine = idx;
+    karPaintLines(idx);
+  }
+  if (idx >= 0 && rms > KAR_SING_THR) KAR.sung[idx] = true;
+}
+
+function karPaintLines(idx) {
+  const box = $('#kLines');
+  if (!box) return;
+  const ls = KAR.lines;
+  if (!ls.length) { box.innerHTML = '<div class="k-nolrc">纯伴奏模式 · 尽情唱</div>'; return; }
+  const row = (l, cls) => `<div class="k-line ${cls}">${esc((l && l.text) || '')}`
+    + ((l && l.trans) ? `<span class="k-trans">${esc(l.trans)}</span>` : '') + '</div>';
+  box.innerHTML = (ls[idx - 1] ? row(ls[idx - 1], 'dim') : '<div class="k-line dim"></div>')
+    + (ls[idx] ? row(ls[idx], 'now') : '<div class="k-line now">&nbsp;</div>')
+    + (ls[idx + 1] ? row(ls[idx + 1], 'dim') : '<div class="k-line dim"></div>');
+}
+
+function karStop() {
+  if (KAR.phase !== 'sing') return;
+  KAR.phase = 'review';
+  try { KAR.el.pause(); } catch (e) { /* ignore */ }
+  const sung = KAR.sung.filter(Boolean).length;
+  const total = KAR.lines.filter((l, i, a) => !i || a[i].t - a[i - 1].t > 0.5).length || KAR.lines.length;
+  const secs = Math.round((Date.now() - KAR.t0) / 1000);
+  KAR.duration = secs;                 // 保存时用录制时长，不含回顾页停留
+  KAR.blob = karWav(KAR.chunks, KAR.ctx ? KAR.ctx.sampleRate : 48000);
+  KAR.chunks = [];
+  $('#kStage').innerHTML = `
+    <div class="k-review">
+      <div class="k-score">${KAR.lines.length
+        ? `跟唱 <b>${sung}</b> / ${total} 行` : '录音完成'}</div>
+      <div class="k-ready-s">时长 ${fmtTime(secs)} · ${Math.round((KAR.blob.size || 0) / 1048576 * 10) / 10} MB · 只存在本机</div>
+      <div class="k-review-acts">
+        <button class="btn primary" data-act="k-save" ${KAR.blob ? '' : 'disabled'}>${icon('check')}保存作品</button>
+        <button class="btn ghost" data-act="k-discard">${icon('trash')}丢弃</button>
+      </div>
+    </div>`;
+  karPaintCtl(false);
+}
+
+/** 两声道交错 → 16bit PCM WAV（44 字节头） */
+function karWav(chunks, rate) {
+  const frames = chunks.reduce((n, c) => n + c[0].length, 0);
+  if (!frames) return null;
+  const buf = new ArrayBuffer(44 + frames * 4);
+  const v = new DataView(buf);
+  const ws = (o, s) => { for (let i = 0; i < s.length; i += 1) v.setUint8(o + i, s.charCodeAt(i)); };
+  ws(0, 'RIFF'); v.setUint32(4, 36 + frames * 4, true); ws(8, 'WAVE'); ws(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 2, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 4, true);
+  v.setUint16(32, 4, true); v.setUint16(34, 16, true);
+  ws(36, 'data'); v.setUint32(40, frames * 4, true);
+  let o = 44;
+  for (const c of chunks) {
+    const n = Math.min(c[0].length, c[1].length);
+    for (let i = 0; i < n; i += 1) {
+      const Lv = Math.max(-1, Math.min(1, c[0][i]));
+      const Rv = Math.max(-1, Math.min(1, c[1][i]));
+      v.setInt16(o, Lv < 0 ? Lv * 32768 : Lv * 32767, true); o += 2;
+      v.setInt16(o, Rv < 0 ? Rv * 32768 : Rv * 32767, true); o += 2;
+    }
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+async function karSave() {
+  if (KAR.saving || !KAR.blob) return;
+  KAR.saving = true;
+  const it = KAR.item || {};
+  const q = new URLSearchParams({
+    name: it.name || '未命名作品', artist: it.artist || '',
+    platform: it.platform || '', sid: String(it.id || ''),
+    cover: it.cover || '', duration: String(KAR.duration || 0),
+  });
+  // 录音是二进制：post() 固定 JSON.stringify，会把 Blob 变成 "{}"，
+  // 后端按 Content-Length 只读到 2 字节就拒了。这里发 raw octet-stream。
+  try {
+    const r = await fetch('/api/works/upload?' + q.toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: KAR.blob,
+    });
+    const d = await r.json().catch(() => ({}));
+    if (d && d.ok && d.data) {
+      state.works = [d.data].concat(state.works || []);
+      state.worksLoaded = true;
+      renderSide();
+      toast('作品已保存，去「我的作品」听听');
+      karClose();
+    } else {
+      toast((d && d.error) || '保存失败', 'err');
+      KAR.saving = false;
+    }
+  } catch (e) {
+    toast('保存失败：' + (e.message || e), 'err');
+    KAR.saving = false;
+  }
+}
+
+function karClose() {
+  cancelAnimationFrame(KAR.raf);
+  if (KAR.micStream) KAR.micStream.getTracks().forEach((t) => t.stop());
+  if (KAR.el) {
+    try { KAR.el.pause(); KAR.el.removeAttribute('src'); KAR.el.load(); } catch (e) { /* ignore */ }
+    KAR.el.remove();
+  }
+  if (KAR.ctx) { try { KAR.ctx.close(); } catch (e) { /* ignore */ } }
+  Object.assign(KAR, { open: false, phase: '', ctx: null, el: null, cancel: null,
+    orig: null, acc: null, micGain: null, wet: null, micLevel: 0,
+    micStream: null, chunks: [], blob: null, duration: 0, lastLine: -1 });
+  $('#singLayer').hidden = true;
+  // 还位：播放器回到进入前的位置（保持暂停，用户自己决定续不续）
+  if (KAR.resume) {
+    const a = audio();
+    if (a.src) {
+      try { a.currentTime = KAR.resume.position; } catch (e) { /* ignore */ }
+    }
+    KAR.resume = null;
+  }
+  $('#playBtn').innerHTML = icon('play');
+}
+
+/** 控制条的显隐与按钮文案（ready/count/sing/review 各态不同） */
+function karPaintCtl(ready, singing) {
+  const layer = $('#singLayer');
+  if (layer) layer.classList.toggle('sing', !!singing);
+  const fin = $('#kFinish');
+  if (fin) fin.hidden = !singing;
+  const back = $('#kBack');
+  if (back) back.hidden = !!singing;
+}
+
+/* ------------------------------------------------------------------ 我的作品 */
+async function loadWorks(force) {
+  if (state.worksLoaded && !force) return;
+  state.worksLoading = true;
+  if (state.route.name === 'works') render();
+  try {
+    const d = await fetch('/api/works').then((r) => r.json());
+    state.works = (d && d.data) || [];
+    state.worksLoaded = true;
+  } catch (e) {
+    state.worksError = e.message;
+  }
+  state.worksLoading = false;
+  if (state.route.name === 'works') render();
+}
+
+function viewWorks() {
+  if (!state.worksLoaded && !state.worksLoading) loadWorks();
+  const works = state.works || [];
+  const head = `<div class="vhead vhead-row">
+    <div>
+      <div class="kicker">MY COVERS</div>
+      <h1>我的作品</h1>
+      <p class="sub">${works.length
+        ? `<span class="mono">${works.length}</span> 个翻唱录音 · 只保存在本机`
+        : '在这里收录你自己唱的歌'}</p>
+    </div>
+    <div class="vhead-acts">
+      ${works.length ? `<button class="btn primary" data-act="w-playall">${icon('play')}播放全部</button>` : ''}
+    </div>
+  </div>`;
+  let body;
+  if (state.worksLoading && !works.length) body = emptyHtml('mic', '正在读取…', '从本机取作品列表');
+  else if (!works.length) {
+    body = emptyHtml('mic', '还没有作品',
+      '播放任意一首歌 → 正在播放面板 → 「去K歌」，唱完保存就会出现在这里');
+  } else {
+    body = `<div class="cards">${works.map((w) => `
+      <div class="card wcard">
+        <div class="card-art">${w.cover
+          ? `<img src="${esc(w.cover)}" alt="" onerror="this.remove()">` : phImg('song')}
+          <button class="card-play" data-act="w-play" data-id="${esc(w.id)}" title="播放">${icon('play')}</button>
+        </div>
+        <div class="card-name ell">${esc(w.name || '未命名作品')}</div>
+        <div class="card-sub ell">${esc(w.artist || '原唱未知')}</div>
+        <div class="wcard-foot">
+          <span class="mono">${fmtTime(w.duration || 0)} · ${new Date((w.created || 0) * 1000)
+            .toLocaleDateString()}</span>
+          <span class="wcard-acts">
+            <a class="ic" href="/api/works/file?id=${esc(w.id)}" download="${esc((w.name || '作品') + '.wav')}"
+               title="导出 WAV">${icon('dl')}</a>
+            <button class="ic" data-act="w-del" data-id="${esc(w.id)}" title="删除">${icon('trash')}</button>
+          </span>
+        </div>
+      </div>`).join('')}</div>`;
+  }
+  return `<div class="page">${head}${body}</div>`;
+}
+
+async function workDelete(id) {
+  const w = (state.works || []).find((x) => x.id === id);
+  if (!w) return;
+  // 破坏性操作，先问一句（与「清空收藏」同级）
+  if (!confirm(`删除作品「${w.name || '未命名'}」？\n\n录音文件会一并从磁盘删掉，不可恢复。`)) return;
+  try {
+    await post('/api/works/delete', { id });
+    state.works = (state.works || []).filter((x) => x.id !== id);
+    renderSide();
+    render();
+    toast('已删除');
+  } catch (e) {
+    toast('删除失败：' + (e.message || e), 'err');
+  }
+}
+
+/** 作品 meta → 可播放条目（playCandidates/mediaSrc 对 platform 'work' 有短路） */
+function workAsTrack(w) {
+  return {
+    platform: 'work', id: w.id, name: w.name || '未命名作品',
+    artist: w.artist || '我的作品', cover: w.cover || '', duration: w.duration || 0,
+  };
 }
 
 async function boot() {

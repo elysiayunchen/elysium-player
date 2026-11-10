@@ -1481,6 +1481,79 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
 .sync-badge{display:inline-block;margin-right:8px;color:var(--accent);
   background:var(--accent-dim);border-radius:6px;padding:1px 7px;font-size:11px}
 
+/* ---- K 歌（P8）：全屏演唱层 + 我的作品 ----
+   z-index 70：压过抽屉(30)/右键菜单(55)/输入浮层(60)。背景图模糊铺底，
+   再盖一层主题色渐变，明暗两套都保证歌词对比度。 */
+.sing-layer{
+  position:fixed;inset:0;z-index:70;display:flex;flex-direction:column;
+  background:var(--bg);color:var(--ink);overflow:hidden;
+}
+.k-bg{
+  position:absolute;inset:-8%;background:center/cover no-repeat;
+  filter:blur(46px) saturate(1.35);opacity:.28;transform:scale(1.12);
+  pointer-events:none;
+}
+.sing-layer::after{
+  content:'';position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(180deg,transparent 0%,var(--bg) 96%);opacity:.72;
+}
+.k-head,.k-prog,.k-stage,.k-lines,.k-ctl{position:relative;z-index:1}
+.k-head{display:flex;align-items:center;gap:16px;padding:18px 26px 14px;flex:0 0 auto}
+.k-meta{min-width:0;flex:1}
+.k-title{font-size:19px;font-weight:650;letter-spacing:.01em}
+.k-artist{font-size:12px;color:var(--muted);margin-top:3px}
+.k-rec{font-size:13px;color:var(--accent);letter-spacing:.06em}
+.k-x{width:32px;height:32px;flex:0 0 32px}
+.k-prog{height:3px;background:var(--line);flex:0 0 auto}
+.k-prog-fill{height:100%;width:0;background:var(--accent);transition:width .12s linear}
+.k-stage{flex:1 1 auto;min-height:0;display:flex;align-items:center;
+  justify-content:center;padding:12px 24px;text-align:center}
+.k-ready,.k-review{display:flex;flex-direction:column;align-items:center;
+  gap:12px;max-width:520px}
+.k-ready-t{font-size:24px;font-weight:700}
+.k-ready-s{font-size:12.5px;color:var(--ink-2);line-height:1.7}
+.k-hint{font-size:11px;color:var(--muted)}
+.btn.lg{height:40px;padding:0 22px;font-size:13px}
+.k-count{font-size:96px;font-weight:700;color:var(--accent);
+  font-variant-numeric:tabular-nums}
+.k-score{font-size:19px}
+.k-score b{color:var(--accent);font-size:24px}
+.k-review-acts{display:flex;gap:10px;margin-top:8px}
+.k-lines{flex:0 0 auto;height:132px;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:9px;padding:0 24px;text-align:center}
+.k-line{font-size:15px;color:var(--ink-2);line-height:1.5;max-width:760px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.k-line.dim{color:var(--muted);opacity:.62;font-size:12.5px}
+.k-line.now{color:var(--ink);font-size:19px;font-weight:650}
+.k-trans{display:block;font-size:11px;font-weight:400;color:var(--muted);margin-top:3px}
+.k-nolrc{font-size:12px;color:var(--muted)}
+.k-ctl{flex:0 0 auto;display:flex;align-items:center;justify-content:center;
+  gap:16px;flex-wrap:wrap;padding:14px 24px 22px;
+  border-top:1px solid var(--line);background:var(--bg-soft)}
+.k-vol{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--muted)}
+.k-vol svg{width:14px;height:14px;fill:currentColor}
+.k-vol input[type=range]{width:92px}
+.k-meter{width:64px;height:4px;border-radius:4px;background:var(--hover-2);overflow:hidden}
+.k-meter span{display:block;height:100%;width:0;background:var(--accent);
+  transition:width .08s}
+.k-vocal{display:flex;align-items:center;gap:6px;font-size:11.5px;
+  color:var(--ink-2);cursor:pointer}
+.k-vocal input{accent-color:var(--accent)}
+.sing-layer.sing .k-bg{opacity:.36}
+/* 迷你条 / 矮窗：收紧留白，别让控制条把歌词挤没 */
+@media (max-height:420px){
+  .k-stage{padding:4px 16px}
+  .k-lines{height:66px;gap:2px}
+  .k-line.now{font-size:15px}
+  .k-ctl{padding:6px 14px 10px;gap:9px}
+  .k-ready-t{font-size:17px}
+  .k-hint{display:none}
+}
+/* 我的作品：沿用 .cards/.card 骨架，只补日期 + 导出/删除脚注 */
+.wcard-foot{display:flex;align-items:center;justify-content:space-between;
+  gap:6px;margin-top:7px;font-size:10px;color:var(--muted)}
+.wcard-acts{display:flex;gap:3px;flex:0 0 auto}
+.wcard-acts .ic{width:22px;height:22px;border-radius:5px}
 /* ---------------------------------------------------------------- 曲库目录 */
 .lib-dirs{margin:8px 0 6px;border:1px solid var(--line);border-radius:9px;overflow:hidden}
 .lib-dir{display:flex;align-items:center;gap:8px;padding:8px 10px;font-size:11.5px;
