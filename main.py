@@ -38,7 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "Elysium"
 APP_TITLE = "Elysium - 在线音乐"
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 _BASE_URL = ""            # main() 里落值；桌面歌词小窗据此建页
 _LYRIC_WIN = None         # 桌面歌词小窗句柄（pywebview window 或 None）
 LEGACY_NAME = "FlacMusic"
@@ -117,6 +117,12 @@ DEFAULT_STORE = {
         "eq_enabled": False,        # 均衡器总开关
         "eq_preset": "flat",        # flat / bass / vocal / classical / pop / rock / custom
         "eq_gains": [0] * 10,       # 10 段实际生效的 dB 值，eq_preset 只是来源标记
+        # 额外曲库目录：默认空 = 仍只扫下载目录，老用户零变化。
+        # 只收用户显式添加的目录，不做全盘扫描（这条边界不放开）。
+        "local_dirs": [],
+        # --- 窗口 ---
+        "tray": True,               # 托盘图标；关掉后关闭按钮只能退出
+        "close_behavior": "exit",   # exit / tray：点关闭时退出还是收进托盘
     },
     "favorites": [],                # 收藏：{kind: song|album|artist, ...}
     "history": [],                  # 搜索历史
@@ -2253,22 +2259,171 @@ def cache_track(item, quality, tier="today"):
 # --------------------------------------------------------------------------
 LOCAL_AUDIO_EXTS = (".mp3", ".m4a", ".flac", ".ogg", ".oga", ".opus",
                     ".wav", ".wma", ".ape")
-_LOCAL_SCAN = {"at": 0.0, "dir": "", "sig": None, "items": []}
+_LOCAL_SCAN = {"at": 0.0, "roots": (), "sig": None, "items": []}
 _LOCAL_TAGS = {}          # path -> (mtime, tags tuple)；重扫时只读新增/变过的文件
 _LOCAL_COVER = {"key": "", "blob": None, "mime": ""}
+_LOCAL_LOCK = threading.RLock()
+# 大库不能同步扫：mutagen 逐个文件读标签，10k 首要几十秒，前端会先等到超时。
+# 超过这个数就先给文件名列表（秒级），标签放后台补，进度走 scanning 字段。
+_LOCAL_ASYNC_LIMIT = 800
+_LOCAL_TASK = {"running": False, "total": 0, "done": 0, "started": 0.0, "error": ""}
 
 
 def _local_dir():
     return STORE.data.get("settings", {}).get("download_dir") or default_download_dir()
 
 
+def _local_make_item(p, size, lid, deep):
+    stem = os.path.splitext(os.path.basename(p))[0]
+    if deep:
+        title, artist, album, fmt, dur, br = _local_read_tags(p, stem)
+    else:
+        title, artist, album = stem, "", ""
+        fmt, dur, br = os.path.splitext(p)[1].lower().lstrip("."), 0, 0
+    if not fmt:
+        fmt = os.path.splitext(p)[1].lower().lstrip(".") or "mp3"
+    return {
+        "platform": "local", "id": lid, "name": title, "artist": artist,
+        "album_name": album, "duration": dur, "size": size,
+        "format": fmt, "bitrate": br,
+        "minfo": [{"format": fmt, "bitrate": br or 320}],
+    }
+
+
+def _local_scan_worker(entries, sig):
+    """后台补标签：逐条替换首批的「文件名占位」，每完成一条就推进进度。"""
+    try:
+        for i, (p, size, _mtime, lid) in enumerate(entries):
+            item = _local_make_item(p, size, lid, True)
+            with _LOCAL_LOCK:
+                if i < len(_LOCAL_SCAN["items"]):
+                    _LOCAL_SCAN["items"][i] = item
+                _LOCAL_TASK["done"] = i + 1
+        with _LOCAL_LOCK:
+            _LOCAL_SCAN["sig"] = sig
+            _LOCAL_SCAN["at"] = time.time()
+            _LOCAL_TASK["running"] = False
+    except Exception as e:                                  # noqa: BLE001
+        with _LOCAL_LOCK:
+            _LOCAL_TASK["running"] = False
+            _LOCAL_TASK["error"] = str(e)
+
+
+def local_scan(force=False):
+    """扫描全部曲库根目录（下载目录 + 用户显式添加的目录）。
+
+    签名 = (根列表, 文件数, 最新 mtime)。签名没变且 120 秒内直接用缓存 ——
+    标签要逐文件走 mutagen，每次重扫都是几十秒的代价。
+    大库（> _LOCAL_ASYNC_LIMIT）先秒级返回文件名列表，标签在后台补。
+    """
+    roots = _local_roots()
+    with _LOCAL_LOCK:
+        if _LOCAL_TASK["running"]:
+            return {"dir": roots[0] if roots else "", "roots": roots,
+                    "items": _LOCAL_SCAN["items"], "cached": True,
+                    "scanning": dict(_LOCAL_TASK)}
+
+    entries = []
+    for idx, base in enumerate(roots):
+        try:
+            for root, dirs, files in os.walk(base):
+                dirs[:] = [x for x in dirs if not x.startswith((".", "$"))]
+                for fn in files:
+                    if os.path.splitext(fn)[1].lower() not in LOCAL_AUDIO_EXTS:
+                        continue
+                    p = os.path.join(root, fn)
+                    try:
+                        st = os.stat(p)
+                    except OSError:
+                        continue
+                    rel = os.path.relpath(p, base).replace("\\", "/")
+                    # 0 号根保持纯相对路径：老收藏 / 老歌单里存的就是这个格式
+                    entries.append((p, st.st_size, st.st_mtime,
+                                    rel if idx == 0 else "@%d/%s" % (idx, rel)))
+        except OSError:
+            continue
+    entries.sort(key=lambda e: -e[2])
+    sig = (tuple(roots), len(entries), int(max([e[2] for e in entries], default=0)))
+
+    with _LOCAL_LOCK:
+        fresh = (not force and _LOCAL_SCAN["sig"] == sig
+                 and time.time() - _LOCAL_SCAN["at"] < 120)
+        if fresh:
+            return {"dir": roots[0] if roots else "", "roots": roots,
+                    "items": _LOCAL_SCAN["items"], "cached": True,
+                    "scanning": dict(_LOCAL_TASK)}
+
+        fast = [_local_make_item(p, size, lid, False) for p, size, _m, lid in entries]
+        _LOCAL_SCAN.update(at=time.time(), roots=tuple(roots), sig=None, items=fast)
+
+    head = {"dir": roots[0] if roots else "", "roots": roots}
+
+    if len(entries) <= _LOCAL_ASYNC_LIMIT:
+        items = [_local_make_item(p, size, lid, True) for p, size, _m, lid in entries]
+        with _LOCAL_LOCK:
+            _LOCAL_SCAN.update(at=time.time(), sig=sig, items=items)
+        return dict(head, items=items, cached=False, scanning=dict(_LOCAL_TASK))
+
+    with _LOCAL_LOCK:
+        _LOCAL_TASK.update(running=True, total=len(entries), done=0,
+                           started=time.time(), error="")
+    threading.Thread(target=_local_scan_worker, name="local-scan",
+                     args=(entries, sig), daemon=True).start()
+    return dict(head, items=fast, cached=False, scanning=dict(_LOCAL_TASK))
+
+
+_LOCAL_ID_PREFIX = re.compile(r"^@(\d+)/(.+)$")
+
+
+def _local_roots():
+    """曲库根目录。0 号永远是下载目录（老数据的 id 就是它的相对路径），
+    后面是用户在设置里显式添加的目录。
+
+    只收真实存在的目录：移动硬盘拔掉时该根直接消失，不该让整个库扫不出来。
+    """
+    roots, seen = [], set()
+    main = _local_dir()
+    if main:
+        ap = os.path.abspath(main)
+        roots.append(ap)
+        seen.add(os.path.normcase(os.path.realpath(ap)))
+    for d in (STORE.data.get("settings", {}).get("local_dirs") or []):
+        d = str(d or "").strip()
+        if not d:
+            continue
+        ap = os.path.abspath(d)
+        key = os.path.normcase(os.path.realpath(ap))
+        if key in seen or not os.path.isdir(ap):
+            continue
+        seen.add(key)
+        roots.append(ap)
+    return roots
+
+
+def _local_split(local_id):
+    """曲目 id -> (根序号, 相对路径)。
+
+    0 号根的 id 保持「纯相对路径」不变 —— 老收藏、老歌单里存的就是这个格式，
+    改格式等于把用户的库弄丢。额外目录才带 `@n/` 前缀。
+    """
+    s = str(local_id or "").replace("\\", "/").lstrip("/")
+    m = _LOCAL_ID_PREFIX.match(s)
+    if m:
+        return int(m.group(1)), m.group(2)
+    return 0, s
+
+
 def local_resolve(rel):
-    """相对路径 -> 下载目录内的绝对路径。越界（.. / 绝对路径 / 目录外）一律拒绝。"""
-    rel = str(rel or "").replace("\\", "/").strip("/")
-    if not rel or any(seg in ("", ".", "..") for seg in rel.split("/")):
+    """曲目 id -> 绝对路径。越界（.. / 绝对路径 / 目录外）一律拒绝。"""
+    idx, tail = _local_split(rel)
+    roots = _local_roots()
+    if idx < 0 or idx >= len(roots):
         return None
-    base = os.path.realpath(_local_dir())
-    p = os.path.realpath(os.path.join(base, *rel.split("/")))
+    tail = tail.strip("/")
+    if not tail or any(seg in ("", ".", "..") for seg in tail.split("/")):
+        return None
+    base = os.path.realpath(roots[idx])
+    p = os.path.realpath(os.path.join(base, *tail.split("/")))
     low_p, low_b = p.lower(), base.lower()
     if not (low_p == low_b or low_p.startswith(low_b + os.sep)):
         return None
@@ -2336,46 +2491,6 @@ def _local_read_tags(path, stem):
         _LOCAL_TAGS.clear()
     _LOCAL_TAGS[path] = (mt, out)
     return out
-
-
-def local_scan(force=False):
-    """扫描下载目录。签名（目录 + 文件数 + 最新 mtime）没变且 120s 内直接用缓存。"""
-    d = _local_dir()
-    entries = []
-    try:
-        for root, dirs, files in os.walk(d):
-            dirs[:] = [x for x in dirs if not x.startswith((".", "$"))]
-            for fn in files:
-                if os.path.splitext(fn)[1].lower() not in LOCAL_AUDIO_EXTS:
-                    continue
-                p = os.path.join(root, fn)
-                try:
-                    st = os.stat(p)
-                except OSError:
-                    continue
-                entries.append((p, st.st_size, st.st_mtime))
-    except OSError:
-        entries = []
-    sig = (d, len(entries), int(max([e[2] for e in entries], default=0)))
-    fresh = (not force and _LOCAL_SCAN["dir"] == d and _LOCAL_SCAN["sig"] == sig
-             and time.time() - _LOCAL_SCAN["at"] < 120)
-    if fresh:
-        return {"dir": d, "items": _LOCAL_SCAN["items"], "cached": True}
-    items = []
-    for p, size, mtime in sorted(entries, key=lambda e: -e[2]):
-        rel = os.path.relpath(p, d).replace("\\", "/")
-        stem = os.path.splitext(os.path.basename(p))[0]
-        title, artist, album, fmt, dur, br = _local_read_tags(p, stem)
-        if not fmt:
-            fmt = os.path.splitext(p)[1].lower().lstrip(".") or "mp3"
-        items.append({
-            "platform": "local", "id": rel, "name": title, "artist": artist,
-            "album_name": album, "duration": dur, "size": size,
-            "format": fmt, "bitrate": br,
-            "minfo": [{"format": fmt, "bitrate": br or 320}],
-        })
-    _LOCAL_SCAN.update(at=time.time(), dir=d, sig=sig, items=items)
-    return {"dir": d, "items": items, "cached": False}
 
 
 def _sniff_image(b):
@@ -3814,6 +3929,59 @@ class Bridge:
         STORE.apply("settings", {"download_dir": path})
         return path
 
+    def pick_dir(self):
+        """选一个目录，只回路径、不动任何设置 —— 给「添加曲库目录」用。"""
+        import webview
+        win = webview.windows[0] if webview.windows else None
+        if not win:
+            return ""
+        try:
+            result = win.create_file_dialog(
+                webview.FOLDER_DIALOG,
+                directory=STORE.data["settings"].get("download_dir") or default_download_dir())
+        except Exception:                                   # noqa: BLE001
+            return ""
+        if not result:
+            return ""
+        path = result[0] if isinstance(result, (list, tuple)) else result
+        return str(path or "")
+
+    def mini_mode(self, on=True):
+        """迷你条（会话级，不落盘）：缩成小窗贴右下角，只留播放条。"""
+        win = _TRAY.get("win")
+        if not win:
+            return False
+        try:
+            if on:
+                try:
+                    Bridge._geo = (win.width or NORMAL_SIZE[0], win.height or NORMAL_SIZE[1])
+                except Exception:                       # noqa: BLE001
+                    Bridge._geo = NORMAL_SIZE
+                win.restore()
+                win.resize(*MINI_SIZE)
+                try:
+                    win.on_top = True
+                except Exception:                       # noqa: BLE001
+                    pass
+                try:
+                    import webview
+                    sc = webview.screens[0]
+                    win.move(max(0, sc.x + sc.width - MINI_SIZE[0] - 36),
+                             max(0, sc.y + sc.height - MINI_SIZE[1] - 96))
+                except Exception:                       # noqa: BLE001
+                    pass
+                return True
+            geo = getattr(Bridge, "_geo", NORMAL_SIZE) or NORMAL_SIZE
+            win.resize(int(geo[0]), int(geo[1]))
+            try:
+                win.on_top = False
+            except Exception:                           # noqa: BLE001
+                pass
+            win.show()
+            return True
+        except Exception:                               # noqa: BLE001
+            return False
+
     def open_path(self, path):
         try:
             if path and os.path.isdir(path):
@@ -4011,7 +4179,123 @@ def _dwm_set(hwnd, attr, value):
         return False
 
 
-def _apply_window_chrome():
+# --------------------------------------------------------------------------
+# 托盘 + 迷你条（P6）
+# --------------------------------------------------------------------------
+_TRAY = {"icon": None, "win": None}
+MINI_SIZE = (430, 138)
+NORMAL_SIZE = (1240, 820)
+
+
+def _tray_image():
+    """托盘图标：优先用应用自己的 logo，取不到就退回一块纯色，绝不因此起不来。"""
+    try:
+        from PIL import Image
+    except Exception:                                       # noqa: BLE001
+        return None
+    for name in ("app.png", "app.ico"):
+        p = os.path.join(resource_dir(), name)
+        if os.path.isfile(p):
+            try:
+                im = Image.open(p)
+                im.load()
+                return im if im.mode == "RGBA" else im.convert("RGBA")
+            except Exception:                               # noqa: BLE001
+                continue
+    return Image.new("RGBA", (64, 64), (255, 95, 141, 255))
+
+
+def _tray_js(code):
+    win = _TRAY.get("win")
+    if not win:
+        return False
+    try:
+        win.evaluate_js(code)
+        return True
+    except Exception:                                       # noqa: BLE001
+        return False
+
+
+def _tray_show(icon=None, item=None):
+    win = _TRAY.get("win")
+    if not win:
+        return
+    try:
+        win.show()
+        win.restore()
+    except Exception:                                       # noqa: BLE001
+        pass
+
+
+def _tray_quit(icon=None, item=None):
+    cur = _TRAY.get("icon")
+    try:
+        if cur:
+            cur.stop()
+    except Exception:                                       # noqa: BLE001
+        pass
+    win = _TRAY.get("win")
+    # 先摘引用：_on_closing 看到 win 为空就知道这次是「真退出」，不再拦
+    _TRAY["win"] = None
+    try:
+        if win:
+            win.destroy()
+    except Exception:                                       # noqa: BLE001
+        pass
+
+
+def start_tray(win):
+    """建托盘图标。装不上 pystray / 起不来就静默降级，主功能一点不受影响。"""
+    if _TRAY["icon"] is not None or os.name != "nt":
+        return False
+    try:
+        import pystray
+        from pystray import Menu, MenuItem
+    except Exception:                                       # noqa: BLE001
+        return False
+    image = _tray_image()
+    if image is None:
+        return False
+    _TRAY["win"] = win
+    menu = Menu(
+        MenuItem("显示主窗口", _tray_show, default=True),
+        Menu.SEPARATOR,
+        MenuItem("播放 / 暂停", lambda i, it: _tray_js(
+            "document.querySelector('#playBtn').click()")),
+        MenuItem("上一首", lambda i, it: _tray_js("playNext(-1)")),
+        MenuItem("下一首", lambda i, it: _tray_js("playNext(1)")),
+        Menu.SEPARATOR,
+        MenuItem("退出 Elysium", _tray_quit),
+    )
+    try:
+        icon = pystray.Icon("Elysium", image, "Elysium", menu)
+        icon.run_detached()
+    except Exception:                                       # noqa: BLE001
+        return False
+    _TRAY["icon"] = icon
+    return True
+
+
+def _on_closing(win):
+    """点关闭按钮：按设置决定「退出」还是「收进托盘」。
+
+    托盘没起来时一律真退出 —— 否则窗口一藏就再也叫不出来了，「关不掉」
+    比「关了就退」更吓人。
+    """
+    if _TRAY.get("win") is None:
+        return True
+    if (STORE.data.get("settings") or {}).get("close_behavior") != "tray":
+        return True
+    if _TRAY.get("icon") is None:
+        return True
+    try:
+        win.hide()
+    except Exception:                                       # noqa: BLE001
+        return True
+    return False
+
+
+def _apply_window_chrome(win=None):
     """窗口 ready 后补齐 ZCode 式质感，由 webview.start(func=...) 调用。
 
     38 = DWMWA_SYSTEMBACKDROP_TYPE, 3 = DWMSBT_TRANSIENTWINDOW (Desktop Acrylic)
@@ -4023,6 +4307,21 @@ def _apply_window_chrome():
     所以必须等窗口创建完再覆盖成 Acrylic。系统主题变化事件可能再写回 Mica，
     那依然有材质、界面不受影响；前端每次切主题也会经 win_set_theme 重申。
     """
+    if win is None:
+        try:
+            import webview
+            win = webview.windows[0] if webview.windows else None
+        except Exception:                                   # noqa: BLE001
+            win = None
+    if win is not None:
+        _TRAY["win"] = win
+        try:
+            win.events.closing += _on_closing
+        except Exception:                                   # noqa: BLE001
+            pass
+        if (STORE.data.get("settings") or {}).get("tray") is not False:
+            start_tray(win)
+
     hwnd = _chrome_hwnd()
     if not hwnd:
         return

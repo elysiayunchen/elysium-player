@@ -39,6 +39,12 @@ a = Analysis(
     datas=_WEB + _PROVIDERS + [(os.path.join(SPECPATH, 'app.png'), '.')],
     hiddenimports=[
         'importer',
+        'sync_engine',
+        # 托盘（P6）：pystray 的后端是按平台动态导入的，静态分析看不到
+        'pystray',
+        'pystray._win32',
+        'PIL.Image',
+        'PIL.ImageDraw',
         'webview.platforms.edgechromium',
         'clr_loader',
         'pythonnet',
@@ -51,6 +57,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
+    # PIL 是 pystray 的依赖，不能进 excludes；其余重型库照旧剔除
     excludes=['PyQt5', 'PyQt6', 'PySide2', 'PySide6', 'matplotlib', 'numpy', 'pandas'],
     noarchive=False,
     optimize=0,

@@ -112,7 +112,7 @@ const state = {
   tabs: { search: 'song', artist: 'song', library: 'song' },
   panelTab: 'queue',
   loading: false,
-  local: { items: [], dir: '', loaded: false, loading: false, error: '' },
+  local: { items: [], dir: '', roots: [], scanning: null, loaded: false, loading: false, error: '' },
   artist: null,
   artistShown: ARTIST_PAGE,          // 歌手页曲目：先渲这么多，剩下的滚动再补
   artistAlbumShown: ARTIST_ALBUM_PAGE,
@@ -1648,6 +1648,23 @@ function paintPlayer(item) {
   mediaPushMeta(true);            // SMTC 元数据 + Android 通知栏同步换曲
 }
 
+/* 迷你条：窗口缩成 430×138 只留播放条。窗口尺寸由 Python 侧改，
+   前端只负责切布局 —— 两边必须一起动，否则会出现「界面缩了但窗口还大」。 */
+function setMini(on) {
+  const api = window.pywebview && window.pywebview.api;
+  if (!api || typeof api.mini_mode !== 'function') {
+    toast('迷你条只在桌面端可用', 'err');
+    return;
+  }
+  document.documentElement.dataset.mini = on ? 'on' : 'off';
+  const btn = $('#miniBtn');
+  if (btn) {
+    btn.innerHTML = icon(on ? 'restore' : 'mini');
+    btn.title = on ? '还原窗口' : '迷你条';
+  }
+  try { api.mini_mode(!!on); } catch (e) { /* 窗口改不动就保持布局，至少不崩 */ }
+}
+
 function paintSpec() {
   const q = state.currentQuality;
   const el = $('#plSpec');
@@ -2975,6 +2992,8 @@ async function loadLocal(force) {
     if (!(r && r.ok)) throw new Error((r && r.error) || '扫描失败');
     L.items = r.data.items || [];
     L.dir = r.data.dir || '';
+    L.roots = r.data.roots || (r.data.dir ? [r.data.dir] : []);
+    L.scanning = r.data.scanning || null;
     L.loaded = true;
   } catch (e) {
     L.loaded = true;
@@ -2984,33 +3003,66 @@ async function loadLocal(force) {
   const c = $('#localCount');
   if (c) c.textContent = L.items.length || '';
   if (state.route.name === 'local') render();
+  pollLocalScan();
+}
+
+/* 大曲库：后端先把文件名列表秒级吐回来，标签在后台补。
+   这里轮询进度，只改头部那行字 —— 整页重绘会把人滚动到一半的列表弹回顶部。 */
+let localPollTimer = null;
+function pollLocalScan() {
+  const L = state.local;
+  if (localPollTimer) { clearTimeout(localPollTimer); localPollTimer = null; }
+  const sc = L.scanning;
+  if (!sc || !sc.running) return;
+  localPollTimer = setTimeout(async () => {
+    try {
+      const r = await getJson('/api/local/list');
+      if (r && r.ok) {
+        L.items = r.data.items || [];
+        L.roots = r.data.roots || L.roots;
+        L.scanning = r.data.scanning || null;
+        const c = $('#localCount');
+        if (c) c.textContent = L.items.length || '';
+        const sub = $('#localSub');
+        if (sub && L.scanning && L.scanning.running) {
+          sub.textContent = `正在读取标签 ${L.scanning.done} / ${L.scanning.total}…`;
+        } else if (state.route.name === 'local') {
+          render();
+        }
+      }
+    } catch (e) { /* 下一轮再试 */ }
+    pollLocalScan();
+  }, 900);
 }
 
 function viewLocal() {
   const L = state.local;
   if (!L.loaded && !L.loading) loadLocal();
-  const dirShort = (L.dir || '').replace(/^([A-Za-z]):\\/, '$1:\\');
+  const rootsN = (L.roots || []).length;
+  const sc = L.scanning;
   const head = `<div class="vhead vhead-row">
     <div>
       <div class="kicker">LOCAL LIBRARY</div>
       <h1>本地音乐</h1>
-      <p class="sub">${L.loading
-        ? '正在扫描下载目录…'
+      <p class="sub" id="localSub">${L.loading
+        ? '正在扫描曲库…'
         : L.error
           ? `扫描失败：${esc(L.error)}`
-          : L.items.length
-            ? `<span class="mono">${L.items.length}</span> 个本地文件 · ${esc(dirShort)}`
-            : '下载目录里还没有音频文件'}</p>
+          : sc && sc.running
+            ? `正在读取标签 ${sc.done} / ${sc.total}…`
+            : L.items.length
+              ? `<span class="mono">${L.items.length}</span> 个本地文件 · ${rootsN > 1 ? rootsN + ' 个目录' : '下载目录'}`
+              : rootsN > 1 ? '这些目录里还没有音频文件' : '下载目录里还没有音频文件'}</p>
     </div>
     <div class="vhead-acts">
-      <button class="btn" data-act="local-refresh" title="重新扫描下载目录">${icon('retry')}重新扫描</button>
+      <button class="btn" data-act="local-refresh" title="重新扫描曲库目录">${icon('retry')}重新扫描</button>
       ${L.items.length ? `<button class="btn primary" data-act="local-playall">${icon('play')}播放全部</button>` : ''}
     </div>
   </div>`;
   let body;
-  if (L.loading && !L.items.length) body = emptyHtml('disc', '正在扫描…', '读取下载目录里的音频文件');
-  else if (L.error && !L.items.length) body = emptyHtml('folder', '扫不到这个目录', '可以在「设置 → 下载」里换一个目录再试');
-  else if (!L.items.length) body = emptyHtml('folder', '这里是空的', '下载几首歌之后，它们会自动出现在这里');
+  if (L.loading && !L.items.length) body = emptyHtml('disc', '正在扫描…', '读取曲库目录里的音频文件');
+  else if (L.error && !L.items.length) body = emptyHtml('folder', '扫不到这个目录', '可以在「设置 → 本地曲库」里换一个目录再试');
+  else if (!L.items.length) body = emptyHtml('folder', '这里是空的', '下载几首歌，或在设置里添加你的音乐目录');
   else body = trackListHtml(L.items, { empty: '' });
   return `<div class="page">${head}${body}</div>`;
 }
@@ -4130,6 +4182,37 @@ async function syncCommit() {
   }
 }
 
+/* 曲库目录清单：0 号（下载目录）只读，其余可移除。移除只解除关联，不动文件。 */
+function libDirsHtml() {
+  const s = state.settings || {};
+  const main = s.download_dir || '';
+  const extra = Array.isArray(s.local_dirs) ? s.local_dirs : [];
+  let html = `<div class="lib-dir main">
+    <span class="ld-tag">下载目录</span>
+    <span class="ld-path mono" title="${esc(main)}">${esc(main)}</span>
+  </div>`;
+  extra.forEach((d, i) => {
+    html += `<div class="lib-dir">
+      <span class="ld-tag alt">曲库 ${i + 1}</span>
+      <span class="ld-path mono" title="${esc(d)}">${esc(d)}</span>
+      <button class="ic" data-act="lib-remove" data-i="${i}" title="移除（不会删除文件）">${icon('close')}</button>
+    </div>`;
+  });
+  if (!extra.length) {
+    html += '<div class="lib-dir none"><span class="ld-path">没有额外目录 · 目前只扫下载目录</span></div>';
+  }
+  return html;
+}
+
+function afterLibChange() {
+  const box = $('#libDirs');
+  if (box) box.innerHTML = libDirsHtml();
+  state.local.loaded = false;
+  state.local.items = [];
+  state.local.scanning = null;
+  loadLocal(true);
+}
+
 function eqBandsHtml() {
   const curve = engCurve();
   return EQ_FREQS.map((f, i) => `
@@ -4348,6 +4431,38 @@ function viewSettings() {
     </div>
   </div>
 
+  ${document.documentElement.dataset.platform === 'android' ? '' : `
+  <div class="set-sec">
+    <h4>窗口</h4>
+    <div class="field">
+      <div><label>托盘图标</label><p class="tip">关掉后应用只活在任务栏；关掉后「收进托盘」也就不成立了。改完重启生效</p></div>
+      <input type="checkbox" class="switch" id="setTray"/>
+    </div>
+    <div class="field">
+      <div><label>点关闭按钮时</label><p class="tip">默认退出 —— 不惊喜。选「收进托盘」后歌不会断，从托盘图标再叫回来</p></div>
+      <select id="setCloseBehavior">
+        <option value="exit">退出应用</option>
+        <option value="tray">收进托盘继续放</option>
+      </select>
+    </div>
+    <div class="field">
+      <div><label>迷你条</label><p class="tip">缩成 430×138 的小悬浮条，只留封面、切歌和进度；播放条最右侧那个小图标也能切</p></div>
+      <button class="btn sm" data-act="mini-toggle">切换</button>
+    </div>
+  </div>`}
+
+  <div class="set-sec">
+    <h4>本地曲库</h4>
+    <div class="field" style="display:block">
+      <div><label>扫描目录</label>
+        <p class="tip">默认只扫下载目录；这里可以再添几个你自己整理的目录。只扫你明确添加的地方，不做全盘扫描</p></div>
+      <div id="libDirs" class="lib-dirs">${libDirsHtml()}</div>
+      <div class="set-actions">
+        <button class="btn sm" data-act="lib-add">添加目录</button>
+      </div>
+    </div>
+  </div>
+
   <div class="set-sec">
     <h4>数据</h4>
     <div class="set-actions">
@@ -4417,6 +4532,10 @@ function fillSettings() {
   }
   chk('#setDavAuto', wd.auto === true);
   paintSyncTip();
+
+  // ---- 窗口
+  chk('#setTray', s.tray !== false);
+  set('#setCloseBehavior', s.close_behavior === 'tray' ? 'tray' : 'exit');
   const tn = $('#setTasteNote');
   if (tn) tn.value = (state.taste && state.taste.note) || '';
   getJson('/api/taste').then((d) => {
@@ -4526,6 +4645,18 @@ function bindSettings() {
       return;
     }
     try { api.lyric_window(e.target.checked); } catch (err) { /* 静默 */ }
+  });
+
+  /* ---- 窗口 ---- */
+  on('#setTray', 'change', (e) => {
+    save('tray', e.target.checked);
+    toast(e.target.checked ? '托盘图标会在下次启动时出现' : '下次启动不再建托盘图标');
+  });
+  on('#setCloseBehavior', 'change', (e) => {
+    save('close_behavior', e.target.value);
+    toast(e.target.value === 'tray'
+      ? '以后点关闭会收进托盘，歌不会断'
+      : '以后点关闭就是退出应用');
   });
 
   /* ---- 播放引擎 ---- */
@@ -4987,6 +5118,7 @@ function bind() {
   $('#nextBtn').addEventListener('click', () => playNext(1));
   $('#modeBtn').addEventListener('click', cycleMode);
   $('#lyricBtn').addEventListener('click', () => openNp('lyric'));
+  $('#miniBtn').addEventListener('click', () => setMini(document.documentElement.dataset.mini !== 'on'));
   $('#lyricSave').addEventListener('click', saveLyric);
   $('#plFav').addEventListener('click', () => {
     if (!state.playing) return;
@@ -5213,6 +5345,49 @@ document.addEventListener('click', async (e) => {
       if (!((state.styles && state.styles.cards) || []).length) state.styleLoading = true;
       go({ name: 'styles' });
       if (await loadStyles(false)) paintStyles();
+      break;
+    }
+    case 'mini-toggle':
+      setMini(document.documentElement.dataset.mini !== 'on');
+      break;
+    case 'lib-add': {
+      try {
+        let path = '';
+        if (window.pywebview && window.pywebview.api && window.pywebview.api.pick_dir) {
+          path = await window.pywebview.api.pick_dir();
+        } else {
+          path = await askText('输入曲库目录的完整路径', '') || '';
+        }
+        if (!path) break;
+        const norm = (x) => String(x || '').replace(/[\/]+$/, '').toLowerCase();
+        const cur = Array.isArray(state.settings.local_dirs) ? state.settings.local_dirs.slice() : [];
+        if (norm(path) === norm(state.settings.download_dir || '')) {
+          toast('这就是下载目录，不用再加');
+          break;
+        }
+        if (cur.some((x) => norm(x) === norm(path))) {
+          toast('这个目录已经在列表里了');
+          break;
+        }
+        cur.push(path);
+        await post('/api/store', { op: 'settings', payload: { local_dirs: cur } });
+        state.settings.local_dirs = cur;
+        afterLibChange();
+        toast('已添加，正在重新扫描…');
+      } catch (err) { toast(err.message, 'err'); }
+      break;
+    }
+    case 'lib-remove': {
+      const i = Number(el.dataset.i);
+      const cur = (state.settings.local_dirs || []).slice();
+      if (!cur[i]) break;
+      cur.splice(i, 1);
+      try {
+        await post('/api/store', { op: 'settings', payload: { local_dirs: cur } });
+        state.settings.local_dirs = cur;
+        afterLibChange();
+        toast('已移除（文件没有被删除）');
+      } catch (err) { toast(err.message, 'err'); }
       break;
     }
     case 'sync-save':

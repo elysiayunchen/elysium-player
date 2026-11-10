@@ -922,6 +922,7 @@ input[type=range]:hover::-webkit-slider-thumb{background:var(--accent)}
 .field > div{min-width:0}
 .field label{font-size:12.5px;display:block}
 .field .tip{font-size:11px;color:var(--muted);margin:2px 0 0;line-height:1.5}
+.field .btn{flex:0 0 auto;white-space:nowrap}
 .field select,.field input[type=text],.field input[type=number],.field input[type=password]{
   height:30px;padding:0 9px;border-radius:7px;background:var(--card);
   border:1px solid var(--line);outline:0;font-size:12px;max-width:170px;
@@ -1479,3 +1480,51 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
 
 .sync-badge{display:inline-block;margin-right:8px;color:var(--accent);
   background:var(--accent-dim);border-radius:6px;padding:1px 7px;font-size:11px}
+
+/* ---------------------------------------------------------------- 曲库目录 */
+.lib-dirs{margin:8px 0 6px;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.lib-dir{display:flex;align-items:center;gap:8px;padding:8px 10px;font-size:11.5px;
+  border-bottom:1px solid var(--line)}
+.lib-dir:last-child{border-bottom:0}
+.lib-dir.main{background:var(--hover)}
+.lib-dir.none{color:var(--muted)}
+.ld-tag{flex:0 0 auto;font-size:10px;color:var(--muted);border:1px solid var(--line-2);
+  border-radius:5px;padding:1px 6px;white-space:nowrap}
+.ld-tag.alt{color:var(--accent);border-color:var(--accent-dim);background:var(--accent-dim)}
+.ld-path{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:var(--ink-2)}
+.lib-dir.main .ld-path{color:var(--ink)}
+
+/* ---------------------------------------------------------------- 迷你条（P6）
+   整窗缩到 430×138 后只留播放条。.pl-m 用 display:contents 拆开，
+   让控制组上右、进度条落底 —— 否则 420px 宽塞不下三段式布局。 */
+.mini-drag{display:none}
+html[data-mini="on"] .mini-drag{
+  display:block;position:absolute;left:0;right:0;top:0;height:15px;z-index:3;cursor:move;
+}
+html[data-mini="on"] .shell{grid-template-columns:1fr;grid-template-rows:1fr}
+html[data-mini="on"] .side,
+html[data-mini="on"] .stage,
+html[data-mini="on"] .wc-title,
+html[data-mini="on"] .pl-r,
+html[data-mini="on"] #modeBtn,
+html[data-mini="on"] #lyricBtn,
+html[data-mini="on"] .pl-fav{display:none !important}
+html[data-mini="on"] .player{
+  grid-column:1;grid-row:1;height:100vh;border-top:0;
+  grid-template-columns:minmax(0,1fr) auto;
+  grid-template-rows:minmax(0,1fr) auto;
+  gap:6px 10px;padding:15px 14px 10px;
+  background:var(--bg-soft);backdrop-filter:none;-webkit-backdrop-filter:none;
+}
+html[data-mini="on"] .player::before{display:none}
+html[data-mini="on"] .pl-l{grid-column:1;grid-row:1;min-width:0;gap:9px}
+html[data-mini="on"] .pl-m{display:contents}
+html[data-mini="on"] .pl-ctrl{grid-column:2;grid-row:1;justify-self:end;gap:2px}
+html[data-mini="on"] .pl-seek{grid-column:1 / -1;grid-row:2;gap:6px}
+html[data-mini="on"] .pl-art{width:46px;height:46px;flex:0 0 auto}
+html[data-mini="on"] .pl-title{font-size:12.5px}
+html[data-mini="on"] .pl-sub{font-size:10.5px}
+html[data-mini="on"] .pl-play{width:34px;height:34px}
+html[data-mini="on"] .pl-ctrl .ic{width:26px;height:26px}
+html[data-mini="on"] .pl-seek .mono{font-size:9.5px}
