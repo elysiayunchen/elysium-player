@@ -1012,8 +1012,447 @@ function onImportChange(e) {
   }
 }
 
-/* ------------------------------------------------------------------ 播放 */
-const audio = () => $('#audio');
+/* ------------------------------------------------------------------ 播放引擎 2.0
+   单 <audio> 升级为「双元素 + Web Audio 图」，为 gapless / crossfade / EQ 服务。
+
+   两条铁律：
+   1. `audio()` 永远返回**当前活动的那个元素** —— 进度、音量、歌词、SMTC、
+      续播那几百行代码一行都不用改，它们本来就是在读「正在响的那个」。
+   2. 引擎关掉时退回 1.x 的原生单元素路径，行为完全一致。不是「旁路一下看看」，
+      而是把元素整个重建 —— Web Audio 一旦接管就不可撤销，只有重建才真的回到旧路径。
+
+   音频图（两元素各一个 Gain 做交叉，之后汇入同一条 EQ 链）：
+
+       #audio   → srcA → gainA ┐
+                               ├→ eq[0..9] → master → destination
+       #audio-b → srcB → gainB ┘
+
+   gapless 的实现不是「等 ended 再 play」（那有 200ms 启动空档），而是
+   「提前把下一首启动、增益压到 0、到点开闸淡入」——声音在 A 结束的瞬间接上，
+   静音空洞为 0。crossfade 就是把这个开闸过程拉长到 0.3~2s。 */
+const EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+const EQ_PRESETS = {
+  flat: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  bass: [6, 5, 3.5, 1.5, 0, 0, 0, 0, 0, 0],
+  vocal: [-2, -1.5, -0.5, 1, 2.5, 3.5, 3.5, 2, 0.5, 0],
+  classical: [3, 2.5, 1.5, 0.5, 0, 0, 0.5, 1.5, 2.5, 2.5],
+  pop: [-1.5, -1, 0.5, 1.5, 2.5, 2, 0.5, -0.5, 0, 0.5],
+  rock: [4.5, 3.5, 2, -0.5, -1, -0.5, 1.5, 2.5, 3.5, 3.5],
+};
+const EQ_LABEL = {
+  flat: '平直', bass: '低音增强', vocal: '人声',
+  classical: '古典', pop: '流行', rock: '摇滚', custom: '自定义',
+};
+const ENG_LEAD = 0.16;        // gapless 开闸提前量：160ms 的双向淡入淡出
+const PRELOAD_AT = 8;         // 剩余多少秒时把下一首塞进备用元素
+
+const ENG = {
+  on: false, ctx: null, master: null, eq: [], els: [], gains: [], srcs: [],
+  slot: 0, pre: null, cross: ENG_LEAD, gapless: true, eqTimer: null,
+};
+
+const engActive = () => (ENG.on ? ENG.els[ENG.slot] : $('#audio'));
+const engOther = () => (ENG.on ? ENG.els[1 - ENG.slot] : null);
+const audio = () => engActive();
+const engGainOf = (el) => {
+  const i = ENG.els.indexOf(el);
+  return i < 0 ? null : ENG.gains[i];
+};
+
+/** 引擎开关没显式设过时：桌面默认开，Android 默认关（P4.0 只做了桌面 spike） */
+function engWant() {
+  const v = state.settings && state.settings.engine_v2;
+  if (v === false || v === 0 || v === 'false') return false;
+  if (v === true || v === 1 || v === 'true') return true;
+  return !IS_ANDROID;
+}
+
+/** 交叉时长：crossfade 设置优先，否则取 gapless 的 160ms；两者都关就是 0（回 ended 切） */
+function engCrossSeconds() {
+  const cf = Number((state.settings && state.settings.crossfade_ms) || 0);
+  if (cf > 0) return Math.min(2000, Math.max(300, cf)) / 1000;
+  return ENG.gapless ? ENG_LEAD : 0;
+}
+
+function engNewEl(id, preload) {
+  const el = document.createElement('audio');
+  el.id = id;
+  el.preload = preload;
+  el.setAttribute('playsinline', '');   // Android 不弹全屏播放器接管
+  document.body.appendChild(el);
+  return el;
+}
+
+function engVolume(v) {
+  const val = Math.max(0, Math.min(1, Number(v) || 0));
+  if (ENG.on) ENG.els.forEach((el) => { try { el.volume = val; } catch (e) { /* ignore */ } });
+  else { const el = $('#audio'); if (el) el.volume = val; }
+}
+
+function engResume() {
+  if (!ENG.on || !ENG.ctx) return;
+  if (ENG.ctx.state === 'suspended') ENG.ctx.resume().catch(() => {});
+}
+
+function engBuild(elA, elB) {
+  try {
+    const CE = window.AudioContext || window.webkitAudioContext;
+    if (!CE) return false;
+    const ctx = new CE();
+    const master = ctx.createGain();
+    master.gain.value = 1;
+    const eq = EQ_FREQS.map((f) => {
+      const b = ctx.createBiquadFilter();
+      b.type = 'peaking';
+      b.frequency.value = f;
+      b.Q.value = 1.0;
+      b.gain.value = 0;
+      return b;
+    });
+    for (let i = 1; i < eq.length; i += 1) eq[i - 1].connect(eq[i]);
+    eq[eq.length - 1].connect(master);
+    master.connect(ctx.destination);
+
+    const els = [elA, elB];
+    const gains = [];
+    const srcs = [];
+    for (let i = 0; i < els.length; i += 1) {
+      const src = ctx.createMediaElementSource(els[i]);   // 每个元素只能接一次
+      const g = ctx.createGain();
+      g.gain.value = 1;
+      src.connect(g);
+      g.connect(eq[0]);
+      srcs.push(src);
+      gains.push(g);
+    }
+    Object.assign(ENG, { on: true, ctx, master, eq, els, gains, srcs, slot: 0 });
+    return true;
+  } catch (e) {
+    return false;                          // 老内核 / Web Audio 被禁用：静默降级
+  }
+}
+
+/** 实际生效的 10 段曲线（eq_gains 才是唯一真相，预设只是往里填数） */
+function engCurve() {
+  const g = (state.settings && state.settings.eq_gains) || [];
+  return EQ_FREQS.map((_, i) => Math.max(-12, Math.min(12, Number(g[i]) || 0)));
+}
+
+function engApplyEq(immediate) {
+  if (!ENG.on) return;
+  const on = state.settings.eq_enabled === true;
+  const curve = engCurve();
+  const now = ENG.ctx.currentTime;
+  ENG.eq.forEach((b, i) => {
+    const v = on ? curve[i] : 0;
+    try {
+      b.gain.cancelScheduledValues(now);
+      if (immediate) b.gain.setValueAtTime(v, now);
+      else b.gain.setTargetAtTime(v, now, 0.03);   // 平滑过渡，切换预设不爆音
+    } catch (e) {
+      try { b.gain.value = v; } catch (e2) { /* ignore */ }
+    }
+  });
+}
+
+function engSetPreset(name) {
+  const curve = (EQ_PRESETS[name] || EQ_PRESETS.flat).slice();
+  state.settings.eq_preset = name;
+  state.settings.eq_gains = curve;
+  postSettings({ eq_preset: name, eq_gains: curve });
+  engApplyEq();
+}
+
+/** 推子拖动：先落内存 + 立刻听感，落盘防抖 */
+function engSetBand(i, db) {
+  const cur = engCurve();
+  cur[i] = Math.max(-12, Math.min(12, Number(db) || 0));
+  state.settings.eq_gains = cur;
+  state.settings.eq_preset = 'custom';
+  engApplyEq();
+  if (ENG.eqTimer) clearTimeout(ENG.eqTimer);
+  ENG.eqTimer = setTimeout(() => {
+    postSettings({ eq_gains: engCurve(), eq_preset: 'custom' });
+  }, 350);
+}
+
+/** 预载失败也一样要走：拿不到音质候选（缺 minfo）就交给 ended 路径回源补全 */
+function engCanChain() {
+  if (!ENG.on || !ENG.gapless) return false;
+  if (state.mode !== 'order') return false;      // 单曲循环 / 随机不做链式切换
+  if (SLEEP.mode === 'track') return false;      // 播完就停，别偷偷预载下一首
+  return state.playList.length > 1;
+}
+
+function engPreload() {
+  const idx = nextIndexOf(1);
+  if (idx < 0 || idx === state.playIndex) return;
+  const item = state.playList[idx];
+  if (!item || !item.id) return;
+  const b = engOther();
+  if (!b) return;
+  // 刚淡出的元素还在收尾：这时候覆写 src 会把淡出腰斩成一段真的静音。
+  // 等冷却过去（recycle 跑完）再来 —— 短音频可能等不到，那就交给 ended 路径。
+  if (b.__coolUntil && Date.now() < b.__coolUntil) return;
+  const cands = playCandidates(item);
+  if (!cands.length) return;
+  const q = cands[0];
+  try {
+    b.volume = engActive().volume;
+    b.src = mediaSrc(item, q);
+    b.load();
+  } catch (e) { return; }
+  ENG.pre = { index: idx, item, q, el: b, at: Date.now() };
+}
+
+function engAdopt(index, item, q) {
+  state.playIndex = index;
+  state.playing = item;
+  state.currentQuality = q;
+  if (item.platform === 'local' && !item.cover) {
+    item.cover = '/api/local/cover?p=' + encodeURIComponent(item.id);
+  }
+  lastCountedKey = '';                 // 下一首重新计一次「听完」
+  paintPlayer(item);
+  renderPlaying();
+  renderQueue();
+  renderNp();
+  touchRecent(item);
+  const btn = $('#playBtn');
+  if (btn) btn.innerHTML = icon('pause');
+  setBuffering(false);
+}
+
+function engRecycle(el, g, delay) {
+  setTimeout(() => {
+    if (el === engActive()) return;    // 期间用户又切回来了，别动它
+    // 已经被下一次预载征用了：只把增益复位，src 留着别清
+    if (ENG.pre && ENG.pre.el === el) {
+      try {
+        const now = ENG.ctx.currentTime;
+        g.gain.cancelScheduledValues(now);
+        g.gain.setValueAtTime(1, now);
+      } catch (e) { /* ignore */ }
+      return;
+    }
+    try { el.pause(); el.removeAttribute('src'); el.load(); } catch (e) { /* ignore */ }
+    delete el.__coolUntil;
+    try {
+      const now = ENG.ctx.currentTime;
+      g.gain.cancelScheduledValues(now);
+      g.gain.setValueAtTime(1, now);
+    } catch (e) { /* ignore */ }
+  }, Math.max(80, delay));
+}
+
+/** 手动起播前把两条增益拉回 1：上一轮交叉被打断时可能停在半路 */
+function engGainReset() {
+  if (!ENG.on) return;
+  const now = ENG.ctx.currentTime;
+  ENG.gains.forEach((g) => {
+    try {
+      g.gain.cancelScheduledValues(now);
+      g.gain.setValueAtTime(1, now);
+    } catch (e) { /* ignore */ }
+  });
+}
+
+/** 开销闸：备用元素已经开播、增益压到 0，到点把两条 gain 反向拉过去 */
+function engCross(remain) {
+  const pre = ENG.pre;
+  if (!pre || !ENG.on) return;
+  const oldEl = engActive();
+  const newEl = pre.el;
+  if (newEl !== engOther()) { ENG.pre = null; return; }
+  const gOld = engGainOf(oldEl);
+  const gNew = engGainOf(newEl);
+  if (!gOld || !gNew) { ENG.pre = null; return; }
+  ENG.pre = null;
+
+  // 交叉时长以设置为准，但不能超过当前曲剩下的时间（短音频 / 用户拖到末尾时）
+  const left = Number.isFinite(remain) ? remain : ENG.cross;
+  const sec = Math.max(0.06, Math.min(ENG.cross, Math.max(0.06, left)));
+  const now = ENG.ctx.currentTime;
+  try { newEl.currentTime = 0; } catch (e) { /* 元数据还没到，交给 play() 自己定位 */ }
+  const p = newEl.play();
+  if (p && p.catch) p.catch(() => {});   // 被自动播放策略拦下就回落到 ended 路径
+  try {
+    gNew.gain.cancelScheduledValues(now);
+    gNew.gain.setValueAtTime(0, now);
+    gNew.gain.linearRampToValueAtTime(1, now + sec);
+    gOld.gain.cancelScheduledValues(now);
+    gOld.gain.setValueAtTime(1, now);
+    gOld.gain.linearRampToValueAtTime(0, now + sec);
+  } catch (e) {
+    try { gNew.gain.value = 1; gOld.gain.value = 0; } catch (e2) { /* ignore */ }
+  }
+
+  ENG.slot = 1 - ENG.slot;             // 先换槽：之后 audio() 读到的就是新曲
+  engAdopt(pre.index, pre.item, pre.q);
+  oldEl.__coolUntil = Date.now() + sec * 1000 + 250;   // 淡出期不许被预载抢走
+  engRecycle(oldEl, gOld, sec * 1000 + 120);
+  engResume();
+}
+
+/** timeupdate 里调：按剩余时长决定预载 / 开闸 */
+function engTick() {
+  if (!engCanChain()) return;
+  const a = engActive();
+  const d = a.duration || 0;
+  if (!d || !isFinite(d)) return;
+  const remain = d - a.currentTime;
+  if (!ENG.pre) {
+    // 下限只留 0.5s，不跟交叉时长绑：短音频（试听片段 / 铃声）缓冲慢一点就会
+    // 错过预载窗口，那时宁可用一次更短的交叉，也不能掉回 200ms 的 ended 空档。
+    if (remain <= PRELOAD_AT && remain > 0.5) engPreload();
+    return;
+  }
+  // 预载刚下发时别急着开闸（给 load() 一点时间）；但已经到底了就不再等
+  const waited = Date.now() - (ENG.pre.at || 0);
+  if (remain <= ENG.cross && (waited >= 200 || remain < 0.25)) engCross(remain);
+}
+
+/** 手动换歌时把备用元素按住：否则预载残留会在新曲开始时冒出来 */
+function engHaltOther() {
+  if (!ENG.on) return;
+  ENG.pre = null;
+  const o = engOther();
+  if (!o) return;
+  try { o.pause(); } catch (e) { /* ignore */ }
+  const g = engGainOf(o);
+  if (!g) return;
+  try {
+    const now = ENG.ctx.currentTime;
+    g.gain.cancelScheduledValues(now);
+    g.gain.setValueAtTime(1, now);
+  } catch (e) { /* ignore */ }
+}
+
+function engTeardown() {
+  ENG.pre = null;
+  if (ENG.eqTimer) { clearTimeout(ENG.eqTimer); ENG.eqTimer = null; }
+  if (ENG.ctx) { try { ENG.ctx.close(); } catch (e) { /* ignore */ } }
+  // 引擎没起来时 ENG.els 是空的，但 DOM 里仍有 #audio —— 一并收走，否则重建会撞 id
+  const els = ENG.els.length
+    ? ENG.els.slice()
+    : Array.from(document.querySelectorAll('#audio, #audio-b'));
+  els.forEach((el) => {
+    try { el.pause(); el.removeAttribute('src'); el.remove(); } catch (e) { /* ignore */ }
+  });
+  Object.assign(ENG, { on: false, ctx: null, master: null, eq: [], els: [], gains: [], srcs: [], slot: 0 });
+}
+
+function engBoot() {
+  if (ENG.on) return;              // 幂等：refreshStore 会被多次调用，图只搭一次
+  const a = $('#audio');
+  if (!a) return;
+  ENG.gapless = state.settings.gapless !== false;
+  ENG.cross = engCrossSeconds();
+  if (!engWant()) { bindAudioEl(a); return; }
+  const b = $('#audio-b') || engNewEl('audio-b', 'auto');
+  if (!engBuild(a, b)) { bindAudioEl(a); return; }
+  engVolume(Number(state.settings.volume ?? 80) / 100);
+  bindAudioEl(b);
+  bindAudioEl(a);
+  engApplyEq(true);
+}
+
+/** 音频事件绑定：跟着元素走（引擎切换会整只重建），非活动元素的事件一律不理 */
+function bindAudioEl(a) {
+  if (!a || a.dataset.engBound === '1') return;
+  a.dataset.engBound = '1';
+  const mine = () => (ENG.on ? a === engActive() : a === $('#audio'));
+
+  a.addEventListener('play', () => {
+    if (!mine()) return;
+    engResume();
+    $('#playBtn').innerHTML = icon('pause');
+    renderPlaying();
+    mediaPushMeta(true);           // SMTC / Android 通知栏状态 → playing（即时，不吃节流）
+    postLyricNow();
+  });
+  a.addEventListener('pause', () => {
+    if (!mine()) return;
+    $('#playBtn').innerHTML = icon('play');
+    saveLastTrack(true);
+    mediaPushMeta(true);
+    postLyricNow();
+  });
+  a.addEventListener('timeupdate', () => {
+    if (!mine()) return;
+    paintSeek();
+    updateLyricTick();
+    postLyricNow();
+    mediaPushTick(false);
+    if (!a.paused) {
+      const d = a.duration || 0;
+      // 重听检测：计过数后又回到前 20% 段（单曲循环 / 拖回开头 / 重播），
+      // 清掉计数标志，这次听完再计一次 —— 否则同一会话内永远只计 1 次，
+      // 「当天听完 2 次进今日缓存」在循环播放下凑不齐。
+      const k = state.playing ? songKey(state.playing) : '';
+      if (lastCountedKey && lastCountedKey === k && d && a.currentTime < d * 0.2) {
+        lastCountedKey = '';
+      }
+      if (d && a.currentTime / d >= 0.98 && !lastCountedKey) reportPlay(true);
+      engTick();                   // 曲末预载 + 开闸，都是这里推进的
+    }
+  });
+  a.addEventListener('ended', () => {
+    if (!mine()) return;           // 交叉期间的旧元素由 engRecycle 收拾，不重复切歌
+    reportPlay(true);
+    if (SLEEP.mode === 'track') {  // 睡眠定时「播完这首就停」：计完数就地停下
+      SLEEP.mode = 'off';
+      syncSleepUI();
+      toast('睡眠定时：已按约定停在曲末');
+      return;
+    }
+    if (state.mode === 'one') {
+      a.currentTime = 0;
+      a.play().catch(() => {});
+      return;
+    }
+    playNext(1);
+  });
+  a.addEventListener('error', () => {
+    if (!mine()) return;
+    if (a.src && !a.dataset.errShown) {
+      a.dataset.errShown = '1';
+      setBuffering(false);
+      setTimeout(() => { delete a.dataset.errShown; }, 3000);
+    }
+  });
+  a.addEventListener('seeking', () => { if (mine()) setBuffering(false); });
+  a.addEventListener('waiting', () => { if (mine()) setBuffering(true); });
+  a.addEventListener('playing', () => { if (mine()) setBuffering(false); });
+  a.addEventListener('loadedmetadata', () => {
+    if (!mine()) return;
+    setBuffering(false); paintSeek(); mediaPushTick(true);
+  });
+  a.addEventListener('seeked', () => {
+    if (!mine()) return;
+    mediaPushTick(true); postLyricNow();
+  });
+}
+
+/** 切换引擎开关：重建两个元素，彻底回到 / 离开 Web Audio 路径，并把当前曲目接着放 */
+async function engRebuild() {
+  const a0 = audio();
+  const keep = (state.playing && a0) ? {
+    list: state.playList.slice(),
+    index: state.playIndex,
+    pos: a0.currentTime || 0,
+    playing: !a0.paused,
+    source: state.queueSource,
+  } : null;
+  engTeardown();
+  engNewEl('audio', 'metadata');
+  engBoot();
+  if (keep && keep.list.length && keep.index >= 0) {
+    await playAt(keep.list, keep.index, {
+      position: keep.pos, keepPaused: !keep.playing, source: keep.source,
+    });
+  }
+}
 
 function setBuffering(on) {
   const el = $('#buffering');
@@ -1266,9 +1705,11 @@ async function startTrack(item, cands, i, position, opts = {}) {
   setBuffering(true);
   try {
     const a = audio();
+    engResume();                      // Web Audio 上下文要用户手势才能跑
+    engGainReset();                   // 新曲从满增益开始，别继承上一轮未走完的淡出
     a.src = mediaSrc(item, q);        // 同步设 src，保住用户手势
     a.dataset.media = a.src;
-    a.volume = (Number(state.settings.volume ?? 80)) / 100;
+    engVolume((Number(state.settings.volume ?? 80)) / 100);
     if (position > 0) {
       a.addEventListener('loadedmetadata', () => {
         try { a.currentTime = position; } catch (e) { /* ignore */ }
@@ -1324,6 +1765,7 @@ async function playAt(list, index, opts = {}) {
   if (!cands.length) { toast('这首歌没有可用音质', 'err'); return; }
   state.resumePos = 0;             // 换歌/重播都用新的位置，旧的待续位置作废
   maybeCountOnLeave();
+  engHaltOther();                  // 上一轮预载的下一首作废，别让它在新曲里冒头
   state.playList = list.slice();
   state.playIndex = index;
   state.playing = item;
@@ -1338,7 +1780,7 @@ async function playAt(list, index, opts = {}) {
   renderPlaying();
   renderQueue();
   renderNp();
-  await startTrack(item, cands, 0, opts.position || 0);
+  await startTrack(item, cands, 0, opts.position || 0, { keepPaused: !!opts.keepPaused });
 }
 
 function nextIndexOf(step = 1) {
@@ -3454,6 +3896,18 @@ async function doAddToPlaylist(plid, target) {
 }
 
 /* ------------------------------------------------------------------ 设置面板 */
+function eqBandsHtml() {
+  const curve = engCurve();
+  return EQ_FREQS.map((f, i) => `
+    <div class="eq-band">
+      <em class="mono" data-eqv="${i}">${curve[i] > 0 ? '+' : ''}${curve[i]}</em>
+      <span class="eq-slot">
+        <input type="range" min="-12" max="12" step="1" value="${curve[i]}" data-eq="${i}" aria-label="${f}Hz"/>
+      </span>
+      <span>${f >= 1000 ? (f / 1000) + 'k' : f}</span>
+    </div>`).join('');
+}
+
 function viewSettings() {
   const s = state.settings;
   return `
@@ -3492,6 +3946,39 @@ function viewSettings() {
         <option value="90">90 分钟</option>
       </select>
     </div>
+  </div>
+
+  <div class="set-sec">
+    <h4>播放引擎</h4>
+    <div class="field">
+      <div><label>引擎 2.0</label><p class="tip">双缓冲无缝播放与均衡器都靠它；关掉即回到 1.x 的原生播放路径</p></div>
+      <input type="checkbox" class="switch" id="setEngineV2"/>
+    </div>
+    <div class="field">
+      <div><label>无缝播放</label><p class="tip">专辑顺序播放时曲末直接接上下一首，不留空档；单曲循环与随机不启用</p></div>
+      <input type="checkbox" class="switch" id="setGapless"/>
+    </div>
+    <div class="field">
+      <div><label>交叉淡入淡出</label><p class="tip">曲末让两首叠着过渡；设了就以它为准，否则用 160ms 的短交叉</p></div>
+      <select id="setCrossfade">
+        <option value="0">关闭（短交叉 160ms）</option>
+        <option value="500">0.5 秒</option>
+        <option value="1000">1 秒</option>
+        <option value="2000">2 秒</option>
+      </select>
+    </div>
+    <div class="field">
+      <div><label>均衡器</label><p class="tip">10 段参数均衡，拖动即时生效，只作用于本机播放</p></div>
+      <input type="checkbox" class="switch" id="setEqOn"/>
+    </div>
+    <div class="field">
+      <div><label>预设</label><p class="tip">挑一个再微调；动过推子之后自动记为「自定义」</p></div>
+      <select id="setEqPreset">
+        ${Object.keys(EQ_PRESETS).map((k) => `<option value="${k}">${EQ_LABEL[k]}</option>`).join('')}
+        <option value="custom">自定义</option>
+      </select>
+    </div>
+    <div class="eq-bands" id="eqBands">${eqBandsHtml()}</div>
   </div>
 
   <div class="set-sec">
@@ -3645,6 +4132,14 @@ function fillSettings() {
   chk('#setAutoCache', s.auto_cache !== false);
   chk('#setPersonalized', s.personalized !== false);
   chk('#setAutoUpdate', s.auto_check_update !== false);
+  // 引擎开关没存过值时显示「平台默认」（桌面开、Android 关）
+  chk('#setEngineV2', engWant());
+  chk('#setGapless', s.gapless !== false);
+  chk('#setEqOn', s.eq_enabled === true);
+  const cf = Number(s.crossfade_ms) || 0;
+  set('#setCrossfade', String([500, 1000, 2000].indexOf(cf) >= 0 ? cf : 0));
+  set('#setEqPreset', EQ_PRESETS[s.eq_preset] || s.eq_preset === 'custom' ? s.eq_preset : 'flat');
+  // ↑ 预设名不在表里（老版本写坏的值）就退回平直，别让下拉框空着
   const tn = $('#setTasteNote');
   if (tn) tn.value = (state.taste && state.taste.note) || '';
   getJson('/api/taste').then((d) => {
@@ -3735,7 +4230,7 @@ function bindSettings() {
   });
   on('#setVol', 'input', (e) => {
     const v = Number(e.target.value);
-    audio().volume = v / 100;
+    engVolume(v / 100);
     $('#vol').value = v;
     state.settings.volume = v;
   });
@@ -3754,6 +4249,47 @@ function bindSettings() {
       return;
     }
     try { api.lyric_window(e.target.checked); } catch (err) { /* 静默 */ }
+  });
+
+  /* ---- 播放引擎 ---- */
+  on('#setEngineV2', 'change', async (e) => {
+    const want = e.target.checked;
+    save('engine_v2', want);
+    await engRebuild();          // 元素整只重建：Web Audio 接管不可撤销，只能新建
+    toast(want ? '已启用引擎 2.0' : '已回到原生播放路径');
+  });
+  on('#setGapless', 'change', (e) => {
+    save('gapless', e.target.checked);
+    ENG.gapless = e.target.checked;
+    ENG.cross = engCrossSeconds();
+    if (!e.target.checked) engHaltOther();   // 关掉就把已预载的下一首撤了
+  });
+  on('#setCrossfade', 'change', (e) => {
+    const ms = Number(e.target.value) || 0;
+    save('crossfade_ms', ms);
+    ENG.cross = engCrossSeconds();
+    toast(ms ? `交叉淡入淡出 ${ms / 1000} 秒` : '已关闭长交叉（仍走 160ms 短交叉）');
+  });
+  on('#setEqOn', 'change', (e) => {
+    save('eq_enabled', e.target.checked);
+    engApplyEq();                // 平滑过渡，切换不当场爆音
+    toast(e.target.checked ? '均衡器已开启' : '均衡器已关闭');
+  });
+  on('#setEqPreset', 'change', (e) => {
+    engSetPreset(e.target.value);
+    const box = $('#eqBands');
+    if (box) box.innerHTML = eqBandsHtml();
+  });
+  $$('#eqBands input[data-eq]').forEach((inp) => {
+    inp.addEventListener('input', (e) => {
+      const i = Number(e.target.dataset.eq);
+      const db = Number(e.target.value);
+      engSetBand(i, db);
+      const lab = $(`#eqBands [data-eqv="${i}"]`);
+      if (lab) lab.textContent = (db > 0 ? '+' : '') + db;
+      const sel = $('#setEqPreset');
+      if (sel) sel.value = 'custom';
+    });
   });
 }
 
@@ -4185,7 +4721,7 @@ function bind() {
 
   const vol = $('#vol');
   vol.addEventListener('input', () => {
-    audio().volume = Number(vol.value) / 100;
+    engVolume(Number(vol.value) / 100);
     state.settings.volume = Number(vol.value);
     const sv = $('#setVol'); if (sv) sv.value = vol.value;
   });
@@ -4222,64 +4758,7 @@ function bind() {
     seek.addEventListener('pointerup', up);
   });
 
-  /* 媒体事件 */
-  const a = audio();
-  a.addEventListener('play', () => {
-    $('#playBtn').innerHTML = icon('pause');
-    renderPlaying();
-    mediaPushMeta(true);           // SMTC / Android 通知栏状态 → playing（即时，不吃节流）
-    postLyricNow();
-  });
-  a.addEventListener('pause', () => {
-    $('#playBtn').innerHTML = icon('play');
-    saveLastTrack(true);
-    mediaPushMeta(true);
-    postLyricNow();
-  });
-  a.addEventListener('timeupdate', () => {
-    paintSeek();
-    updateLyricTick();
-    postLyricNow();
-    mediaPushTick(false);
-    if (!a.paused) {
-      const d = a.duration || 0;
-      // 重听检测：计过数后又回到前 20% 段（单曲循环 / 拖回开头 / 重播），
-      // 清掉计数标志，这次听完再计一次 —— 否则同一会话内永远只计 1 次，
-      // 「当天听完 2 次进今日缓存」在循环播放下凑不齐。
-      const k = state.playing ? songKey(state.playing) : '';
-      if (lastCountedKey && lastCountedKey === k && d && a.currentTime < d * 0.2) {
-        lastCountedKey = '';
-      }
-      if (d && a.currentTime / d >= 0.98 && !lastCountedKey) reportPlay(true);
-    }
-  });
-  a.addEventListener('ended', () => {
-    reportPlay(true);
-    if (SLEEP.mode === 'track') {  // 睡眠定时「播完这首就停」：计完数就地停下
-      SLEEP.mode = 'off';
-      syncSleepUI();
-      toast('睡眠定时：已按约定停在曲末');
-      return;
-    }
-    if (state.mode === 'one') {
-      a.currentTime = 0;
-      a.play().catch(() => {});
-      return;
-    }
-    playNext(1);
-  });
-  a.addEventListener('error', () => {
-    if (a.src && !a.dataset.errShown) {
-      a.dataset.errShown = '1';
-      setBuffering(false);
-      setTimeout(() => { delete a.dataset.errShown; }, 3000);
-    }
-  });
-  a.addEventListener('seeking', () => setBuffering(false));
-  a.addEventListener('waiting', () => setBuffering(true));
-  a.addEventListener('playing', () => setBuffering(false));
-  a.addEventListener('loadedmetadata', () => { setBuffering(false); paintSeek(); mediaPushTick(true); });
-  a.addEventListener('seeked', () => { mediaPushTick(true); postLyricNow(); });
+  /* 媒体事件见 bindAudioEl()（引擎要重建元素，绑定跟着元素走） */
 
   /* 歌词容器：用户手动滚动后停止自动跟随，滚回当前行才恢复。
      程序自己触发的 smooth 滚动也会冒出 wheel 事件，所以用 lyricScrolling 排除掉，
@@ -4347,7 +4826,7 @@ function bind() {
 function showVol(delta) {
   const v = Math.min(100, Math.max(0, Number($('#vol').value) + delta));
   $('#vol').value = v;
-  audio().volume = v / 100;
+  engVolume(v / 100);
   state.settings.volume = v;
   toast('音量 ' + v);
   post('/api/store', { op: 'settings', payload: { volume: v } }).catch(() => {});
@@ -4900,11 +5379,12 @@ async function refreshStore() {
     state.mode = state.settings.mode || 'order';
     applyTheme(state.settings.theme || 'dark');
     $('#vol').value = state.settings.volume ?? 80;
-    audio().volume = (Number(state.settings.volume ?? 80)) / 100;
+    engVolume((Number(state.settings.volume ?? 80)) / 100);
     const m = MODES.find((x) => x.key === state.mode) || MODES[0];
     $('#modeBtn').innerHTML = icon(m.icon);
     $('#modeBtn').title = m.label;
     $('#modeBtn').classList.toggle('on', state.mode !== 'order');
+    engBoot();                 // 设置到手才开始搭音频图（要读 engine_v2 / eq_* 决定取舍）
   } catch (e) {
     toast('读取本地数据失败：' + e.message, 'err');
   }

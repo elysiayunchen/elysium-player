@@ -37,7 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "Elysium"
 APP_TITLE = "Elysium - 在线音乐"
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 _BASE_URL = ""            # main() 里落值；桌面歌词小窗据此建页
 _LYRIC_WIN = None         # 桌面歌词小窗句柄（pywebview window 或 None）
 LEGACY_NAME = "FlacMusic"
@@ -108,6 +108,14 @@ DEFAULT_STORE = {
         "last_track": None,         # 上次播放，用于续播
         "personalized": True,       # 个性化推荐总开关
         "lrc_offset_ms": 0,         # 歌词时间轴整体偏移：正=歌词延后，负=提前
+        # --- 播放引擎 2.0（双 audio + Web Audio）---
+        # engine_v2 不写默认值：留空表示「跟随平台」——桌面开、Android 关
+        # （P4.0 只做了桌面 spike，Android 真机验证前不默认接管音频图）
+        "gapless": True,            # 专辑顺序播放时曲末无缝接下一首
+        "crossfade_ms": 0,          # 交叉淡入淡出：0 = 关（只走 gapless 的短交叉）
+        "eq_enabled": False,        # 均衡器总开关
+        "eq_preset": "flat",        # flat / bass / vocal / classical / pop / rock / custom
+        "eq_gains": [0] * 10,       # 10 段实际生效的 dB 值，eq_preset 只是来源标记
     },
     "favorites": [],                # 收藏：{kind: song|album|artist, ...}
     "history": [],                  # 搜索历史
