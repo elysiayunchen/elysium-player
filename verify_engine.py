@@ -184,6 +184,18 @@ def main():
         d.get(base + "/")
         time.sleep(2.0)
 
+        # 引擎 2.0 默认已经把 <audio> 接进 Web Audio 了，而本脚本要验证的是
+        # 「一个干净的 <audio> 能不能被接管」。先关引擎退回原生单元素，再开始。
+        d.execute_async_script(r"""
+          const done = arguments[arguments.length-1];
+          (async () => {
+            state.settings.engine_v2 = false;
+            await engRebuild();
+            done(ENG.on);
+          })();
+        """)
+        time.sleep(0.4)
+
         # 把下载目录（本地曲库扫描源）指到测试音频目录
         d.execute_script(
             "return fetch('/api/store',{method:'POST',headers:{'Content-Type':'application/json'},"

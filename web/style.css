@@ -938,6 +938,31 @@ input[type=range]:hover::-webkit-slider-thumb{background:var(--accent)}
 .set-actions{display:flex;flex-wrap:wrap;gap:7px;padding-top:6px}
 .meter{height:5px;border-radius:3px;background:var(--hover-2);overflow:hidden;margin:8px 0 6px}
 .meter i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--gold));border-radius:3px}
+
+/* 10 段均衡推子：竖排。竖着用 transform 旋转而不是 slider-vertical ——
+   后者在 Chromium 下会退回原生蓝色皮肤，跟主题打架。 */
+.eq-bands{display:flex;align-items:flex-end;justify-content:space-between;gap:2px;
+  padding:12px 2px 4px;border-top:1px solid var(--line);margin-top:4px}
+.eq-band{flex:1 1 0;min-width:0;display:flex;flex-direction:column;align-items:center;gap:5px}
+.eq-band em{font-size:9px;font-style:normal;color:var(--muted);font-variant-numeric:tabular-nums;
+  letter-spacing:0}
+.eq-band > span:last-child{font-size:9px;color:var(--muted);
+  font-family:ui-monospace,Consolas,monospace}
+.eq-slot{position:relative;display:block;width:18px;height:92px}
+.eq-slot::before{
+  content:"";position:absolute;left:50%;top:4px;bottom:4px;width:4px;margin-left:-2px;
+  border-radius:2px;background:var(--line-2);
+}
+.eq-slot input[type=range]{
+  position:absolute;left:50%;top:50%;width:92px;height:3px;margin:0;
+  transform:translate(-50%,-50%) rotate(-90deg);
+  background:transparent;
+}
+.eq-slot input[type=range]::-webkit-slider-thumb{
+  width:11px;height:11px;background:var(--accent);
+  box-shadow:0 0 0 3px var(--accent-dim);
+}
+.eq-slot input[type=range]:hover::-webkit-slider-thumb{background:var(--accent-2)}
 .set-ver{
   text-align:center;font-family:ui-monospace,Consolas,monospace;font-size:10px;
   color:var(--muted);letter-spacing:.14em;padding:18px 0 4px;
