@@ -922,7 +922,7 @@ input[type=range]:hover::-webkit-slider-thumb{background:var(--accent)}
 .field > div{min-width:0}
 .field label{font-size:12.5px;display:block}
 .field .tip{font-size:11px;color:var(--muted);margin:2px 0 0;line-height:1.5}
-.field select,.field input[type=text],.field input[type=number]{
+.field select,.field input[type=text],.field input[type=number],.field input[type=password]{
   height:30px;padding:0 9px;border-radius:7px;background:var(--card);
   border:1px solid var(--line);outline:0;font-size:12px;max-width:170px;
 }
@@ -967,6 +967,35 @@ input[type=range]:hover::-webkit-slider-thumb{background:var(--accent)}
   text-align:center;font-family:ui-monospace,Consolas,monospace;font-size:10px;
   color:var(--muted);letter-spacing:.14em;padding:18px 0 4px;
 }
+
+/* ---------------------------------------------------------------- 多端同步 */
+/* 同步的两个输入框放宽并禁止被 flex 压缩：邮箱被裁一位看着像 bug */
+#setDavUrl,#setDavUser{flex:0 0 212px;width:212px;max-width:none}
+.field .tip .mono{white-space:nowrap}
+.sync-head{padding:4px 6px 12px;border-bottom:1px solid var(--line);margin-bottom:12px}
+.sync-head b{font-size:12.5px}
+.sync-sec{margin:0 0 16px}
+.sync-title{display:block;font-size:11px;color:var(--muted);letter-spacing:.04em;
+  font-family:ui-monospace,Consolas,monospace;margin:0 0 7px;padding-left:2px}
+.sync-all{display:flex;align-items:center;gap:8px;cursor:pointer;padding:7px 2px 8px}
+.sync-all b{font-size:12.5px}
+.sync-all em{font-style:normal}
+.sync-list{border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.sync-row{display:flex;align-items:center;gap:9px;padding:8px 10px;cursor:pointer;
+  border-bottom:1px solid var(--line);font-size:12px}
+.sync-row:last-child{border-bottom:0}
+.sync-row:hover{background:var(--hover)}
+.sync-row.plain{cursor:default}
+.sync-row.plain:hover{background:transparent}
+.sync-row input[type=checkbox]{accent-color:var(--accent);width:14px;height:14px;flex:0 0 auto}
+.sync-row select{margin-left:auto;height:26px;font-size:11.5px;padding:0 6px;border-radius:6px;
+  background:var(--card);color:var(--ink);border:1px solid var(--line-2);outline:0}
+.sr-kind{flex:0 0 auto;font-size:10px;color:var(--muted);border:1px solid var(--line-2);
+  border-radius:5px;padding:1px 5px}
+.sr-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sr-sub{flex:0 0 auto;font-size:11px;color:var(--muted);max-width:46%;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sync-empty{padding:34px 0;text-align:center;font-size:12.5px;color:var(--muted)}
 
 /* ---------------------------------------------------------------- 歌词 */
 .lyric-layer{
@@ -1447,3 +1476,6 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
   padding:10px 4px 2px;margin-top:14px;display:flex;align-items:center;gap:10px}
 .imp-foot .grow{flex:1;font-size:11.5px;color:var(--muted)}
 .imp-ok{font-size:11px;color:var(--accent);margin-top:6px;line-height:1.6}
+
+.sync-badge{display:inline-block;margin-right:8px;color:var(--accent);
+  background:var(--accent-dim);border-radius:6px;padding:1px 7px;font-size:11px}

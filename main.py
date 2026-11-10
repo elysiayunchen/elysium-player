@@ -19,6 +19,7 @@ import concurrent.futures as _cf
 import hashlib
 import http.client
 import importer                      # 歌单导入（规则外置 + 三桶判定），见 providers/
+import sync_engine                   # 多端同步（用户自己的 WebDAV）
 import json
 import os
 import queue
@@ -37,7 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "Elysium"
 APP_TITLE = "Elysium - 在线音乐"
-VERSION = "1.8.0"
+VERSION = "2.0.0"
 _BASE_URL = ""            # main() 里落值；桌面歌词小窗据此建页
 _LYRIC_WIN = None         # 桌面歌词小窗句柄（pywebview window 或 None）
 LEGACY_NAME = "FlacMusic"
@@ -409,6 +410,7 @@ class Store:
 
 
 STORE = Store(DATA_FILE)
+sync_engine.bind(STORE, VERSION)
 
 
 # --------------------------------------------------------------------------
@@ -3404,6 +3406,11 @@ class Handler(BaseHTTPRequestHandler):
             data = STORE.apply("load", None)
             data["_data_path"] = DATA_FILE
             data["_version"] = VERSION
+            # 同步密码不回给页面：拿不到就不可能被 XSS / 截图带走。
+            # 前端只拿到 has_pass，改设置时密码留空即表示「沿用原密码」。
+            wd = (data.get("settings") or {}).get("webdav")
+            if isinstance(wd, dict):
+                wd["has_pass"] = bool(wd.pop("pass", ""))
             self._send(200, data)
             return
         if path == "/api/import/status":
@@ -3442,7 +3449,11 @@ class Handler(BaseHTTPRequestHandler):
             data.pop("_version", None)
             if data.get("settings"):
                 data["settings"]["download_dir"] = "<本机音乐目录>"
+                data["settings"].pop("webdav", None)   # 同步凭据绝不外流
             self._send(200, {"ok": True, "data": data})
+            return
+        if path == "/api/sync/status":
+            self._send(200, {"ok": True, "data": sync_engine.status()})
             return
         if path == "/api/downloads":
             self._send(200, {"ok": True, "data": {
@@ -3584,7 +3595,32 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/store":
                 body = self._json_body()
-                self._send(200, {"ok": True, "data": STORE.apply(body.get("op"), body.get("payload"))})
+                op = body.get("op")
+                out = {"ok": True, "data": STORE.apply(op, body.get("payload"))}
+                if op and op != "load":
+                    sync_engine.touch()      # 让自动模式知道「本地变了」
+                self._send(200, out)
+                return
+
+            # ---------------------------------------------------------- 多端同步
+            # 全部在后台线程做阻塞 IO，前端拿到的是结果不是超时。规则：
+            # test / push / pull 只读或只写远端与本机配置；真正改本地数据只有 commit。
+            if path in ("/api/sync/config", "/api/sync/test", "/api/sync/push",
+                        "/api/sync/pull", "/api/sync/commit"):
+                body = self._json_body() or {}
+                fn = {
+                    "config": sync_engine.configure,
+                    "test": lambda _b: sync_engine.test(),
+                    "push": lambda _b: sync_engine.push(),
+                    "pull": lambda _b: sync_engine.pull(),
+                    "commit": sync_engine.commit,
+                }[path.rsplit("/", 1)[-1]]
+                try:
+                    self._send(200, {"ok": True, "data": fn(body)})
+                except sync_engine.DavError as e:
+                    self._send(200, {"ok": False, "error": str(e)})
+                except Exception as e:                      # noqa: BLE001
+                    self._send(200, {"ok": False, "error": "同步失败：%s" % e})
                 return
 
             if path == "/api/update/download":
@@ -4022,6 +4058,7 @@ def main():
     # 保证「歌单导入」与「换源 / 歌手归类」是同一套口径，不会两套标准漂移。
     importer.bind(search_all=search_all, billed_as=_billed_as,
                   fold_text=_fold_text, resource_dir=resource_dir)
+    sync_engine.start_auto()      # 自动模式默认关，开了才有活干（线程自己判断）
     args = sys.argv[1:]
     port_arg = 0
     for a in args:

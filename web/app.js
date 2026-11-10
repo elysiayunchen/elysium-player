@@ -3896,6 +3896,240 @@ async function doAddToPlaylist(plid, target) {
 }
 
 /* ------------------------------------------------------------------ 设置面板 */
+/* ------------------------------------------------------------------ 多端同步
+   与导入歌单同一套规矩：拉取只做 dry-run diff，逐项声明，勾了才落盘。
+   本地已有的收藏 / 歌单永不因为「远端没有」而被删掉 —— 同步只做加法。 */
+let SYNC_STATUS = null;
+let SYNC_DIFF = null;
+
+function fmtAgo(ts) {
+  const t = Number(ts || 0);
+  if (!t) return '从未';
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - t));
+  if (s < 45) return '刚刚';
+  if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+  if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
+  return Math.floor(s / 86400) + ' 天前';
+}
+
+async function paintSyncTip() {
+  const el = $('#syncTip');
+  if (!el) return;
+  try {
+    const d = await getJson('/api/sync/status');
+    SYNC_STATUS = (d && d.data) || {};
+    if (!SYNC_STATUS.configured) { el.textContent = '还没填服务器和账号'; return; }
+    const parts = [];
+    if (SYNC_STATUS.last_push) parts.push('上次上传 ' + fmtAgo(SYNC_STATUS.last_push));
+    if (SYNC_STATUS.last_pull) parts.push('上次拉取 ' + fmtAgo(SYNC_STATUS.last_pull));
+    const r = SYNC_STATUS.remote;
+    if (r && r.counts) {
+      parts.push(`远端：收藏 ${r.counts.favorites} / 歌单 ${r.counts.playlists}`);
+    }
+    const pend = SYNC_STATUS.pending;
+    let badge = '';
+    if (pend) {
+      const n = (pend.favorites || 0) + (pend.playlists || 0)
+        + (pend.conflicts || 0) + (pend.last_track ? 1 : 0);
+      if (n) badge = `<b class="sync-badge">远端有 ${n} 项待合并</b>`;
+    }
+    el.innerHTML = badge + esc(parts.length ? parts.join(' · ') : '已配置，还没同步过');
+  } catch (e) {
+    el.textContent = '读取同步状态失败';
+  }
+}
+
+function syncForm() {
+  return {
+    url: ($('#setDavUrl') || {}).value || '',
+    user: ($('#setDavUser') || {}).value || '',
+    pass: ($('#setDavPass') || {}).value || '',
+    dir: ($('#setDavDir') || {}).value || 'Elysium',
+    auto: !!($('#setDavAuto') || {}).checked,
+  };
+}
+
+async function syncSave() {
+  try {
+    const r = await post('/api/sync/config', syncForm());
+    state.settings.webdav = Object.assign({}, r.data || {}, { has_pass: true });
+    toast('已保存，正在测试连接…');
+    const t = await post('/api/sync/test', {});
+    if (!t.ok) throw new Error(t.error || '连接失败');
+    const d = t.data || {};
+    toast(d.exists
+      ? `连上了 · 远端已有数据包（${(d.remote && d.remote.counts && d.remote.counts.favorites) || 0} 项收藏）`
+      : '连上了 · 远端还没有数据包，可以直接上传');
+    fillSettings();
+    paintSyncTip();
+  } catch (e) {
+    toast(e.message || '保存失败', 'err');
+    paintSyncTip();
+  }
+}
+
+async function syncPush() {
+  const btn = $('[data-act="sync-push"]');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await post('/api/sync/push', {});
+    if (!r.ok) throw new Error(r.error || '上传失败');
+    const d = r.data || {};
+    toast(`已上传：收藏 ${d.favorites} 项 · 歌单 ${d.playlists} 个 · ${fmtSize(d.bytes)}`);
+    paintSyncTip();
+  } catch (e) {
+    toast(e.message || '上传失败', 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function syncPull() {
+  try {
+    toast('正在读取远端…');
+    const r = await post('/api/sync/pull', {});
+    if (!r.ok) throw new Error(r.error || '拉取失败');
+    openSyncDrawer(r.data || {});
+    paintSyncTip();
+  } catch (e) {
+    toast(e.message || '拉取失败', 'err');
+  }
+}
+
+function openSyncDrawer(data) {
+  SYNC_DIFF = data;
+  $('#npDrawer').hidden = true;
+  $('#panelDrawer').hidden = true;
+  $('#settingsDrawer').hidden = true;
+  $('#importDrawer').hidden = true;
+  $('#syncDrawer').hidden = false;
+  renderSync();
+}
+
+const SYNC_KIND = { song: '歌曲', album: '专辑', artist: '歌手' };
+
+function renderSync() {
+  const box = $('#syncBody');
+  if (!box) return;
+  const d = SYNC_DIFF;
+  if (!d) { box.innerHTML = ''; return; }
+  const rm = d.remote || {};
+  const cnt = rm.counts || {};
+  let html = `<div class="sync-head">
+    <b>远端数据包</b>
+    <p class="tip">来自 ${esc(rm.device || '未知设备')} · ${rm.pushed_at ? fmtAgo(rm.pushed_at) + '上传' : '时间未知'}
+      · 收藏 ${cnt.favorites || 0} 项 / 歌单 ${cnt.playlists || 0} 个</p>
+  </div>`;
+
+  if (d.empty) {
+    html += `<div class="sync-empty">两端一致，没有需要合并的内容</div>
+      <div class="set-actions"><button class="btn sm" data-close="syncDrawer">关闭</button></div>`;
+    box.innerHTML = html;
+    return;
+  }
+
+  const favs = d.favorites || [];
+  if (favs.length) {
+    html += `<div class="sync-sec">
+      <label class="sync-all"><input type="checkbox" id="syncFav" checked/>
+        <b>收藏</b><em class="tip">远端多出 ${favs.length} 项</em></label>
+      <div class="sync-list">${favs.slice(0, 40).map((f) => `<div class="sync-row plain">
+        <span class="sr-kind">${SYNC_KIND[f.kind] || '歌曲'}</span>
+        <span class="sr-name">${esc(f.name || '')}</span>
+        <span class="sr-sub">${esc(f.artist || '')}</span>
+      </div>`).join('')}
+      ${favs.length > 40 ? `<div class="sync-row plain muted">…另有 ${favs.length - 40} 项</div>` : ''}</div>
+    </div>`;
+  }
+
+  const p = d.playlists || {};
+  const news = p.new || [];
+  if (news.length) {
+    html += `<div class="sync-sec"><b class="sync-title">新歌单</b>
+      <div class="sync-list">${news.map((x) => `<label class="sync-row">
+        <input type="checkbox" data-pl-new="${esc(x.id)}" checked/>
+        <span class="sr-name">${esc(x.name)}</span>
+        <span class="sr-sub">${x.count} 首</span></label>`).join('')}</div>
+    </div>`;
+  }
+
+  const fills = p.fill || [];
+  if (fills.length) {
+    html += `<div class="sync-sec"><b class="sync-title">可补条目</b>
+      <div class="sync-list">${fills.map((x) => `<label class="sync-row">
+        <input type="checkbox" data-pl-fill="${esc(x.id)}" checked/>
+        <span class="sr-name">${esc(x.name)}</span>
+        <span class="sr-sub">远端多 ${x.add} 首（共 ${x.total}）</span></label>`).join('')}</div>
+    </div>`;
+  }
+
+  const conf = p.conflicts || [];
+  if (conf.length) {
+    html += `<div class="sync-sec"><b class="sync-title">同名分歧</b>
+      <p class="tip">同名但内容不同的歌单，需要你定一个</p>
+      ${conf.map((x) => `<div class="sync-row">
+        <span class="sr-name">${esc(x.name)}</span>
+        <span class="sr-sub">本机 ${x.local.count} 首 / 远端 ${x.remote.count} 首</span>
+        <select data-conflict="${esc(x.name)}">
+          <option value="local">保留本机</option>
+          <option value="remote">用远端覆盖</option>
+          <option value="both">两个都留</option>
+        </select></div>`).join('')}
+    </div>`;
+  }
+
+  const lt = d.last_track;
+  if (lt) {
+    html += `<div class="sync-sec"><label class="sync-row">
+      <input type="checkbox" id="syncLt" checked/>
+      <span class="sr-name">播放进度</span>
+      <span class="sr-sub">切到「${esc((lt.item && lt.item.name) || '')}」
+        ${lt.position ? fmtTime(lt.position) : ''}（${fmtAgo(lt.at)}）</span></label>
+    </div>`;
+  }
+
+  html += `<div class="set-actions" style="padding-top:16px">
+    <button class="btn sm primary" data-act="sync-commit">应用所选</button>
+    <button class="btn sm ghost" data-close="syncDrawer">取消</button>
+  </div>
+  <p class="tip" style="padding-top:8px">没勾的部分不会动；本地已有的收藏和歌单不会因为远端没有而被删掉。</p>`;
+  box.innerHTML = html;
+}
+
+async function syncCommit() {
+  const newIds = $$('#syncBody input[data-pl-new]:checked').map((x) => x.dataset.plNew);
+  const fillIds = $$('#syncBody input[data-pl-fill]:checked').map((x) => x.dataset.plFill);
+  const conflicts = {};
+  $$('#syncBody select[data-conflict]').forEach((sel) => {
+    if (sel.value && sel.value !== 'local') conflicts[sel.dataset.conflict] = sel.value;
+  });
+  const payload = {
+    favorites: !!($('#syncFav') || {}).checked,
+    playlist_new: newIds,
+    playlist_fill: fillIds,
+    conflicts,
+    last_track: !!($('#syncLt') || {}).checked,
+  };
+  try {
+    const r = await post('/api/sync/commit', payload);
+    if (!r.ok) throw new Error(r.error || '合并失败');
+    const c = r.data || {};
+    const parts = [];
+    if (c.favorites) parts.push(`收藏 +${c.favorites}`);
+    if (c.playlists_new) parts.push(`歌单 +${c.playlists_new}`);
+    if (c.playlist_items) parts.push(`曲目 +${c.playlist_items}`);
+    if (c.conflicts) parts.push(`分歧处理 ${c.conflicts}`);
+    if (c.last_track) parts.push('进度已切');
+    $('#syncDrawer').hidden = true;
+    await refreshStore();
+    renderSide();
+    render();
+    toast(parts.length ? '已合并：' + parts.join(' · ') : '没有可合并的内容');
+  } catch (e) {
+    toast(e.message || '合并失败', 'err');
+  }
+}
+
 function eqBandsHtml() {
   const curve = engCurve();
   return EQ_FREQS.map((f, i) => `
@@ -3979,6 +4213,36 @@ function viewSettings() {
       </select>
     </div>
     <div class="eq-bands" id="eqBands">${eqBandsHtml()}</div>
+  </div>
+
+  <div class="set-sec">
+    <h4>多端同步</h4>
+    <div class="field">
+      <div><label>服务器</label><p class="tip">你自己的 WebDAV 地址，例如坚果云 https://dav.jianguoyun.com/dav</p></div>
+      <input type="text" id="setDavUrl" placeholder="https://dav.jianguoyun.com/dav"/>
+    </div>
+    <div class="field">
+      <div><label>账号</label><p class="tip">WebDAV 的登录邮箱 / 用户名</p></div>
+      <input type="text" id="setDavUser" placeholder="you@example.com"/>
+    </div>
+    <div class="field">
+      <div><label>应用密码</label><p class="tip">坚果云要填「应用密码」，不是登录密码</p></div>
+      <input type="password" id="setDavPass" placeholder="未设置"/>
+    </div>
+    <div class="field">
+      <div><label>远端目录</label><p class="tip">数据包放在这个目录下的 <span class="mono">elysium-sync.json</span>，没有会自动建</p></div>
+      <input type="text" id="setDavDir" placeholder="Elysium"/>
+    </div>
+    <div class="field">
+      <div><label>自动上传</label><p class="tip">本地改动后 5 分钟内最多推一次；拉取永远要你确认，不会自动改本地</p></div>
+      <input type="checkbox" class="switch" id="setDavAuto"/>
+    </div>
+    <div class="set-actions">
+      <button class="btn sm" data-act="sync-save">保存并测试</button>
+      <button class="btn sm ghost" data-act="sync-push">立即上传</button>
+      <button class="btn sm ghost" data-act="sync-pull">从远端拉取</button>
+    </div>
+    <p class="tip" id="syncTip" style="padding-top:7px">读取中…</p>
   </div>
 
   <div class="set-sec">
@@ -4140,6 +4404,19 @@ function fillSettings() {
   set('#setCrossfade', String([500, 1000, 2000].indexOf(cf) >= 0 ? cf : 0));
   set('#setEqPreset', EQ_PRESETS[s.eq_preset] || s.eq_preset === 'custom' ? s.eq_preset : 'flat');
   // ↑ 预设名不在表里（老版本写坏的值）就退回平直，别让下拉框空着
+
+  // ---- 多端同步（密码不回传，只告诉前端「有没有」）
+  const wd = s.webdav || {};
+  set('#setDavUrl', wd.url || '');
+  set('#setDavUser', wd.user || '');
+  set('#setDavDir', wd.dir || 'Elysium');
+  const pw = $('#setDavPass');
+  if (pw) {
+    pw.value = '';
+    pw.placeholder = wd.has_pass ? '已保存 · 留空不修改' : '未设置';
+  }
+  chk('#setDavAuto', wd.auto === true);
+  paintSyncTip();
   const tn = $('#setTasteNote');
   if (tn) tn.value = (state.taste && state.taste.note) || '';
   getJson('/api/taste').then((d) => {
@@ -4938,6 +5215,18 @@ document.addEventListener('click', async (e) => {
       if (await loadStyles(false)) paintStyles();
       break;
     }
+    case 'sync-save':
+      await syncSave();
+      break;
+    case 'sync-push':
+      await syncPush();
+      break;
+    case 'sync-pull':
+      await syncPull();
+      break;
+    case 'sync-commit':
+      await syncCommit();
+      break;
     case 'taste':
       $('#settingsDrawer').hidden = true;
       $('#npDrawer').hidden = true;
