@@ -26,6 +26,10 @@ _art/*.md
 _tmp_*
 _tmp/
 
+# 编辑器 / 代理工具生成的会话计划，不属于项目
+.zcode/
+.codex/
+
 # 系统
 Thumbs.db
 desktop.ini

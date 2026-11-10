@@ -46,6 +46,8 @@
   <symbol id="i-moon" viewBox="0 0 24 24"><path d="M12.7 3a8.8 8.8 0 1 0 8.2 11.6 7 7 0 0 1-8.2-11.6z"/></symbol>
   <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 2.6 13.9 9l6.5 1.9-6.5 1.9L12 19.4l-1.9-6.6L3.6 10.9 10.1 9z"/></symbol>
   <symbol id="i-plus" viewBox="0 0 24 24"><path d="M11 4h2v7h7v2h-7v7h-2v-7H4v-2h7z"/></symbol>
+  <symbol id="i-mini" viewBox="0 0 24 24"><path d="M4 5h16v2.2H4zm0 12h16v2.2H4zm6.2-8.2h3.6v6.4h-3.6z"/></symbol>
+  <symbol id="i-restore" viewBox="0 0 24 24"><path d="M4 4h16v16H4V4zm2 2v12h12V6H6zM8 8h8v8H8V8z"/></symbol>
   <symbol id="i-list" viewBox="0 0 24 24"><path d="M4 5h2v2H4zm4 0h12v2H8zM4 11h2v2H4zm4 0h12v2H8zm-4 6h2v2H4zm4 0h12v2H8z"/></symbol>
 </svg>
 
@@ -130,6 +132,7 @@
   </div>
 
   <footer class="player">
+    <div class="mini-drag pywebview-drag-region"></div>
     <div class="pl-l">
       <div class="pl-art" id="plArt"><svg><use href="#i-note"/></svg><span class="spin" id="buffering" hidden></span></div>
       <div class="pl-meta">
@@ -146,6 +149,7 @@
         <button class="pl-play" id="playBtn" title="播放 / 暂停"><svg><use href="#i-play"/></svg></button>
         <button class="ic" id="nextBtn" title="下一首"><svg><use href="#i-next"/></svg></button>
         <button class="ic" id="lyricBtn" title="歌词"><svg><use href="#i-quote"/></svg></button>
+        <button class="ic" id="miniBtn" title="迷你条"><svg><use href="#i-mini"/></svg></button>
       </div>
       <div class="pl-seek">
         <span class="mono" id="curTime">0:00</span>
