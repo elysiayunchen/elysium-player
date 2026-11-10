@@ -21,6 +21,7 @@ import http.client
 import importer                      # 歌单导入（规则外置 + 三桶判定），见 providers/
 import sync_engine                   # 多端同步（用户自己的 WebDAV）
 import json
+import math
 import os
 import queue
 import re
@@ -218,9 +219,12 @@ def work_meta(qs, size):
     }
     # P9 音准结算（可选）：前端唱完才带上。老作品没有这两个字段，展示侧自行降级。
     # pitch_avg = 行内平均音分偏差（0~200，越小越准）；pitch_hit = 判准的行数。
+    # isfinite 是硬墙：float("nan")/float("inf") 会穿透 min/max 链，NaN 一旦落进
+    # data.json，json.dump 写出非法字面量，下次启动整个数据文件解析报废。
     try:
-        if one("pitch_avg"):
-            meta["pitch_avg"] = round(max(0.0, min(200.0, float(one("pitch_avg")))), 1)
+        v = float(one("pitch_avg"))
+        if one("pitch_avg") and math.isfinite(v):
+            meta["pitch_avg"] = round(max(0.0, min(200.0, v)), 1)
     except ValueError:
         pass
     try:

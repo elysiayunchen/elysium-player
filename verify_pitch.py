@@ -191,7 +191,7 @@ def main():
               d1.get("pitch_avg") == 23.4 and d1.get("pitch_hit") == 5, str(d1)[:120])
         q2 = urllib.parse.urlencode({"name": "坏分作品", "artist": "x", "platform": "kuwo",
                                      "sid": "0", "duration": 3,
-                                     "pitch_avg": "abc", "pitch_hit": "xyz"})
+                                     "pitch_avg": "nan", "pitch_hit": "xyz"})
         r = urllib.request.Request(base + "/api/works/upload?" + q2, data=body[:8192],
                                    headers={"Content-Type": "application/octet-stream"})
         with urllib.request.urlopen(r, timeout=30) as resp:
@@ -344,6 +344,49 @@ def main():
         check("P6 结算页出现音准分且判准", st == "review" and u6["hasScore"]
               and u6["total"] >= 2 and u6["hit"] >= 1, str(u6))
         close_layer()
+
+        # P7 / P8：升降调（WSOLA 离线变调）。源文件 0~7s 是 440Hz，
+        # +2 半音后应得 ≈493.88Hz（midi 71）—— 音高断言依旧确定性。
+        d.execute_script("state.settings.karaoke_pitch = 2;")
+        u = start_karaoke(wid_pitch, "音准伴奏")
+        pb = wait_js(d, "(KAR.pitchBuf && KAR.pitchBuf.semi === 2) ? 2 : null", timeout=120)
+        u7 = d.execute_script("""
+          const pb = KAR.pitchBuf;
+          if (!pb) return { have: false };
+          const rate = pb.buffer.sampleRate;
+          const seg = pb.buffer.getChannelData(0);
+          const frame = 4096;
+          const midis = [];
+          for (let t = 0.3; t < 1.5; t += 0.2) {
+            const off = Math.round(t * rate);
+            const p = karpACF(seg.subarray(off, off + frame), rate);
+            midis.push(p ? Math.round(69 + 12 * Math.log2(p.f0 / 440)) : null);
+          }
+          return { have: true, semi: pb.semi, dur: +pb.buffer.duration.toFixed(3),
+                   midis: midis };
+        """)
+        check("P7 升降调 +2 半音音高正确（WSOLA）",
+              u7.get("have") and u7["semi"] == 2
+              and all(m is not None and abs(m - 71) <= 1 for m in u7["midis"]),
+              str(u7))
+        check("P8 变调后时长不变（变调不变速）",
+              abs(u7.get("dur", 0) - 20.0) < 0.2, "dur=%s" % u7.get("dur"))
+        # P7b：变调伴奏开唱走 buffer 路径
+        d.execute_script("document.getElementById('kBegin').click();")
+        ph = wait_js(d, "KAR.phase === 'sing' ? KAR.phase : null", timeout=30)
+        time.sleep(1.5)
+        u7b = d.execute_script("""
+          return { buf: !!KAR.bufSrc,
+                   pos: +((KAR.ctx.currentTime - KAR.bufT0) || 0).toFixed(2),
+                   ch: KAR.chunks.length };
+        """)
+        check("P7b 变调伴奏走 buffer 路径且录音正常",
+              ph == "sing" and u7b["buf"] and u7b["pos"] > 1.0 and u7b["ch"] > 5,
+              str(u7b))
+        d.execute_script("document.getElementById('kFinish').click();")
+        time.sleep(0.5)
+        close_layer()
+        d.execute_script("state.settings.karaoke_pitch = 0;")
 
         logs = [e["message"] for e in d.get_log("browser") if e["level"] == "SEVERE"]
         check("U7 无未捕获的严重异常", not logs, (logs[:2] if logs else ""))

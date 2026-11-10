@@ -5921,6 +5921,12 @@ const KAR = {
   pitchAcc: null,                                  // 当前行 {sum, n} |cents| 累计
   pitchRows: [],                                   // 结算 [{ok, avg}]
   echo: true, reverb: 'studio',
+  // --- P10 升降调（WSOLA 离线变调）---
+  pitchSemi: 0,                                    // 目标半音数 −6..+6（0 = 原调）
+  decodedBuf: null,                                // 原采样率解码缓存（变调原料）
+  pitchWorker: null, pitchBusy: false,
+  pitchBuf: null,                                  // {buffer, semi} 变调产物
+  bufSrc: null, bufT0: 0,                          // 变调播放路径（元素路径的替身）
 };
 const KAR_SING_THR = 0.035;   // 跟唱判定：行内 mic RMS 超过它算「唱了」（假麦正弦 ≈ 0.7）
 /* getUserMedia 必须绑在 mediaDevices 上调用：摘成裸函数再调会 Illegal invocation。 */
@@ -5966,9 +5972,11 @@ async function karaokeStart(item) {
   } catch (e) { KAR.lines = []; }
   KAR.sung = KAR.lines.map(() => false);
   KAR.open = true;
-  // 音准偏好（全局记忆）：上次用过的混响 / 耳返接着用
+  // 音准偏好（全局记忆）：上次用过的混响 / 耳返 / 变调接着用
   KAR.reverb = state.settings.karaoke_reverb || 'studio';
   KAR.echo = state.settings.karaoke_echo !== false;
+  KAR.pitchSemi = Math.max(-6, Math.min(6, Number(state.settings.karaoke_pitch) || 0));
+  KAR.pitchBuf = null;                         // 换歌必须重算变调
   $('#singLayer').hidden = false;
   karPaintReady();
   karBindOnce();
@@ -5989,6 +5997,7 @@ function karPaintReady() {
         ? `已就位 ${KAR.lines.length} 行歌词 · 建议戴耳机（避免伴奏串进麦克风）`
         : '这首歌没找到带时间轴的歌词 · 纯伴奏模式'}</div>
       <div class="k-ready-s k-analyze" id="kAnalyze">正在取原唱数据…</div>
+      <div class="k-ready-s k-analyze" id="kPitchProg"></div>
       <button class="btn primary lg" id="kBegin" data-act="k-begin">${icon('mic')}开始演唱</button>
       <div class="k-hint">全程录音只保存在本机，唱完由你决定保存或丢弃</div>
     </div>`;
@@ -6049,6 +6058,32 @@ function karBindOnce() {
     }
     toast(KAR.echo ? '耳返已开（外放时小心啸叫）' : '耳返已关');
   };
+  const pk = $('#kPitch');
+  if (pk) {
+    pk.value = String(KAR.pitchSemi);
+    pk.onchange = () => {
+      if (KAR.phase !== 'ready') {             // 唱到一半换调会让伴奏跳变，禁
+        pk.value = String(KAR.pitchSemi);
+        toast('唱完这首再换调', 'err');
+        return;
+      }
+      const v = Math.max(-6, Math.min(6, Number(pk.value) || 0));
+      KAR.pitchSemi = v;
+      postSettings({ karaoke_pitch: v });
+      KAR.pitchBuf = null;                     // 旧产物作废
+      const pr = $('#kPitchProg');
+      if (v === 0) {
+        KAR.decodedBuf = null;
+        if (pr) pr.textContent = '';
+        toast('已恢复原调');
+      } else if (KAR.decodedBuf) {
+        karpPitch(v);
+      } else if (pr) {
+        pr.textContent = '取到原唱音频后开始生成变调…';
+        // karpAnalyze decode 完成会自动带起 karpPitch
+      }
+    };
+  }
 }
 
 function karSetVocal(cancelOn) {
@@ -6141,9 +6176,20 @@ function karBuild(stream) {
     el.preload = 'auto';
     el.setAttribute('playsinline', '');
     document.body.appendChild(el);
-    el.src = mediaSrc(KAR.item, playCandidates(KAR.item)[0]);
-
-    const src = ctx.createMediaElementSource(el);
+    let src;
+    if (KAR.pitchBuf) {
+      /* P10 变调路径：WSOLA 产物直接进图。音高与时长已烙进 buffer，
+         元素留着壳（统一清理 / U10 断言）但不给 src，不发起流请求。 */
+      el.preload = 'none';
+      const bs = ctx.createBufferSource();
+      bs.buffer = KAR.pitchBuf.buffer;
+      bs.onended = () => { if (KAR.phase === 'sing') karStop(); };
+      src = bs;
+      KAR.bufSrc = bs;
+    } else {
+      el.src = mediaSrc(KAR.item, playCandidates(KAR.item)[0]);
+      src = ctx.createMediaElementSource(el);
+    }
     const split = ctx.createChannelSplitter(2);
     const l = ctx.createGain(); l.gain.value = 0.5;
     const r = ctx.createGain(); r.gain.value = -0.5;
@@ -6265,8 +6311,13 @@ function karGo() {
   KAR.phase = 'sing';
   KAR.t0 = Date.now();
   KAR.chunks = [];
-  const p = KAR.el.play();
-  if (p && p.catch) p.catch(() => { toast('伴奏没能播出来', 'err'); });
+  if (KAR.bufSrc) {
+    KAR.bufT0 = KAR.ctx.currentTime;
+    KAR.bufSrc.start();                        // BufferSource 无自动播放策略问题
+  } else {
+    const p = KAR.el.play();
+    if (p && p.catch) p.catch(() => { toast('伴奏没能播出来', 'err'); });
+  }
   karPaintCtl(false, true);
   cancelAnimationFrame(KAR.raf);
   KAR.raf = requestAnimationFrame(karLoop);
@@ -6276,9 +6327,12 @@ function karLoop() {
   if (!KAR.open) return;
   KAR.raf = requestAnimationFrame(karLoop);
   if (KAR.phase !== 'sing' || !KAR.el) return;
-  const el = KAR.el;
-  const pos = el.currentTime || 0;
-  const dur = (isFinite(el.duration) && el.duration) || KAR.item.duration || 0;
+  // 变调路径没有元素时钟：用 AudioContext 时钟减起点（WSOLA 输出与原曲等长同轴）
+  const pos = KAR.bufSrc
+    ? Math.max(0, KAR.ctx.currentTime - KAR.bufT0)
+    : (KAR.el.currentTime || 0);
+  const dur = KAR.bufSrc ? KAR.bufSrc.buffer.duration
+    : ((isFinite(KAR.el.duration) && KAR.el.duration) || KAR.item.duration || 0);
   $('#kRecTime').textContent = fmtTime(pos) + (dur ? ' / ' + fmtTime(dur) : '');
   if (dur) $('#kProgFill').style.width = Math.min(100, (pos / dur) * 100).toFixed(2) + '%';
 
@@ -6387,7 +6441,11 @@ function karPaintLines(idx) {
 function karStop() {
   if (KAR.phase !== 'sing') return;
   KAR.phase = 'review';
-  try { KAR.el.pause(); } catch (e) { /* ignore */ }
+  if (KAR.bufSrc) {
+    try { KAR.bufSrc.stop(); } catch (e) { /* 已结束 */ }
+  } else {
+    try { KAR.el.pause(); } catch (e) { /* ignore */ }
+  }
   karCloseLine();
   const sung = KAR.sung.filter(Boolean).length;
   const total = KAR.lines.filter((l, i, a) => !i || a[i].t - a[i - 1].t > 0.5).length || KAR.lines.length;
@@ -6486,19 +6544,23 @@ async function karSave() {
 function karClose() {
   cancelAnimationFrame(KAR.raf);
   if (KAR.worker) { KAR.worker.terminate(); KAR.worker = null; }
+  if (KAR.pitchWorker) { KAR.pitchWorker.terminate(); KAR.pitchWorker = null; }
+  KAR.pitchBusy = false;
   if (KAR.micStream) KAR.micStream.getTracks().forEach((t) => t.stop());
   if (KAR.el) {
     try { KAR.el.pause(); KAR.el.removeAttribute('src'); KAR.el.load(); } catch (e) { /* ignore */ }
     KAR.el.remove();
   }
   if (KAR.ctx) { try { KAR.ctx.close(); } catch (e) { /* ignore */ } }
+  if (KAR.pitchCtx) { try { KAR.pitchCtx.close(); } catch (e) { /* ignore */ } }
   Object.assign(KAR, { open: false, phase: '', ctx: null, el: null, cancel: null,
     orig: null, acc: null, micGain: null, wet: null, micLevel: 0,
     micStream: null, chunks: [], blob: null, duration: 0, lastLine: -1,
     convolver: null, echoGate: null, toneFilter: null,
     melody: null, keyInfo: null, melodyRange: null, autoVocal: null, userMidi: null,
     ringBuf: null, ringN: 0, userHist: [], pitchAcc: null, pitchRows: [],
-    pitchHit: 0, pitchTotal: 0, pitchAvg: null });
+    pitchHit: 0, pitchTotal: 0, pitchAvg: null,
+    decodedBuf: null, pitchBuf: null, bufSrc: null, pitchCtx: null });
   karScaleCenter = null;
   $('#singLayer').hidden = true;
   // 还位：播放器回到进入前的位置（保持暂停，用户自己决定续不续）
@@ -6520,6 +6582,8 @@ function karPaintCtl(ready, singing) {
   if (fin) fin.hidden = !singing;
   const back = $('#kBack');
   if (back) back.hidden = !!singing;
+  const pk = $('#kPitch');
+  if (pk) pk.disabled = !!singing;             // 变调只在 ready 态可选
 }
 
 /* ------------------------------------------------------------------ K 歌音准引擎（P9）
@@ -6668,8 +6732,122 @@ function detectKey(hist) {
 }
 
 let L = null, R = null, RATE = 8000;
+
+/* ---- WSOLA 变调（P10）：变调不变速 ----
+   时域经典两步合一：先 WSOLA 把输入拉长 ratio 倍（慢放，音高不变），
+   再线性插值抽稀 ratio 倍（时长回原，音高 ×ratio）。
+   两步流式合并：stretch 域只保留最近 2 帧的滑窗，final 域边生成边推进 ——
+   内存 = 输入 + 输出，没有全曲中间缓冲。
+   δ 对齐两级搜索（粗步 16 → ±16 精搜）：WSOLA 是知觉容忍算法，这个精度足够。
+   stretch[p] 在 p < k×Ha 后才是最终值（Hann 50% overlap 两帧叠加），final 只推进到
+   k×Ha/ratio —— 这是滑窗收缩与插值边界的依据。L/R 共用 δ（保住声像）。 */
+function wsolaPitch(lIn, rIn, rate, semi, progress) {
+  const ratio = Math.pow(2, semi / 12);
+  const n = lIn.length;
+  const frame = Math.max(512, Math.round(rate * 0.046));
+  const Ha = frame >> 1;                     // 输出 hop（50% overlap，Hann 和恒为 1）
+  const tol = frame >> 2;                    // δ 搜索半径
+  const hann = new Float32Array(frame);
+  for (let i = 0; i < frame; i += 1) {
+    hann[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / frame);
+  }
+
+  const nOut = n;                            // 最终输出与输入等长
+  const lOut = new Float32Array(nOut);
+  const rOut = new Float32Array(nOut);
+  /* 滑窗 3 帧：收缩保留 [k×Ha−frame, k×Ha+frame)，下一帧要写到 k×Ha+Ha+frame
+     —— 2 帧窗会越界（写上界超出保留区 Ha），被动截断就是每帧丢 1/4 波形。
+     copyWithin 不清尾，尾部残留会被下一帧的 += 叠加进来，必须显式清零。 */
+  const win = frame * 3;
+  const sL = new Float32Array(win);
+  const sR = new Float32Array(win);
+  let sBase = 0;                             // 滑窗对应的 stretch 域起点
+  let refL = new Float32Array(Ha);           // 上一帧输出尾部（δ 相关的参考）
+  let refR = new Float32Array(Ha);
+  let oStart = 0;                            // final 域已推进到的位置
+  let k = 0;                                 // 帧号
+  const report = Math.max(1, Math.floor(nOut / Ha / 30));
+
+  while (oStart < nOut) {
+    const wPos = k * Ha - sBase;             // 本帧在滑窗内的写入起点
+    const baseIn = Math.round(k * Ha / ratio);
+    /* δ 搜索：首帧 ref 全零 → 直取 δ=0 */
+    let bestD = 0;
+    if (k > 0) {
+      let best = -1;
+      for (let d = -tol; d <= tol; d += 16) {
+        const p = baseIn + d;
+        if (p < 0 || p + Ha > n) continue;
+        let s = 0;
+        for (let j = 0; j < Ha; j += 4) s += refL[j] * lIn[p + j] + refR[j] * rIn[p + j];
+        if (s > best) { best = s; bestD = d; }
+      }
+      const lo = Math.max(-tol, bestD - 16);
+      const hi = Math.min(tol, bestD + 16);
+      for (let d = lo; d <= hi; d += 1) {
+        const p = baseIn + d;
+        if (p < 0 || p + Ha > n) continue;
+        let s = 0;
+        for (let j = 0; j < Ha; j += 2) s += refL[j] * lIn[p + j] + refR[j] * rIn[p + j];
+        if (s > best) { best = s; bestD = d; }
+      }
+    }
+    /* OLA：读输入 [baseIn+δ, +frame) 加 Hann 写进滑窗 */
+    const src = baseIn + bestD;
+    for (let j = 0; j < frame; j += 1) {
+      const x = wPos + j;
+      if (x >= win) break;                   // 不会发生（滑窗 2 帧），防御
+      const iv = src + j;
+      const w = hann[j];
+      sL[x] += (iv >= 0 && iv < n ? lIn[iv] : 0) * w;
+      sR[x] += (iv >= 0 && iv < n ? rIn[iv] : 0) * w;
+    }
+    /* ref = 本帧新贡献的尾部 Ha（stretch 域 [k×Ha+Ha, k×Ha+frame)） */
+    for (let j = 0; j < Ha; j += 1) {
+      const x = wPos + Ha + j;
+      refL[j] = sL[x];
+      refR[j] = sR[x];
+    }
+    /* final 推进到 k×Ha/ratio：那里的 stretch 已是最终值（两帧叠加完毕） */
+    const oEnd = Math.min(nOut, Math.floor(k * Ha / ratio));
+    for (let i = oStart; i < oEnd; i += 1) {
+      const sp = i * ratio - sBase;          // 滑窗内位置
+      const i0 = Math.floor(sp);
+      if (i0 + 1 >= win) break;              // 防御，正常不会到
+      const fr = sp - i0;
+      lOut[i] = sL[i0] * (1 - fr) + sL[i0 + 1] * fr;
+      rOut[i] = sR[i0] * (1 - fr) + sR[i0 + 1] * fr;
+    }
+    oStart = Math.max(oStart, oEnd);
+    /* 滑窗右移：保留 [k×Ha − frame, …)，尾部清零 —— += 叠加不容残留 */
+    const newBase = Math.max(0, k * Ha - frame);
+    if (newBase > sBase) {
+      const shift = newBase - sBase;
+      sL.copyWithin(0, shift, win);
+      sR.copyWithin(0, shift, win);
+      sL.fill(0, win - shift);
+      sR.fill(0, win - shift);
+      sBase = newBase;
+    }
+    if (k % report === 0) progress(Math.min(1, oStart / nOut));
+    k += 1;
+    if (k > (nOut * ratio) / Ha + 8) break;  // 防御：数值异常时终止
+  }
+  return { l: lOut, r: rOut };
+}
+
 onmessage = (e) => {
   const msg = e.data;
+  if (msg.type === 'pitch') {
+    const lIn = new Float32Array(msg.l);
+    const rIn = new Float32Array(msg.r);
+    const out = wsolaPitch(lIn, rIn, msg.rate, msg.semi, (p) => {
+      postMessage({ type: 'pitch-progress', p: p });
+    });
+    postMessage({ type: 'pitched', semi: msg.semi,
+      l: out.l.buffer, r: out.r.buffer }, [out.l.buffer, out.r.buffer]);
+    return;
+  }
   if (msg.type !== 'analyze') return;
   L = new Float32Array(msg.l); R = new Float32Array(msg.r); RATE = msg.rate;
   const n = L.length;
@@ -6746,13 +6924,26 @@ onmessage = (e) => {
 };
 `;
 
+/** Worker 脚本的 Blob URL 复用（源码不变）：每次 createObjectURL 且从不 revoke
+   就是一次小泄漏，K 歌开关频繁时积少成多。 */
+let _karWorkerURL = null;
+function karWorkerURL() {
+  if (!_karWorkerURL) {
+    _karWorkerURL = URL.createObjectURL(
+      new Blob([KAR_WORKER_SRC], { type: 'text/javascript' }));
+  }
+  return _karWorkerURL;
+}
+
 /** 进 K 歌即后台解析原唱：fetch → decode → 8kHz 重采样 → Worker。
-   全程不 await（K 歌不等于解析），结果回来填 KAR.melody / keyInfo / autoVocal。 */
+   全程不 await（K 歌不等于解析），结果回来填 KAR.melody / keyInfo / autoVocal。
+   回调一律校验 KAR.item —— 关层重开另一首后，旧歌的迟到回调绝不污染新层。 */
 async function karpAnalyze(item) {
   KAR.worker = null;
   KAR.melody = null;
   KAR.keyInfo = null;
   KAR.autoVocal = null;
+  KAR.decodedBuf = null;
   const url = mediaSrc(item, playCandidates(item)[0]);
   try {
     const ab = await fetch(url).then((r) => {
@@ -6762,6 +6953,11 @@ async function karpAnalyze(item) {
     // decode 用一次性 OfflineAudioContext：KAR.ctx 可能还没建（开唱前就要判定原伴）
     const oc = new OfflineAudioContext(1, 1, 48000);
     const buf = await oc.decodeAudioData(ab);
+    if (KAR.item !== item) return;             // 层已经换歌 / 关了：这批原料作废
+    if (KAR.open && KAR.pitchSemi) {           // 选了变调：留着原采样率解码当 WSOLA 原料
+      KAR.decodedBuf = buf;
+      karpPitch(KAR.pitchSemi);
+    }
     // 重采样到 8kHz（旋律分析 / 原伴判定都吃这个分辨率，内存也从 92MB 掉到 15MB）
     const n8 = Math.max(1, Math.ceil(buf.duration * 8000));
     const oc2 = new OfflineAudioContext(2, n8, 8000);
@@ -6784,10 +6980,14 @@ async function karpAnalyze(item) {
       } else cur[1] = l.t + 4;
     }
     if (cur) wins.push(cur);
-    const w = new Worker(URL.createObjectURL(new Blob([KAR_WORKER_SRC], { type: 'text/javascript' })));
+    const w = new Worker(karWorkerURL());
     KAR.worker = w;
     w.onmessage = (e) => {
       const m = e.data;
+      if (KAR.item !== item || !KAR.open) {    // 换歌 / 关层：迟到回调全部丢弃
+        w.terminate();
+        return;
+      }
       if (m.type === 'progress') {
         const el = $('#kAnalyze');
         if (el) el.textContent = `正在解析原唱旋律 ${Math.round(m.done / m.total * 100)}%`;
@@ -6814,6 +7014,67 @@ async function karpAnalyze(item) {
     const an = $('#kAnalyze');
     if (an) an.textContent = '原唱解析失败（' + (e.message || e) + '）· 纯伴奏模式';
   }
+}
+
+/** 升降调生成（P10）：decodedBuf → Worker WSOLA → AudioBuffer。
+   只在 ready 态可选；生成完成若还在 ready 就绪待用，开唱后禁换调。 */
+function karpPitch(semi) {
+  if (!KAR.open || !KAR.decodedBuf) return;
+  if (KAR.pitchWorker) { KAR.pitchWorker.terminate(); KAR.pitchWorker = null; }
+  KAR.pitchBusy = true;
+  KAR.pitchSemi = semi;
+  const pr = $('#kPitchProg');
+  if (pr) pr.textContent = '正在生成变调伴奏 0%';
+  const w = new Worker(karWorkerURL());
+  KAR.pitchWorker = w;
+  w.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === 'pitch-progress') {
+      const p = $('#kPitchProg');
+      if (p) p.textContent = `正在生成变调伴奏 ${Math.round(m.p * 100)}%`;
+      return;
+    }
+    if (m.type === 'pitched' && KAR.open) {
+      const buf = KAR.decodedBuf;
+      const out = ctxOf();
+      if (buf && out) {
+        const pb = out.createBuffer(buf.numberOfChannels, m.l.byteLength / 4,
+          buf.sampleRate);
+        pb.copyToChannel(new Float32Array(m.l), 0);
+        pb.copyToChannel(new Float32Array(m.r), Math.min(1, buf.numberOfChannels - 1));
+        KAR.pitchBuf = { buffer: pb, semi: m.semi };
+        KAR.decodedBuf = null;                 // 变调产物就位，原料释放
+        if (KAR.phase === 'ready') {
+          toast(`变调伴奏已就绪（${semi > 0 ? '+' : ''}${semi} 半音）`);
+          const p = $('#kPitchProg');
+          if (p) p.textContent = '变调伴奏已就绪';
+        }
+      }
+      KAR.pitchBusy = false;
+      w.terminate();
+      KAR.pitchWorker = null;
+    }
+  };
+  w.onerror = () => {
+    KAR.pitchBusy = false;
+    KAR.pitchWorker = null;
+    toast('变调生成失败，将用原调演唱', 'err');
+  };
+  const l = KAR.decodedBuf.getChannelData(0).slice();
+  const r = (KAR.decodedBuf.numberOfChannels > 1
+    ? KAR.decodedBuf.getChannelData(1) : KAR.decodedBuf.getChannelData(0)).slice();
+  w.postMessage({ type: 'pitch', l: l.buffer, r: r.buffer,
+    rate: KAR.decodedBuf.sampleRate, semi }, [l.buffer, r.buffer]);
+}
+
+/** 变调产物要建在播放用的那个 AudioContext 上；还没开唱就临时建一个 */
+function ctxOf() {
+  if (KAR.ctx) return KAR.ctx;
+  try {
+    const CE = window.AudioContext || window.webkitAudioContext;
+    KAR.pitchCtx = new CE();                   // 存起来，karClose 一并关
+    return KAR.pitchCtx;
+  } catch (e) { return null; }
 }
 
 /** 自动原伴落地：用户手动选过的歌永远听用户的；没选过才听分析结果。 */
