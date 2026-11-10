@@ -256,19 +256,44 @@
     <div class="k-meta">
       <div class="k-title ell" id="kTitle"></div>
       <div class="k-artist ell" id="kArtist"></div>
+      <div class="k-badge mono" id="kKeyBadge" hidden title="调性 / 音域由原唱旋律自动解析，供参考"></div>
     </div>
     <div class="k-rec mono" id="kRecTime">0:00</div>
     <button class="ic k-x" data-act="k-close" title="关闭"><svg><use href="#i-close"/></svg></button>
   </div>
   <div class="k-prog"><div class="k-prog-fill" id="kProgFill"></div></div>
   <div class="k-stage" id="kStage"></div>
+  <!-- 实时音准（P9）：大字音名 + 音分偏差 + CDEFGAB 音阶刻度条 -->
+  <div class="k-pitch" id="kPitch">
+    <div class="kp-note mono" id="kpNote">—</div>
+    <div class="kp-mid">
+      <div class="kp-bar">
+        <div class="kp-ticks" id="kpTicks"></div>
+        <div class="kp-target" id="kpTarget" hidden></div>
+        <div class="kp-needle" id="kpNeedle"></div>
+      </div>
+      <div class="kp-cents mono" id="kpCents">等你开口</div>
+    </div>
+  </div>
   <div class="k-lines" id="kLines"></div>
   <div class="k-ctl" id="kCtl">
     <label class="k-vol" title="伴奏音量"><svg><use href="#i-disc"/></svg><input type="range" id="kAccVol" min="0" max="150" value="90"/></label>
     <label class="k-vol" title="人声音量"><svg><use href="#i-mic"/></svg><input type="range" id="kMicVol" min="0" max="200" value="100"/></label>
     <span class="k-meter" title="麦克风电平"><span id="kMicLvl"></span></span>
-    <label class="k-vocal" title="消人声对「人声居中」的混音有效，效果因歌而异">
+    <label class="k-vol" title="人声明亮 / 醇厚"><svg><use href="#i-spark"/></svg><input type="range" id="kTone" min="-6" max="6" step="1" value="0"/></label>
+    <select class="k-sel" id="kReverb" title="混响（耳返空间感）">
+      <option value="dry">干声</option>
+      <option value="room">小房间</option>
+      <option value="studio" selected>录音棚</option>
+      <option value="stage">演唱会</option>
+      <option value="bath">澡堂</option>
+    </select>
+    <label class="k-vocal" title="耳返：耳机里听自己的声音。外放时建议关闭防啸叫">
+      <input type="checkbox" id="kEcho" checked/>耳返
+    </label>
+    <label class="k-vocal" title="消人声对「人声居中」的混音有效；自动判定结果在左侧标签">
       <input type="checkbox" id="kVocal"/>跟原唱一起唱
+      <em class="k-auto" id="kAutoTag">…</em>
     </label>
     <button class="btn primary sm" id="kFinish" data-act="k-finish" hidden>唱完了</button>
     <button class="btn ghost sm" id="kBack" data-act="k-close">退出</button>

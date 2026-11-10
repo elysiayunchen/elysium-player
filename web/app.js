@@ -5913,6 +5913,14 @@ const KAR = {
   chunks: [], lines: [], sung: [], lastLine: -1, raf: 0,
   accVol: 0.9, micVol: 1.0, vocalOff: false,
   resume: null, t0: 0, saving: false, duration: 0,
+  // --- P9 音准引擎 ---
+  worker: null, melody: null, keyInfo: null, melodyRange: null,
+  autoVocal: null, userMidi: null,
+  convolver: null, echoGate: null, toneFilter: null,
+  ringBuf: null, ringN: 0, userHist: [],          // 实时音高：环形攒帧 + 中值平滑
+  pitchAcc: null,                                  // 当前行 {sum, n} |cents| 累计
+  pitchRows: [],                                   // 结算 [{ok, avg}]
+  echo: true, reverb: 'studio',
 };
 const KAR_SING_THR = 0.035;   // 跟唱判定：行内 mic RMS 超过它算「唱了」（假麦正弦 ≈ 0.7）
 /* getUserMedia 必须绑在 mediaDevices 上调用：摘成裸函数再调会 Illegal invocation。 */
@@ -5958,9 +5966,13 @@ async function karaokeStart(item) {
   } catch (e) { KAR.lines = []; }
   KAR.sung = KAR.lines.map(() => false);
   KAR.open = true;
+  // 音准偏好（全局记忆）：上次用过的混响 / 耳返接着用
+  KAR.reverb = state.settings.karaoke_reverb || 'studio';
+  KAR.echo = state.settings.karaoke_echo !== false;
   $('#singLayer').hidden = false;
   karPaintReady();
   karBindOnce();
+  karpAnalyze(item);                     // 后台解析原唱旋律 / Key / 原伴判定，不等它
 }
 
 function karPaintReady() {
@@ -5976,6 +5988,7 @@ function karPaintReady() {
       <div class="k-ready-s">${KAR.lines.length
         ? `已就位 ${KAR.lines.length} 行歌词 · 建议戴耳机（避免伴奏串进麦克风）`
         : '这首歌没找到带时间轴的歌词 · 纯伴奏模式'}</div>
+      <div class="k-ready-s k-analyze" id="kAnalyze">正在取原唱数据…</div>
       <button class="btn primary lg" id="kBegin" data-act="k-begin">${icon('mic')}开始演唱</button>
       <div class="k-hint">全程录音只保存在本机，唱完由你决定保存或丢弃</div>
     </div>`;
@@ -5985,6 +5998,11 @@ function karPaintReady() {
 /** 控制条只绑一次（oninput/onclick 赋值，重复 open 不叠加） */
 function karBindOnce() {
   const acc = $('#kAccVol'), mic = $('#kMicVol'), voc = $('#kVocal');
+  // 控件初值跟全局记忆对齐：上次用的混响 / 耳返 / 亮暗接着用
+  const rv0 = $('#kReverb'), tn0 = $('#kTone'), ec0 = $('#kEcho');
+  if (rv0) rv0.value = KAR.reverb;
+  if (tn0) tn0.value = String(Number(state.settings.karaoke_voice_tone ?? 0));
+  if (ec0) ec0.checked = KAR.echo;
   acc.oninput = () => {
     KAR.accVol = Number(acc.value) / 100;
     if (KAR.acc) KAR.acc.gain.setTargetAtTime(KAR.accVol, KAR.ctx.currentTime, 0.03);
@@ -5996,7 +6014,40 @@ function karBindOnce() {
   voc.onchange = () => {
     KAR.vocalOff = voc.checked;
     karSetVocal(!KAR.vocalOff);
-    toast(voc.checked ? '已切回原声（跟原唱一起唱）' : '已减弱原声（中置消人声，效果因歌而异）');
+    // 手动选择永远赢过自动判定，而且这首歌记住：下次直接用
+    const key = songKey(KAR.item || {});
+    const prefs = state.settings.karaoke_vocal_pref || {};
+    prefs[key] = KAR.vocalOff ? 'orig' : 'cancel';
+    state.settings.karaoke_vocal_pref = prefs;
+    postSettings({ karaoke_vocal_pref: prefs });
+    karPaintAutoTag();
+    toast(voc.checked ? '已切回原声（跟原唱一起唱）· 记住这首歌的选择'
+      : '已减弱原声（中置消人声）· 记住这首歌的选择');
+  };
+  const rv = $('#kReverb');
+  rv.onchange = () => {
+    karpSetReverb(rv.value);
+    toast('混响：' + (KAR_REVERB[rv.value] || {}).label);
+  };
+  const tn = $('#kTone');
+  tn.oninput = () => {
+    const db = Number(tn.value);
+    state.settings.karaoke_voice_tone = db;
+    if (KAR.toneFilter) KAR.toneFilter.gain.setTargetAtTime(db, KAR.ctx.currentTime, 0.03);
+    if (tn._deb) clearTimeout(tn._deb);
+    tn._deb = setTimeout(() => postSettings({ karaoke_voice_tone: db }), 400);
+  };
+  const ec = $('#kEcho');
+  ec.onchange = () => {
+    KAR.echo = ec.checked;
+    state.settings.karaoke_echo = KAR.echo;
+    postSettings({ karaoke_echo: KAR.echo });
+    if (KAR.echoGate) {
+      try {
+        KAR.echoGate.gain.setTargetAtTime(KAR.echo ? 1 : 0, KAR.ctx.currentTime, 0.03);
+      } catch (e) { KAR.echoGate.gain.value = KAR.echo ? 1 : 0; }
+    }
+    toast(KAR.echo ? '耳返已开（外放时小心啸叫）' : '耳返已关');
   };
 }
 
@@ -6012,7 +6063,74 @@ function karSetVocal(cancelOn) {
   }
 }
 
-/** 音频图 + 录音抽头。全程 try 包死：K 歌失败不能把整个播放器拖下水 */
+/** 混响预设：秒数 = 衰减长度，wet = 湿声占比。IR 全部程序生成
+   （指数衰减白噪声 + 轻低通 + 8ms 预延迟），零外部资源。 */
+const KAR_REVERB = {
+  dry: { label: '干声', t: 0, wet: 0 },
+  room: { label: '小房间', t: 0.4, wet: 0.3 },
+  studio: { label: '录音棚', t: 1.2, wet: 0.25 },
+  stage: { label: '演唱会', t: 2.4, wet: 0.28 },
+  bath: { label: '澡堂', t: 3.5, wet: 0.34 },
+};
+
+function karpIR(ctx, seconds) {
+  const rate = ctx.sampleRate;
+  const n = Math.floor(rate * seconds);
+  const buf = ctx.createBuffer(2, n, rate);
+  const preDelay = Math.floor(rate * 0.008);
+  for (let ch = 0; ch < 2; ch += 1) {
+    const d = buf.getChannelData(ch);
+    let lp = 0;
+    for (let i = preDelay; i < n; i += 1) {
+      const decay = Math.pow(1 - (i - preDelay) / (n - preDelay), 2.2);
+      lp = lp * 0.62 + (Math.random() * 2 - 1) * 0.38;
+      d[i] = lp * decay;
+    }
+  }
+  return buf;
+}
+
+/** 切混响：wet 先压到 0 再换 IR 再拉回来，避免换 buffer 的咔哒声 */
+function karpSetReverb(name, immediate) {
+  if (!KAR.ctx || !KAR.convolver) return;
+  const preset = KAR_REVERB[name] || KAR_REVERB.studio;
+  const now = KAR.ctx.currentTime;
+  const apply = () => {
+    try {
+      KAR.convolver.buffer = preset.t > 0 ? karpIR(KAR.ctx, preset.t) : null;
+    } catch (e) { /* 换 IR 失败保持现状 */ }
+    try {
+      KAR.wet.gain.setTargetAtTime(preset.wet, KAR.ctx.currentTime, 0.05);
+    } catch (e) { KAR.wet.gain.value = preset.wet; }
+  };
+  if (immediate) {
+    apply();
+  } else {
+    try { KAR.wet.gain.setTargetAtTime(0, now, 0.02); } catch (e) { /* ignore */ }
+    setTimeout(apply, 70);
+  }
+  KAR.reverb = name;
+  state.settings.karaoke_reverb = name;
+  postSettings({ karaoke_reverb: name });
+}
+
+/** 音高显示工具：midi → {name, cents}（cents 是相对该音名的偏差，-50~+50） */
+function karpNoteCents(f0) {
+  const midiFloat = 69 + 12 * Math.log2(f0 / 440);
+  const midi = Math.round(midiFloat);
+  return { midi, name: karpNote(midi), cents: Math.round((midiFloat - midi) * 100) };
+}
+
+/** 音频图 + 录音抽头（P9 重构）。全程 try 包死：K 歌失败不能把播放器拖下水。
+
+    伴奏： src → split → L·(+0.5)/R·(−0.5) → cancel ┐
+            └──────────────────────────→ orig ──────┴→ acc ─┬→ bus(录音)
+                                                              └→ destination(监听)
+    人声： micSrc → micTap(电平/音高抽头) → hp80 → micGain → tone(亮暗) → micBus ─┬→ bus
+                                    convolver → wet ────────────────────────────┘
+                                                          micBus → echoGate → destination
+    监听拆开的含义：耳返开关只控制「自己的声音回不给耳朵」，伴奏监听永远在；
+    录音 bus 不受耳返影响 —— 存下来的作品永远带人声与混响。 */
 function karBuild(stream) {
   try {
     const CE = window.AudioContext || window.webkitAudioContext;
@@ -6042,35 +6160,58 @@ function karBuild(stream) {
     acc.connect(bus);
 
     const micSrc = ctx.createMediaStreamSource(stream);
-    const micGain = ctx.createGain(); micGain.gain.value = KAR.micVol;
-    micSrc.connect(micGain);
-    // 「房间感」：120ms 反馈延迟 + 低通，当湿润层，默认全干（0）
-    const wet = ctx.createGain(); wet.gain.value = 0;
-    const dly = ctx.createDelay(0.5); dly.delayTime.value = 0.12;
-    const fb = ctx.createGain(); fb.gain.value = 0.25;
-    const damp = ctx.createBiquadFilter(); damp.type = 'lowpass'; damp.frequency.value = 3200;
-    micGain.connect(dly); dly.connect(damp); damp.connect(fb); fb.connect(dly);
-    damp.connect(wet);
-    micGain.connect(bus); wet.connect(bus);
-
-    const rec = ctx.createScriptProcessor(4096, 2, 2);
-    const sink = ctx.createGain(); sink.gain.value = 0;    // SP 必须连到 destination 才会跑
-    bus.connect(rec); rec.connect(sink); sink.connect(ctx.destination);
-    bus.connect(ctx.destination);                          // 监听：伴奏 + 自己的声音
-
-    // 麦克风电平抽头：走与录音同构的 ScriptProcessor，读到的就是真正进
-    // 混音总线的那一路 —— 电平条与成品录音同源，不会出现「看着有电平、
-    // 存下来却是静音」。人声是断续的，加一点峰值保持让条子不闪成 0。
+    // 分析抽头：录音电平 + 实时音高都从这里出（音高与音量无关，取在 gain 之前）
     const micTap = ctx.createScriptProcessor(1024, 1, 1);
     const micSink = ctx.createGain(); micSink.gain.value = 0;
     micSrc.connect(micTap); micTap.connect(micSink); micSink.connect(ctx.destination);
+    KAR.ringBuf = new Float32Array(4096);
+    KAR.ringN = 0;
+    KAR.userHist = [];
     micTap.onaudioprocess = (e) => {
       const d = e.inputBuffer.getChannelData(0);
       let s = 0;
       for (let i = 0; i < d.length; i += 1) s += d[i] * d[i];
       const rms = Math.sqrt(s / d.length);
       KAR.micLevel = Math.max(rms, (KAR.micLevel || 0) * 0.82);
+      // 攒满 4096 帧（85ms）跑一次实时 ACF：12Hz 刷新，跟唱足够
+      const need = 4096 - KAR.ringN;
+      const take = Math.min(need, d.length);
+      KAR.ringBuf.set(d.subarray(0, take), KAR.ringN);
+      KAR.ringN += take;
+      if (KAR.ringN >= 4096) {
+        const rmsBig = Math.sqrt(s / Math.max(1, d.length));
+        let um = null;
+        if (rmsBig > 0.012) {
+          const p = karpACF(KAR.ringBuf, KAR.ctx.sampleRate);
+          if (p) um = karpMidi(p.f0);
+        }
+        KAR.userHist.push(um);
+        if (KAR.userHist.length > 3) KAR.userHist.shift();
+        const ms = KAR.userHist.filter((x) => x !== null).sort((a, b) => a - b);
+        KAR.userMidi = ms.length ? ms[ms.length >> 1] : null;   // 3 帧中值去抖
+        KAR.ringN = 0;
+      }
     };
+
+    // 人声链路：低切 → 音量 → 亮暗 → 混响
+    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 80;
+    const micGain = ctx.createGain(); micGain.gain.value = KAR.micVol;
+    const tone = ctx.createBiquadFilter(); tone.type = 'peaking';
+    tone.frequency.value = 2500; tone.Q.value = 0.9;
+    tone.gain.value = Number(state.settings.karaoke_voice_tone ?? 0);
+    const micBus = ctx.createGain(); micBus.gain.value = 1;
+    micSrc.connect(hp); hp.connect(micGain); micGain.connect(tone); tone.connect(micBus);
+
+    const convolver = ctx.createConvolver();
+    const wet = ctx.createGain();
+    micBus.connect(convolver); convolver.connect(wet); wet.connect(bus);
+    micBus.connect(bus);                                  // 干路永远在
+    const echoGate = ctx.createGain(); echoGate.gain.value = KAR.echo ? 1 : 0;
+    micBus.connect(echoGate); echoGate.connect(ctx.destination);   // 耳返
+
+    const rec = ctx.createScriptProcessor(4096, 2, 2);
+    const sink = ctx.createGain(); sink.gain.value = 0;    // SP 必须连到 destination 才会跑
+    bus.connect(rec); rec.connect(sink); sink.connect(ctx.destination);
 
     rec.onaudioprocess = (e) => {
       if (KAR.phase !== 'sing') return;      // 倒数 / 回顾不进录音
@@ -6078,8 +6219,10 @@ function karBuild(stream) {
                        new Float32Array(e.inputBuffer.getChannelData(1))]);
     };
 
-    Object.assign(KAR, { ctx, el, cancel, orig, acc, micGain, wet,
-      micLevel: 0, micStream: stream });
+    Object.assign(KAR, { ctx, el, cancel, orig, acc, micGain, wet, convolver,
+      echoGate, toneFilter: tone, micLevel: 0, micStream: stream,
+      pitchAcc: null, pitchRows: [] });
+    karpSetReverb(KAR.reverb, true);
     el.addEventListener('ended', () => { if (KAR.phase === 'sing') karStop(); });
     return true;
   } catch (e) {
@@ -6144,14 +6287,89 @@ function karLoop() {
   const lvl = $('#kMicLvl');
   if (lvl) lvl.style.width = Math.min(100, rms * 220).toFixed(1) + '%';
 
-  // 行进 + 跟唱判定
+  // 行进 + 跟唱判定 + 音准（P9）
   const t = pos + LRC_OFF;
-  const idx = KAR.lines.length ? karLineAt(t) : -1;
+  // 无歌词但有旋律参考时用 4s 伪行切分 —— 音准分不该因为没歌词就缺席
+  const idx = KAR.lines.length ? karLineAt(t)
+    : (KAR.melody && KAR.melody.length ? Math.floor(t / 4) : -1);
   if (idx !== KAR.lastLine) {
+    karCloseLine();                        // 上一行的音准落账
     KAR.lastLine = idx;
     karPaintLines(idx);
+    KAR.pitchAcc = { sum: 0, n: 0 };
   }
   if (idx >= 0 && rms > KAR_SING_THR) KAR.sung[idx] = true;
+  karPaintPitch(t, idx);
+}
+
+/** 音准上屏：大字音名 + 音分偏差 + 音阶刻度条。
+   有参考音（原唱旋律）就是「跟唱模式」；没有就自由唱，只显示自己唱到哪。 */
+function karPaintPitch(t, idx) {
+  const um = KAR.userMidi;
+  const ref = karRefMidiAt(t, idx);
+  const noteEl = $('#kpNote'), centsEl = $('#kpCents'),
+    needle = $('#kpNeedle'), target = $('#kpTarget');
+  if (!noteEl) return;
+  if (!um) {
+    noteEl.textContent = '—';
+    noteEl.classList.remove('ok', 'near', 'off');
+    if (centsEl) centsEl.textContent = ref ? '等你开口' : '自由唱';
+    if (needle) needle.style.left = '-10%';
+    if (target) target.style.left = '-10%';
+    return;
+  }
+  const cent = ref ? Math.round((um - ref) * 100) : null;
+  noteEl.textContent = karpNote(um);
+  noteEl.classList.toggle('ok', cent !== null && Math.abs(cent) <= KAR_CENTS_OK);
+  noteEl.classList.toggle('near', cent !== null && Math.abs(cent) > KAR_CENTS_OK
+    && Math.abs(cent) <= 100);
+  noteEl.classList.toggle('off', cent === null || Math.abs(cent) > 100);
+  if (centsEl) {
+    centsEl.textContent = cent === null ? '自由唱'
+      : `${cent > 0 ? '+' : ''}${cent}¢ ${cent > 25 ? '偏高' : cent < -25 ? '偏低' : '准'}`;
+  }
+  // 刻度条：以参考音为中心的 ±7 半音窗（无参考就跟着自己）
+  const center = ref !== null ? ref : um;
+  karPaintScale(center);
+  const pos = ((um - (center - 7)) / 14) * 100;
+  if (needle) needle.style.left = Math.max(0, Math.min(100, pos)).toFixed(1) + '%';
+  if (target) {
+    const tp = ref !== null ? 50 : -10;
+    target.style.left = tp + '%';
+    target.hidden = ref === null;
+  }
+  // 行内累计（行结束 karCloseLine 落账）
+  if (cent !== null && KAR.pitchAcc) {
+    KAR.pitchAcc.sum += Math.abs(cent);
+    KAR.pitchAcc.n += 1;
+  }
+}
+
+let karScaleCenter = null;
+/** 14 格音阶刻度：C D E F G A B 全音名 + 黑键短格，中心变化才重画 */
+function karPaintScale(center) {
+  if (center === karScaleCenter) return;
+  karScaleCenter = center;
+  const ticks = $('#kpTicks');
+  if (!ticks) return;
+  let html = '';
+  for (let i = -7; i <= 7; i += 1) {
+    const m = center + i;
+    const pc = ((m % 12) + 12) % 12;
+    const black = KAR_NOTE_NAMES[pc].includes('#');
+    html += `<span class="kp-tick${black ? ' blk' : ''}${i === 0 ? ' c0' : ''}"
+      style="left:${((i + 7) / 14) * 100}%">${black ? '' : KAR_NOTE_NAMES[pc]}</span>`;
+  }
+  ticks.innerHTML = html;
+}
+
+/** 一行唱完落账：行内音分均值 ≤50¢ 记「准」 */
+function karCloseLine() {
+  const acc = KAR.pitchAcc;
+  const i = KAR.lastLine;
+  if (!acc || i < 0 || !acc.n) return;
+  const avg = acc.sum / acc.n;
+  KAR.pitchRows[i] = { ok: avg <= KAR_CENTS_OK, avg: Math.round(avg) };
 }
 
 function karPaintLines(idx) {
@@ -6170,16 +6388,28 @@ function karStop() {
   if (KAR.phase !== 'sing') return;
   KAR.phase = 'review';
   try { KAR.el.pause(); } catch (e) { /* ignore */ }
+  karCloseLine();
   const sung = KAR.sung.filter(Boolean).length;
   const total = KAR.lines.filter((l, i, a) => !i || a[i].t - a[i - 1].t > 0.5).length || KAR.lines.length;
+  // 音准结算（P9）：只统计「有参考旋律且真唱了」的行，参考缺失的行不冤枉人
+  const rows = KAR.pitchRows.filter(Boolean);
+  KAR.pitchHit = rows.filter((r) => r.ok).length;
+  KAR.pitchTotal = rows.length;
+  KAR.pitchAvg = rows.length
+    ? Math.round(rows.reduce((s, r) => s + r.avg, 0) / rows.length) : null;
   const secs = Math.round((Date.now() - KAR.t0) / 1000);
   KAR.duration = secs;                 // 保存时用录制时长，不含回顾页停留
   KAR.blob = karWav(KAR.chunks, KAR.ctx ? KAR.ctx.sampleRate : 48000);
   KAR.chunks = [];
+  const pitchHtml = KAR.pitchTotal
+    ? `<div class="k-pitch-score">音准 <b>${KAR.pitchHit}</b> / ${KAR.pitchTotal} 行
+        <span class="mono">· 均差 ${KAR.pitchAvg}¢</span></div>`
+    : '';
   $('#kStage').innerHTML = `
     <div class="k-review">
       <div class="k-score">${KAR.lines.length
         ? `跟唱 <b>${sung}</b> / ${total} 行` : '录音完成'}</div>
+      ${pitchHtml}
       <div class="k-ready-s">时长 ${fmtTime(secs)} · ${Math.round((KAR.blob.size || 0) / 1048576 * 10) / 10} MB · 只存在本机</div>
       <div class="k-review-acts">
         <button class="btn primary" data-act="k-save" ${KAR.blob ? '' : 'disabled'}>${icon('check')}保存作品</button>
@@ -6223,6 +6453,11 @@ async function karSave() {
     platform: it.platform || '', sid: String(it.id || ''),
     cover: it.cover || '', duration: String(KAR.duration || 0),
   });
+  // 音准结算随作品存档（P9）：后端 work_meta 透传 pitch_avg / pitch_hit
+  if (KAR.pitchTotal) {
+    q.set('pitch_avg', String(KAR.pitchAvg || 0));
+    q.set('pitch_hit', String(KAR.pitchHit || 0));
+  }
   // 录音是二进制：post() 固定 JSON.stringify，会把 Blob 变成 "{}"，
   // 后端按 Content-Length 只读到 2 字节就拒了。这里发 raw octet-stream。
   try {
@@ -6250,6 +6485,7 @@ async function karSave() {
 
 function karClose() {
   cancelAnimationFrame(KAR.raf);
+  if (KAR.worker) { KAR.worker.terminate(); KAR.worker = null; }
   if (KAR.micStream) KAR.micStream.getTracks().forEach((t) => t.stop());
   if (KAR.el) {
     try { KAR.el.pause(); KAR.el.removeAttribute('src'); KAR.el.load(); } catch (e) { /* ignore */ }
@@ -6258,7 +6494,12 @@ function karClose() {
   if (KAR.ctx) { try { KAR.ctx.close(); } catch (e) { /* ignore */ } }
   Object.assign(KAR, { open: false, phase: '', ctx: null, el: null, cancel: null,
     orig: null, acc: null, micGain: null, wet: null, micLevel: 0,
-    micStream: null, chunks: [], blob: null, duration: 0, lastLine: -1 });
+    micStream: null, chunks: [], blob: null, duration: 0, lastLine: -1,
+    convolver: null, echoGate: null, toneFilter: null,
+    melody: null, keyInfo: null, melodyRange: null, autoVocal: null, userMidi: null,
+    ringBuf: null, ringN: 0, userHist: [], pitchAcc: null, pitchRows: [],
+    pitchHit: 0, pitchTotal: 0, pitchAvg: null });
+  karScaleCenter = null;
   $('#singLayer').hidden = true;
   // 还位：播放器回到进入前的位置（保持暂停，用户自己决定续不续）
   if (KAR.resume) {
@@ -6279,6 +6520,355 @@ function karPaintCtl(ready, singing) {
   if (fin) fin.hidden = !singing;
   const back = $('#kBack');
   if (back) back.hidden = !!singing;
+}
+
+/* ------------------------------------------------------------------ K 歌音准引擎（P9）
+   对标全民K歌的三件事，全部不引外部模型、不上传任何音频：
+
+   1. 原唱解析（后台 Worker）：伴奏 fetch → decode → 重采样 8kHz 单声道 →
+      只在歌词行时间窗内跑 ACF 自相关取 f0 → 中值滤波去野点 → 旋律线；
+      melody 的音级直方图过 Krumhansl-Schmuckler 相关 → 「C 大调 / a 小调」+ 音域。
+   2. 自动原伴：同一份数据比 mid(两侧同相) 与 side(L−R) 在人声频段的能量，
+      side 占比够大说明中置确实有人声可消；近单声道直接判「保留原唱」。
+   3. 实时音准：麦克风抽头攒 4096 帧（85ms）跑同一套 ACF，得到当前音高，
+      与当前歌词行的参考旋律中位数比对，CDEFGAB 音名 + 音分偏差上屏。
+
+   边界（如实写进 UI）：旋律是「自动提取的参考线」，伴奏强的段落置信度低就
+   不给参考（显示 ——），绝不硬判；不做 AI 人声分离、不做逐字音高曲线。 */
+const KAR_NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const KAR_F0_MIN = 80;      // 男低音下限
+const KAR_F0_MAX = 800;     // 女高音上限（再高基本是泛音，防倍频误拾）
+const KAR_CONF_MIN = 0.5;   // ACF 峰显著度门限：低于它判「这帧没有可信音高」
+const KAR_CENTS_OK = 50;    // ±50 音分内算「准」（半音的四分之一）
+
+const karpMidi = (f0) => Math.round(69 + 12 * Math.log2(f0 / 440));
+const karpNote = (midi) => KAR_NOTE_NAMES[((midi % 12) + 12) % 12] + (Math.floor(midi / 12) - 1);
+
+/** 归一化自相关取 f0：返回 {f0, conf} 或 null。
+   峰选择两定律（都拿真实信号验证过）：
+   1. 只认「局部极大」里第一个 ≥0.85×全局峰的 —— 纯音 4096 窗的 ACF 峰宽达
+      ±4 lag，直接扫「第一个超阈值的样本点」会踩在左坡上，频率系统性偏高
+      近半音（验收里 440Hz 稳定检出 466Hz 就是它）；
+   2. 不取全局最高峰 —— 周期整数倍 lag 的相关性同样高，会锁死倍频。 */
+function karpACF(frame, rate, e0) {
+  const n = frame.length;
+  const lagMin = Math.max(2, Math.floor(rate / KAR_F0_MAX));
+  const lagMax = Math.min((n >> 1) | 0, Math.ceil(rate / KAR_F0_MIN));
+  if (lagMax <= lagMin) return null;
+  const peaks = [];
+  let gmax = 0;
+  for (let lag = lagMin; lag <= lagMax; lag += 1) {
+    let s = 0, ea = 0, eb = 0;
+    for (let i = 0; i + lag < n; i += 1) {
+      const a = frame[i], b = frame[i + lag];
+      s += a * b; ea += a * a; eb += b * b;
+    }
+    const r = s / Math.sqrt(ea * eb || 1);
+    peaks.push(r);
+    if (r > gmax) gmax = r;
+  }
+  if (gmax < KAR_CONF_MIN) return null;      // 没有可信周期性：静音 / 噪声 / 纯伴奏
+  const thr = gmax * 0.85;
+  let pick = -1;
+  for (let i = 1; i < peaks.length - 1; i += 1) {
+    if (peaks[i] >= thr && peaks[i] > peaks[i - 1] && peaks[i] >= peaks[i + 1]) {
+      pick = i;
+      break;
+    }
+  }
+  if (pick < 1 || pick >= peaks.length - 1) pick = peaks.indexOf(gmax);
+  // 抛物线插值细化峰位，音分精度全靠它
+  const y0 = peaks[pick - 1], y1 = peaks[pick], y2 = peaks[pick + 1];
+  const denom = (y0 - 2 * y1 + y2);
+  const shift = denom ? 0.5 * (y0 - y2) / denom : 0;
+  const lag = lagMin + pick + Math.max(-1, Math.min(1, shift));
+  return { f0: rate / lag, conf: y1 };
+}
+
+/** Worker 源码：旋律提取 + Key 检测 + 自动原伴判定。内联字符串起 Blob，
+   项目无 CSP，WebView2 / Android WebView 都吃这套。 */
+const KAR_WORKER_SRC = `
+const NOTE = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const CONF_MIN = 0.5, F0MIN = 80, F0MAX = 800;
+/* 与主线程 karpACF 同一套算法（Worker 里不能共享闭包，拷一份保持同源） */
+function acf(frame, rate) {
+  const n = frame.length;
+  const lagMin = Math.max(2, Math.floor(rate / F0MAX));
+  const lagMax = Math.min((n >> 1) | 0, Math.ceil(rate / F0MIN));
+  if (lagMax <= lagMin) return null;
+  const peaks = [];
+  let gmax = 0;
+  for (let lag = lagMin; lag <= lagMax; lag++) {
+    let s = 0, ea = 0, eb = 0;
+    for (let i = 0; i + lag < n; i++) {
+      const a = frame[i], b = frame[i + lag];
+      s += a * b; ea += a * a; eb += b * b;
+    }
+    const r = s / Math.sqrt(ea * eb || 1);
+    peaks.push(r);
+    if (r > gmax) gmax = r;
+  }
+  if (gmax < CONF_MIN) return null;
+  const thr = gmax * 0.85;
+  let pick = -1;
+  for (let i = 1; i < peaks.length - 1; i++) {
+    if (peaks[i] >= thr && peaks[i] > peaks[i - 1] && peaks[i] >= peaks[i + 1]) {
+      pick = i; break;
+    }
+  }
+  if (pick < 1 || pick >= peaks.length - 1) pick = peaks.indexOf(gmax);
+  const y0 = peaks[pick - 1], y1 = peaks[pick], y2 = peaks[pick + 1];
+  const den = y0 - 2 * y1 + y2;
+  const sh = den ? 0.5 * (y0 - y2) / den : 0;
+  const lag = lagMin + pick + Math.max(-1, Math.min(1, sh));
+  return { f0: rate / lag, conf: y1 };
+}
+/* midiOf 保留小数：取整放在中值滤波之后 —— 8kHz 下 lag 精度有限，
+   先取整会让边界帧系统性跳到隔壁半音，直方图和 Key 跟着歪。 */
+const midiOf = (f0) => 69 + 12 * Math.log2(f0 / 440);
+/* RBJ biquad：自动原伴判定要把 mid/side 都限制在人声频段（1k~3.8k） */
+function biquad(kind, f, q, rate, data) {
+  const w = 2 * Math.PI * f / rate, cw = Math.cos(w), al = Math.sin(w) / (2 * q);
+  let b0, b1, b2, a0, a1, a2;
+  if (kind === 'hp') { b0 = (1 + cw) / 2; b1 = -(1 + cw); b2 = b0; a0 = 1 + al; a1 = -2 * cw; a2 = 1 - al; }
+  else { b0 = (1 - cw) / 2; b1 = 1 - cw; b2 = b0; a0 = 1 + al; a1 = -2 * cw; a2 = 1 - al; }
+  b0 /= a0; b1 /= a0; b2 /= a0; a1 /= a0; a2 /= a0;
+  const out = new Float32Array(data.length);
+  let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+  for (let i = 0; i < data.length; i++) {
+    const x = data[i];
+    const y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+    x2 = x1; x1 = x; y2 = y1; y1 = y;
+    out[i] = y;
+  }
+  return out;
+}
+const energy = (d) => { let s = 0; for (let i = 0; i < d.length; i++) s += d[i] * d[i]; return s; };
+/* Krumhansl-Schmuckler 音级轮廓：24 个大小调里挑相关系数最大的 */
+const KS_MAJ = [6.35,2.23,3.48,2.33,4.38,4.09,2.52,5.19,2.39,3.66,2.29,2.88];
+const KS_MIN = [6.33,2.68,3.52,5.38,2.60,3.53,2.54,4.75,3.98,2.69,3.34,3.17];
+function corr(a, b) {
+  const n = a.length;
+  let ma = 0, mb = 0;
+  for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; }
+  ma /= n; mb /= n;
+  let num = 0, da = 0, db = 0;
+  for (let i = 0; i < n; i++) { const x = a[i] - ma, y = b[i] - mb; num += x * y; da += x * x; db += y * y; }
+  return num / (Math.sqrt(da * db) || 1);
+}
+function detectKey(hist) {
+  let best = null;
+  for (let t = 0; t < 12; t++) {
+    const rot = (p) => p.map((_, i) => p[((i - t) % 12 + 12) % 12]);
+    const cm = corr(hist, rot(KS_MAJ)), cn = corr(hist, rot(KS_MIN));
+    if (!best || cm > best.r) best = { r: cm, tonic: t, mode: 'major' };
+    if (cn > best.r) best = { r: cn, tonic: t, mode: 'minor' };
+  }
+  return best;
+}
+
+let L = null, R = null, RATE = 8000;
+onmessage = (e) => {
+  const msg = e.data;
+  if (msg.type !== 'analyze') return;
+  L = new Float32Array(msg.l); R = new Float32Array(msg.r); RATE = msg.rate;
+  const n = L.length;
+  const mono = new Float32Array(n);
+  for (let i = 0; i < n; i++) mono[i] = (L[i] + R[i]) * 0.5;
+
+  /* 1) 自动原伴：mid/side 都带通到人声频段再比能量。
+        side 占比 ≥0.22 → 消人声拿得走东西 → 有效；
+        另查左右相关 ≥0.995 的近单声道 → 必无效。 */
+  let vocalCancel = { effective: false, ratio: 0, mono: false };
+  {
+    const seg = Math.min(n, RATE * 30);
+    const l = L.subarray(0, seg), r = R.subarray(0, seg);
+    let sxy = 0, sxx = 0, syy = 0;
+    for (let i = 0; i < seg; i++) { sxy += l[i] * r[i]; sxx += l[i] * l[i]; syy += r[i] * r[i]; }
+    const cc = sxy / (Math.sqrt(sxx * syy) || 1);
+    if (cc >= 0.995) {
+      vocalCancel = { effective: false, ratio: 0, mono: true };
+    } else {
+      const midB = energy(biquad('lp', 3800, 0.9, RATE, biquad('hp', 1000, 0.9, RATE, mono.subarray(0, seg))));
+      const side = new Float32Array(seg);
+      for (let i = 0; i < seg; i++) side[i] = (l[i] - r[i]) * 0.5;
+      const sideB = energy(biquad('lp', 3800, 0.9, RATE, biquad('hp', 1000, 0.9, RATE, side)));
+      const ratio = midB > 0 ? sideB / midB : 0;
+      vocalCancel = { effective: ratio >= 0.22, ratio: Number(ratio.toFixed(3)), mono: false };
+    }
+  }
+
+  /* 2) 旋律线：只扫歌词行时间窗（并集已在主线程算好），128ms 帧 / 40ms 步进 */
+  const wins = (msg.windows && msg.windows.length) ? msg.windows : [[0, n / RATE]];
+  const melody = [];
+  let lo = 0, hi = 0, minM = 127, maxM = 0, hist = new Array(12).fill(0), done = 0;
+  const frame = new Float32Array(1024);
+  for (const w of wins) {
+    const t0 = Math.max(0, w[0] - 0.5), t1 = Math.min(n / RATE, w[1] + 0.5);
+    const pitchWin = [];
+    for (let t = t0; t < t1; t += 0.04) {
+      const off = Math.round(t * RATE);
+      if (off + 1024 > n) break;
+      for (let i = 0; i < 1024; i++) frame[i] = mono[off + i];
+      const p = acf(frame, RATE);
+      if (p) {
+        const m = midiOf(p.f0);
+        if (m > 20 && m < 108) pitchWin.push({ t: t + 0.064, midi: m, conf: p.conf });
+      }
+    }
+    /* 5 帧中值滤波：杀掉倍频 / 半频跳变的野点，留下的才配当参考音 */
+    for (let i = 2; i < pitchWin.length - 2; i++) {
+      const ms = [pitchWin[i - 2].midi, pitchWin[i - 1].midi, pitchWin[i].midi, pitchWin[i + 1].midi, pitchWin[i + 2].midi].sort((a, b) => a - b);
+      pitchWin[i].midi = ms[2];
+    }
+    for (const p of pitchWin) {
+      const m = Math.round(p.midi);
+      melody.push({ t: Number(p.t.toFixed(3)), midi: m, conf: Number(p.conf.toFixed(2)) });
+      hist[((m % 12) + 12) % 12] += p.conf;
+      if (m < minM) minM = m;
+      if (m > maxM) maxM = m;
+    }
+    done += 1;
+    postMessage({ type: 'progress', done: done, total: wins.length });
+  }
+
+  const key = minM <= maxM ? detectKey(hist) : null;
+  postMessage({
+    type: 'melody',
+    melody: melody,
+    key: key ? {
+      label: NOTE[key.tonic] + (key.mode === 'major' ? ' 大调' : ' 小调'),
+      minor: key.mode === 'minor',
+    } : null,
+    range: (minM <= maxM) ? [minM, maxM] : null,
+    vocalCancel: vocalCancel,
+  });
+};
+`;
+
+/** 进 K 歌即后台解析原唱：fetch → decode → 8kHz 重采样 → Worker。
+   全程不 await（K 歌不等于解析），结果回来填 KAR.melody / keyInfo / autoVocal。 */
+async function karpAnalyze(item) {
+  KAR.worker = null;
+  KAR.melody = null;
+  KAR.keyInfo = null;
+  KAR.autoVocal = null;
+  const url = mediaSrc(item, playCandidates(item)[0]);
+  try {
+    const ab = await fetch(url).then((r) => {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.arrayBuffer();
+    });
+    // decode 用一次性 OfflineAudioContext：KAR.ctx 可能还没建（开唱前就要判定原伴）
+    const oc = new OfflineAudioContext(1, 1, 48000);
+    const buf = await oc.decodeAudioData(ab);
+    // 重采样到 8kHz（旋律分析 / 原伴判定都吃这个分辨率，内存也从 92MB 掉到 15MB）
+    const n8 = Math.max(1, Math.ceil(buf.duration * 8000));
+    const oc2 = new OfflineAudioContext(2, n8, 8000);
+    const srcN = oc2.createBufferSource();
+    srcN.buffer = buf;
+    srcN.connect(oc2.destination);
+    srcN.start();
+    const small = await oc2.startRendering();
+    const L = small.getChannelData(0).slice();
+    const R = small.numberOfChannels > 1 ? small.getChannelData(1).slice() : L.slice();
+    if (!KAR.open) return;                       // 期间退出了 K 歌
+
+    // 歌词行时间窗并集：相邻行间隔 <1.2s 就并成一段，省得重复扫间奏
+    const wins = [];
+    let cur = null;
+    for (const l of KAR.lines) {
+      if (!cur || l.t - cur[1] > 1.2) {
+        if (cur) wins.push(cur);
+        cur = [l.t, l.t + 4];
+      } else cur[1] = l.t + 4;
+    }
+    if (cur) wins.push(cur);
+    const w = new Worker(URL.createObjectURL(new Blob([KAR_WORKER_SRC], { type: 'text/javascript' })));
+    KAR.worker = w;
+    w.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === 'progress') {
+        const el = $('#kAnalyze');
+        if (el) el.textContent = `正在解析原唱旋律 ${Math.round(m.done / m.total * 100)}%`;
+        return;
+      }
+      if (m.type === 'melody') {
+        KAR.melody = m.melody;
+        KAR.keyInfo = m.key;
+        KAR.melodyRange = m.range;
+        KAR.autoVocal = m.vocalCancel;
+        karApplyAutoVocal();
+        karPaintKeyBadge();
+        const an = $('#kAnalyze');
+        if (an) an.textContent = m.melody.length
+          ? `已解析 ${m.melody.length} 个参考音 · ${m.key ? m.key.label : ''}`
+          : '这首没提取到可信人声旋律 · 音准参考不可用';
+        w.terminate();
+        KAR.worker = null;
+      }
+    };
+    w.postMessage({ type: 'analyze', l: L.buffer, r: R.buffer, rate: 8000, windows: wins },
+      [L.buffer, R.buffer]);
+  } catch (e) {
+    const an = $('#kAnalyze');
+    if (an) an.textContent = '原唱解析失败（' + (e.message || e) + '）· 纯伴奏模式';
+  }
+}
+
+/** 自动原伴落地：用户手动选过的歌永远听用户的；没选过才听分析结果。 */
+function karApplyAutoVocal() {
+  const av = KAR.autoVocal;
+  if (!av) return;
+  const key = songKey(KAR.item || {});
+  const pref = (state.settings.karaoke_vocal_pref || {})[key];
+  if (pref !== undefined) return;                // 手动偏好优先，绝不覆盖
+  KAR.vocalOff = !av.effective;                  // 消得动 → 消；消不动 → 原声
+  const cb = $('#kVocal');
+  if (cb) cb.checked = KAR.vocalOff;
+  karSetVocal(!KAR.vocalOff);
+  toast(av.mono ? '这首歌接近单声道，已保留原唱'
+    : av.effective ? '已自动减弱原唱（消人声效果好）' : '消人声效果差，已保留原唱');
+  karPaintAutoTag();
+}
+
+/** 控制条上的「自动判定」小标签：让用户知道当前是自动结果还是手动选择 */
+function karPaintAutoTag() {
+  const el = $('#kAutoTag');
+  if (!el) return;
+  const key = songKey(KAR.item || {});
+  const manual = (state.settings.karaoke_vocal_pref || {})[key] !== undefined;
+  el.textContent = manual ? '手动' : (KAR.autoVocal ? '自动' : '…');
+}
+
+/** 唱的时候每个歌词行的参考音：行窗内参考旋律的中位数（野点已被中值滤波杀过）。
+   无歌词的伪行（4s 一窗）同样适用 —— 参考来自旋律线，不依赖歌词。 */
+function karRefMidiAt(t, idx) {
+  const mel = KAR.melody;
+  if (!mel || !mel.length || idx < 0) return null;
+  let t0, t1;
+  if (KAR.lines[idx]) {
+    t0 = KAR.lines[idx].t;
+    t1 = (KAR.lines[idx + 1] ? KAR.lines[idx + 1].t : t0 + 8) - 0.1;
+  } else {
+    t0 = idx * 4;                            // 伪行窗
+    t1 = t0 + 4;
+  }
+  const inWin = mel.filter((p) => p.t >= t0 && p.t < Math.max(t1, t0 + 0.8));
+  if (inWin.length < 3) return null;         // 参考点太少，宁缺毋滥
+  const ms = inWin.map((p) => p.midi).sort((a, b) => a - b);
+  return ms[ms.length >> 1];
+}
+
+/** Key / 音域徽标（sing 页头部） */
+function karPaintKeyBadge() {
+  const el = $('#kKeyBadge');
+  if (!el) return;
+  const parts = [];
+  if (KAR.keyInfo) parts.push(KAR.keyInfo.label);
+  if (KAR.melodyRange) parts.push(`${karpNote(KAR.melodyRange[0])} – ${karpNote(KAR.melodyRange[1])}`);
+  el.textContent = parts.join(' · ');
+  el.hidden = !parts.length;
 }
 
 /* ------------------------------------------------------------------ 我的作品 */

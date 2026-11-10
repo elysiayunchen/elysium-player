@@ -1540,6 +1540,36 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
   color:var(--ink-2);cursor:pointer}
 .k-vocal input{accent-color:var(--accent)}
 .sing-layer.sing .k-bg{opacity:.36}
+/* ---------- P9 音准引擎 ---------- */
+.k-badge{font-size:10.5px;color:var(--gold);background:var(--gold-dim);
+  border-radius:6px;padding:1px 8px;margin-top:5px;display:inline-block;width:fit-content}
+.k-sel{background:var(--card-2);color:var(--ink-2);border:1px solid var(--line);
+  border-radius:7px;height:26px;font-size:11px;padding:0 6px;cursor:pointer}
+.k-auto{font-style:normal;font-size:9.5px;color:var(--muted);
+  border:1px solid var(--line-2);border-radius:5px;padding:0 4px;line-height:1.5}
+.k-analyze{color:var(--muted)}
+.k-pitch{flex:0 0 auto;position:relative;z-index:1;display:flex;align-items:center;
+  justify-content:center;gap:14px;padding:2px 24px 8px}
+.kp-note{font-size:26px;font-weight:750;width:88px;text-align:right;
+  color:var(--muted);transition:color .12s}
+.kp-note.ok{color:#39d98a}
+.kp-note.near{color:var(--gold)}
+.kp-note.off{color:var(--accent)}
+.kp-mid{display:flex;flex-direction:column;gap:5px;width:min(460px,58vw)}
+.kp-bar{position:relative;height:30px;background:var(--hover);
+  border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.kp-tick{position:absolute;bottom:0;width:1px;height:10px;background:var(--line-2);
+  font-size:9px;color:var(--muted);transform:translateX(-.5px)}
+.kp-tick:not(.blk){height:14px}
+.kp-tick.c0{background:var(--ink-2)}
+.kp-target{position:absolute;top:3px;bottom:3px;width:22px;transform:translateX(-50%);
+  background:var(--accent-dim);border:1.5px dashed var(--accent);border-radius:5px}
+.kp-needle{position:absolute;top:0;bottom:0;width:2.5px;transform:translateX(-50%);
+  background:var(--ink);box-shadow:0 0 6px rgba(255,255,255,.5);
+  transition:left .09s linear}
+.kp-cents{font-size:11px;color:var(--muted);text-align:center}
+.k-pitch-score{font-size:13px;color:var(--ink-2)}
+.k-pitch-score b{color:#39d98a;font-size:18px}
 /* 迷你条 / 矮窗：收紧留白，别让控制条把歌词挤没 */
 @media (max-height:420px){
   .k-stage{padding:4px 16px}
@@ -1548,6 +1578,9 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
   .k-ctl{padding:6px 14px 10px;gap:9px}
   .k-ready-t{font-size:17px}
   .k-hint{display:none}
+  .kp-note{font-size:19px;width:64px}
+  .kp-bar{height:22px}
+  .k-pitch{padding:0 16px 4px}
 }
 /* 我的作品：沿用 .cards/.card 骨架，只补日期 + 导出/删除脚注 */
 .wcard-foot{display:flex;align-items:center;justify-content:space-between;

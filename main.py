@@ -205,7 +205,7 @@ def work_meta(qs, size):
     """从上传 query 组装元数据。字符串一律截断：这些值会进 data.json，
     被页面反复渲染，放任长度等于给以后的自己埋雷。"""
     one = lambda k, d="": str((qs.get(k) or [d])[0])   # noqa: E731
-    return {
+    meta = {
         "id": one("id"),
         "name": (one("name") or "未命名作品")[:120],
         "artist": one("artist")[:120],
@@ -216,6 +216,19 @@ def work_meta(qs, size):
         "created": int(time.time()),
         "size": _clamp_int(size, 0, WORK_MAX_BYTES),
     }
+    # P9 音准结算（可选）：前端唱完才带上。老作品没有这两个字段，展示侧自行降级。
+    # pitch_avg = 行内平均音分偏差（0~200，越小越准）；pitch_hit = 判准的行数。
+    try:
+        if one("pitch_avg"):
+            meta["pitch_avg"] = round(max(0.0, min(200.0, float(one("pitch_avg")))), 1)
+    except ValueError:
+        pass
+    try:
+        if one("pitch_hit"):
+            meta["pitch_hit"] = max(0, min(9999, int(one("pitch_hit"))))
+    except ValueError:
+        pass
+    return meta
 
 
 class Store:
