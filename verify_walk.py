@@ -18,19 +18,26 @@
   W12 离开再回来，滚动位置还在
   W13 全程 console 无 SEVERE
 
-需要一份有真实数据（收听/收藏记录）的实例，否则推荐区只会是空态。
+默认自己起隔离实例，预置一份有口味的数据并预热推荐候选池
+（冷启动第一次回上游建池约 4s，那不该算进首屏体感；预热后命中进程内缓存是 0ms）。
+也可 --base 指向已有实例，但那个实例自己得有口味信号，否则推荐区仍是空态。
 用法：
-    python main.py --serve --port=18777        # 另起一个终端
+    python verify_walk.py
     python verify_walk.py --base http://127.0.0.1:18777
 """
 import argparse
 import json
 import os
+import shutil
 import sys
+import tempfile
 import time
+import urllib.request
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from verify_gapless import spawn                       # noqa: E402
+from selenium import webdriver                        # noqa: E402
+from selenium.webdriver.chrome.options import Options  # noqa: E402
 
 RESULTS = []
 
@@ -103,19 +110,63 @@ def make_driver():
     return webdriver.Chrome(options=o)
 
 
+def seed_walk_data(base):
+    """给隔离实例一份「听得出口味」的数据，并预热推荐候选池。
+
+    W1 量的是首屏体感：候选池留在进程内（300s），回访用户命中缓存是 0ms；
+    冷启动第一次必须回上游建池（实测约 4s），那段时间不该算到首屏头上。
+    所以先建好池再开浏览器 —— 不是放宽 1.5s 标准，是给一个合理的起点。
+    """
+    def post(op, payload):
+        rq = urllib.request.Request(
+            base + "/api/store",
+            data=json.dumps({"op": op, "payload": payload}).encode("utf-8"),
+            headers={"Content-Type": "application/json"})
+        return json.loads(urllib.request.urlopen(rq, timeout=20).read())
+
+    for i, artist in enumerate(("周杰伦", "邓紫棋", "孙燕姿", "陈奕迅")):
+        post("fav_toggle", {"kind": "song", "platform": "kuwo", "id": "seed%d" % i,
+                            "name": "测试曲%d" % i, "artist": artist})
+    r = json.loads(urllib.request.urlopen(
+        base + "/api/recommend?limit=26", timeout=90).read())
+    n = len((r.get("data") or {}).get("list") or [])
+    print("  隔离实例已预置 4 位歌手 · 推荐池预热 %d 条" % n)
+    if n < 12:
+        raise SystemExit("推荐池预热不足（%d 条），上游可能不通，体感走查无法进行" % n)
+    # 全风格页同理：首次要把各风格的种子曲目并发取回，之后命中进程内缓存
+    # （30min）。预热一次，W5/W6 才是在测交互体感，而不是在等 24 个网络请求。
+    rs = json.loads(urllib.request.urlopen(
+        base + "/api/styles?cards=12&per=6", timeout=120).read())
+    cards = len((rs.get("data") or {}).get("cards") or [])
+    print("  全风格页预热 %d 张卡" % cards)
+    if cards < 8:
+        raise SystemExit("全风格页预热不足（%d 张），上游可能不通" % cards)
+    return n
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base", default="http://127.0.0.1:18777")
+    ap.add_argument("--base", default=None,
+                    help="不传则自动起隔离实例并预置数据；传入则连已有实例")
     ap.add_argument("--out", default="_art")
     a = ap.parse_args()
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), a.out, "walk")
     os.makedirs(out, exist_ok=True)
 
+    base_dir = None
+    proc = None
+    if a.base:
+        base = a.base.rstrip("/")
+    else:
+        base_dir = tempfile.mkdtemp(prefix="elysium_walk_")
+        proc, base, _home = spawn(base_dir)
+        seed_walk_data(base)
+
     d = make_driver()
     try:
         # ---------------------------------------------------------- W1 首屏
         t0 = time.time()
-        d.get(a.base + "/")
+        d.get(base + "/")
         js(d, """
           window.__firstPaint = null;
           const t = performance.now();
@@ -200,14 +251,42 @@ def main():
         shot(d, out, "w05_styles")
 
         # --------------------------------------------------- W6 换一批歌
+        # toast 2.6s 后自动移除，事后瞬时读会漏掉 —— 点击前挂 MutationObserver
+        # 记录「出现过」的提示，测的是有没有给反馈，不是脚本手速快不快。
+        js(d, """window.__toastLog = [];
+          window.__toastObs = new MutationObserver((muts) => {
+            for (const m of muts) for (const n of m.addedNodes) {
+              if (n.nodeType === 1 && n.classList && n.classList.contains('toast'))
+                window.__toastLog.push((n.textContent || '').trim());
+            }
+          });
+          window.__toastObs.observe(document.getElementById('toasts'), {childList: true});
+          return 1;""")
+        # refreshStyles 在 styleLoading 没结束时会被直接吞掉，先等加载收尾
+        for _ in range(60):
+            if not js(d, "return !!state.styleLoading"):
+                break
+            time.sleep(0.1)
         r5 = js(d, CLICK_AND_WAIT, {"act": '[data-act="style-refresh"]',
                                     "sel": '#styleGrid .stylecard .stylecard-row span',
                                     "btn": '[data-act="style-refresh"]',
                                     "host": '#styleGrid'})
-        toast = js(d, "const t=document.querySelector('.toast');"
-                      "return t ? t.textContent.trim() : ''")
+        # CLICK_AND_WAIT 只要文本连续 3 帧不变就返回，可能在换批请求发出前就收工；
+        # 所以再给 toast 一个明确的等待窗口（5s），之后才收观测器。
+        hit = d.execute_async_script("""
+        const done = arguments[arguments.length - 1];
+        const t0 = performance.now();
+        (function tick() {
+          const found = (window.__toastLog || []).filter(s => s.indexOf('换一批') >= 0);
+          if (found.length || performance.now() - t0 > 5000) {
+            window.__toastObs.disconnect();
+            return done(found);
+          }
+          requestAnimationFrame(tick);
+        })();
+        """) or []
         check("W6 换一批歌有可见变化且给提示",
-              not r5.get("timeout") and "换一批" in toast, "toast=%s" % toast)
+              not r5.get("timeout") and bool(hit), "toast=%s" % hit)
         shot(d, out, "w06_styles_refreshed")
 
         # ------------------------------------------------------- W7 光标
@@ -279,12 +358,16 @@ def main():
         time.sleep(1.2)
         js(d, "document.querySelector('#view').scrollTop = 520;")
         time.sleep(0.3)
+        # 520 可能被内容高度夹住（实测 429）—— 记下真正滚到的位置再比，
+        # 否则测的是「能不能滚到 520」而不是「位置有没有记住」。
+        y0 = js(d, "return document.querySelector('#view').scrollTop")
         js(d, "const b=document.querySelector('[data-act=\"lib\"]'); if (b) b.click();")
         time.sleep(0.9)
         js(d, "const b=document.querySelector('#backBtn'); if (b && !b.disabled) b.click();")
         time.sleep(0.9)
         y = js(d, "return document.querySelector('#view').scrollTop")
-        check("W12 离开再回来滚动位置还在", y >= 500, "y=%s（离开时 520）" % y)
+        check("W12 离开再回来滚动位置还在", y0 > 0 and y >= y0 - 2,
+              "y=%s（离开时 %s）" % (y, y0))
         shot(d, out, "w12_scroll")
 
         # ------------------------------------------------------- W13 控制台
@@ -296,6 +379,14 @@ def main():
             d.quit()
         except Exception:
             pass
+        if proc:
+            try:
+                proc.terminate()
+                proc.wait(timeout=10)
+            except Exception:
+                pass
+        if base_dir:
+            shutil.rmtree(base_dir, ignore_errors=True)
 
     print("\n---- 汇总 ----")
     ok_n = sum(1 for _, ok, _ in RESULTS if ok)

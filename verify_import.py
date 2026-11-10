@@ -11,6 +11,7 @@
     python verify_import.py --no-ui      # 环境没有 Chrome 时只跑单元 + 接口
 """
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -159,11 +160,35 @@ def unit_tests():
     check("U13 L3 未找到不丢弃", c["tier"] == "l3" and c["chosen"] is False)
 
 
+def _rules_fingerprint(home):
+    """providers/ 下所有文件的字节指纹，用来证明「检查更新没动本地规则」。"""
+    root = os.path.join(home, "providers")
+    out = {}
+    for cur, _dirs, files in os.walk(root):
+        for f in sorted(files):
+            fp = os.path.join(cur, f)
+            with open(fp, "rb") as fh:
+                out[os.path.relpath(fp, root)] = hashlib.sha256(fh.read()).hexdigest()
+    return out
+
+
 def api_tests(base, home):
     check("A1 /api/store 可用", "playlists" in req(base, "/api/store"))
+    # notify-only 的本质是「只比版本号、绝不下载或替换本地规则」。
+    # 早期断言 remote == "not_configured"（那时还没配 update_url）；现在配了远端
+    # manifest，联网时 remote 是版本字典，离线时是 "unavailable" —— 两者都合法。
+    # 用「调用前后 providers/ 字节指纹不变」守住真正的边界，比猜字段更硬。
+    before = _rules_fingerprint(home)
     u = req(base, "/api/update/check")["data"]
-    check("A2 版本检查只报版本不下载",
-          u.get("rules_version") == "2026-11-09.1" and u.get("remote") == "not_configured", u)
+    after = _rules_fingerprint(home)
+    remote = u.get("remote")
+    remote_ok = remote in ("not_configured", "unavailable") or (
+        isinstance(remote, dict)
+        and set(remote) <= {"rules_version", "client_version", "has_update"})
+    no_download = not any(k in u for k in ("downloaded", "installed", "assets", "path"))
+    check("A2 版本检查只报版本不下载（本地规则零写入）",
+          u.get("rules_version") == "2026-11-09.1" and remote_ok
+          and no_download and before == after, u)
 
     fav_before = len(req(base, "/api/store")["favorites"])
     text = "邓紫棋 - 泡沫.mp3\n孙燕姿 - 我不难过.mp3\n某人 - 这首歌根本不存在.mp3"

@@ -25,7 +25,6 @@ import urllib.request
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
 
 RESULTS = []
 
@@ -104,10 +103,12 @@ def stop(proc):
             pass
 
 
-# 绕过 prompt：直接调用页面的 plCreate
+# 产品早已用自绘输入浮层 askLayer 替代原生 prompt()：
+# 覆盖 window.prompt 不会再有任何效果，这里走真实 UI 路径。
 CREATE_JS = """
-  window.__promptAnswer = '深夜通勤';
-  window.prompt = () => window.__promptAnswer;
+  document.getElementById('plAdd').click();
+  document.getElementById('askInput').value = '深夜通勤';
+  document.getElementById('askOk').click();
   return 1;
 """
 
@@ -136,7 +137,6 @@ def main():
             # ---------------------------------------------------------- F1 建歌单
             fav_before = len(store(base)["favorites"])
             js(d, CREATE_JS)
-            d.find_element(By.ID, "plAdd").click()
             time.sleep(1.5)
             pls = store(base)["playlists"]
             check("F1 建歌单落盘", len(pls) == 1 and pls[0]["name"] == "深夜通勤",
