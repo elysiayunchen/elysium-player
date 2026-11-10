@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Elysium Stage D 验收：右键菜单（仅新增「加入歌单…」）。
+"""Elysium Stage D 验收：右键菜单（加入歌单… / K歌这一首）。
 
 覆盖 _art/STAGE_CF_DESIGN_2026-11-09.md §4 的 D 组断言：
-  D1 右键单曲弹出菜单，且只有「加入歌单…」一个动作
+  D1 右键单曲弹出菜单，动作含「加入歌单…」与「K歌这一首」
   D2 「加入歌单…」打开歌单选择面板
   D3 选择歌单后曲目真的加进去（落盘）
   D4 菜单在视口右下角时向内翻转，不溢出
@@ -181,7 +181,9 @@ def main():
             vis = js(d, "return !document.querySelector('#ctxmenu').hidden")
             acts = js(d, "return [...document.querySelectorAll('#ctxmenu button')].map(b=>b.dataset.act)")
             check("D1 右键单曲弹出菜单", vis, "visible=%s" % vis)
-            check("D1 菜单只有「加入歌单…」一个动作", acts == ['ctx-add-pl'], "acts=%s" % acts)
+            check("D1 菜单动作：加入歌单… + K歌这一首",
+                  set(acts) == {'ctx-karaoke', 'ctx-add-pl'} and len(acts) == 2,
+                  "acts=%s" % acts)
 
             # ---------------------------------------------------------- D2 选择面板
             js(d, "document.querySelector('#ctxmenu button[data-act=ctx-add-pl]').click(); return 1")
