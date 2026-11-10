@@ -223,7 +223,12 @@
       <button class="ic" data-close="lyricLayer"><svg><use href="#i-close"/></svg></button>
     </div>
     <div class="lyric-body" id="lyricBody"></div>
-    <div class="lyric-foot">
+    <div class="lyric-foot lrc-tools">
+      <button class="btn ghost" data-act="lrc-off" data-d="-0.5" title="歌词提前半秒（歌词比人声慢时用）">−0.5s</button>
+      <span class="mono" data-off>0ms</span>
+      <button class="btn ghost" data-act="lrc-off" data-d="0.5" title="歌词延后半秒（歌词比人声快时用）">+0.5s</button>
+      <button class="btn ghost" data-act="lrc-off" data-d="0" data-reset hidden>复位</button>
+      <span class="lrc-gap"></span>
       <button class="btn ghost" id="lyricSave">保存 .lrc</button>
     </div>
   </div>

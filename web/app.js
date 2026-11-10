@@ -88,6 +88,8 @@ const state = {
   stack: [],
   items: [],                       // 搜索结果（已跨源折叠，重复项在 alts 里）
   reco: null,                      // 本地推荐候选
+  stats: null,                     // 我的统计（/api/stats/summary）
+  statsLoading: false,
   taste: {},                       // 口味画像
   genreList: null,                 // 风格分类表（后端 /api/genres）
   styles: null,                    // 全风格卡片歌单
@@ -1184,9 +1186,10 @@ function postLyricNow() {
   const i = lyricIdx;
   const cur = (lyricLines && i >= 0 && lyricLines[i] && lyricLines[i].text) || '';
   const nxt = (lyricLines && i >= 0 && lyricLines[i + 1] && lyricLines[i + 1].text) || '';
+  const tr = (lyricLines && i >= 0 && lyricLines[i] && lyricLines[i].trans) || '';
   post('/api/lyric/now', {
     title: it.name || '', artist: it.artist || '',
-    line: cur, next: nxt, cover: it.cover || '',
+    line: cur, next: nxt, trans: tr, cover: it.cover || '',
     playing: !audio().paused,
   }).catch(() => {});
 }
@@ -1230,6 +1233,7 @@ function reportPlay(completed) {
   if (completed) lastCountedKey = key;
   post('/api/play', { item, quality: state.currentQuality, completed })
     .then((r) => {
+      if (completed) refreshStatsQuiet();
       const t = r && r.data;
       if (!t || !t.triggered) return;
       if (t.triggered === 'long') toast(`「${item.name}」已升为长期缓存`);
@@ -1658,6 +1662,83 @@ async function loadRecommend(force, limit) {
   state.recoLoading = false;
   probeRows((state.reco && state.reco.list) || []);
   return true;
+}
+
+/* ---------------------------------------------------- 我的统计（纯只读） */
+/* 数据全在后端聚合（/api/stats/summary），这里只取和画。
+   听完一首统计就变了：refreshStatsQuiet 在首页时静默重取，只重画统计卡。 */
+async function loadStats() {
+  state.statsLoading = true;
+  try {
+    const r = await getJson('/api/stats/summary');
+    state.stats = (r && r.data) || null;
+  } catch (e) {
+    state.stats = state.stats || null;      // 失败保留旧数据，不清空
+  }
+  state.statsLoading = false;
+}
+
+function refreshStatsQuiet() {
+  if (!$('#shelfStats')) return;            // 不在首页就不取
+  loadStats().then(() => paintStats());
+}
+
+function fmtHours(sec) {
+  const h = (Number(sec) || 0) / 3600;
+  return h >= 100 ? Math.round(h) + ' h' : (Math.round(h * 10) / 10) + ' h';
+}
+
+function statsShelfHtml() {
+  const s = state.stats;
+  if (!s && state.statsLoading) {
+    return `<section class="shelf" id="shelfStats"><div class="shelf-head"><h2>我的统计</h2></div>
+      <div class="stats-grid">${Array.from({ length: 4 }, () => '<div class="skel stats-skel"></div>').join('')}</div></section>`;
+  }
+  if (!s || s.empty) {
+    return `<section class="shelf" id="shelfStats">
+      <div class="shelf-head"><h2>我的统计</h2></div>
+      <div class="stats-empty">听完的歌会记进统计 · 数据只在本地</div></section>`;
+  }
+  const maxN = Math.max(1, ...s.by_day.map((d) => d.n));
+  const maxH = Math.max(1, ...s.hours);
+  return `<section class="shelf" id="shelfStats">
+    <div class="shelf-head"><h2>我的统计</h2></div>
+    <div class="stats-grid">
+      <div class="stat"><b class="mono">${s.plays_7d}</b><span>近 7 天收听</span></div>
+      <div class="stat"><b class="mono">${fmtHours(s.total_seconds)}</b><span>累计时长</span></div>
+      <div class="stat"><b class="mono">${s.listening_days}</b><span>累计天数</span></div>
+      <div class="stat"><b class="mono">${s.favorites}</b><span>收藏</span></div>
+    </div>
+    <div class="stats-body">
+      <div class="stats-block">
+        <div class="stats-cap">近 30 天</div>
+        <div class="stats-bars">${s.by_day.map((d) =>
+          `<i style="height:${Math.max(3, Math.round((d.n / maxN) * 100))}%" title="${d.date} · ${d.n} 次"></i>`).join('')}</div>
+      </div>
+      <div class="stats-block">
+        <div class="stats-cap">时段分布</div>
+        <div class="stats-bars">${s.hours.map((n, h) =>
+          `<i style="height:${Math.max(3, Math.round((n / maxH) * 100))}%" title="${String(h).padStart(2, '0')}:00 · ${n} 次"></i>`).join('')}</div>
+      </div>
+      ${s.top_artists.length ? `<div class="stats-block">
+        <div class="stats-cap">最常听</div>
+        <div class="stats-arts">${s.top_artists.slice(0, 8).map((a) =>
+          `<button class="stats-art" data-act="artist" data-name="${esc(a.name)}" title="${esc(a.name)} · ${a.plays} 次">
+            ${a.cover ? `<img src="${esc(a.cover)}" alt="" loading="lazy" onerror="this.remove()">` : ''}
+            <span class="ell">${esc(a.name)}</span></button>`).join('')}</div>
+      </div>` : ''}
+    </div>
+  </section>`;
+}
+
+function paintStats() {
+  const host = $('#shelfStats');
+  if (!host) return;
+  const tpl = document.createElement('template');
+  tpl.innerHTML = statsShelfHtml();
+  const next = tpl.content.firstElementChild;
+  if (!next) return;
+  morphNode(host, next);
 }
 
 /* 推荐卡：整张卡点哪儿都能播（和「最近播放」一致），操作只留一套。
@@ -2093,6 +2174,8 @@ function viewHome() {
       <div class="shelf-row">${albs.slice(0, 14).map((a) => albumCardHtml(a)).join('')}</div>
     </section>`);
   }
+
+  parts.push(statsShelfHtml());
 
   if (!state.recent.length && !arts.length && !albs.length) {
     parts.push(`<div class="welcome">
@@ -2966,18 +3049,27 @@ function renderNp() {
         ? `<button class="chip pq" data-act="pq">${q.format === 'flac' ? 'FLAC' : 'MP3 ' + q.bitrate + 'k'} · 切换音质</button>` : ''}</div>
     </div>
     <div class="np-lyric" id="npLyricBody"><span class="muted">正在取歌词…</span></div>
-    <div class="np-foot"><button class="btn ghost sm" data-act="lyric-full">放大歌词</button></div>`;
+    <div class="np-foot lrc-tools">
+      <button class="btn ghost sm" data-act="lrc-off" data-d="-0.5" title="歌词提前半秒（歌词比人声慢时用）">−0.5s</button>
+      <span class="mono" data-off>0ms</span>
+      <button class="btn ghost sm" data-act="lrc-off" data-d="0.5" title="歌词延后半秒（歌词比人声快时用）">+0.5s</button>
+      <button class="btn ghost sm" data-act="lrc-off" data-d="0" data-reset hidden>复位</button>
+      <span class="lrc-gap"></span>
+      <button class="btn ghost sm" data-act="lyric-full">放大歌词</button>
+    </div>`;
+  syncLrcOffUI();
   loadNpLyric(it);
 }
 
 /* ------------------------------------------------------------------ 歌词 · SP 式逐行 */
-let lyricLines = [];      // [{t, text}] 按时间升序；空 = 无时间标签，降级纯文本
+let lyricLines = [];      // [{t, text, trans?}] 按时间升序；空 = 无时间标签，降级纯文本
 let lyricIdx = -1;
 let lyricFollow = true;   // 是否跟随当前行滚动（用户手动滚动后置 false）
 let lyricScrolling = false;// 正在做程序滚动，期间的 wheel 事件不算「用户滚动」
 let lyricPending = false;  // 动画期间目标行变了，动画结束后补一次滚动
+let LRC_OFF = 0;           // 歌词时间轴偏移（秒）：正=行延后出现，负=提前
 
-function parseLrc(raw) {
+function parseLrcText(raw) {
   const out = [];
   String(raw || '').split(/\r?\n/).forEach((ln) => {
     const tags = [...ln.matchAll(/\[(\d+):(\d+(?:\.\d+)?)\]/g)];
@@ -2989,11 +3081,26 @@ function parseLrc(raw) {
   return out.sort((x, y) => x.t - y.t);
 }
 
+/* 翻译 LRC 与主 LRC 按时间戳就近对齐（两轴都升序，游标单调前进）。
+   上游带不带翻译不一定（wyy 多数带，kuwo 基本没有）——取不到就单语，不承诺。 */
+function parseLrc(raw, trans) {
+  const lines = parseLrcText(raw);
+  const tl = parseLrcText(trans);
+  if (lines.length && tl.length) {
+    let j = 0;
+    lines.forEach((l) => {
+      while (j + 1 < tl.length && Math.abs(tl[j + 1].t - l.t) <= Math.abs(tl[j].t - l.t)) j++;
+      if (tl[j] && Math.abs(tl[j].t - l.t) <= 0.6 && tl[j].text !== l.text) l.trans = tl[j].text;
+    });
+  }
+  return lines;
+}
+
 function lyricIndexAt(sec) {
   let lo = 0, hi = lyricLines.length - 1, ans = -1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    if (lyricLines[mid].t <= sec + 0.25) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+    if (lyricLines[mid].t + LRC_OFF <= sec + 0.25) { ans = mid; lo = mid + 1; } else hi = mid - 1;
   }
   return ans;
 }
@@ -3007,9 +3114,16 @@ function renderLyricLines(el, big) {
   lyricIdx = -1;
   lyricFollow = true;
   el.innerHTML = lyricLines.map((l, i) =>
-    `<button class="lyric-line${big ? ' big' : ''}" data-act="lyric-seek" data-i="${i}" data-t="${l.t}">${esc(l.text)}</button>`
+    `<button class="lyric-line${big ? ' big' : ''}" data-act="lyric-seek" data-i="${i}" data-t="${l.t}">${esc(l.text)}${l.trans ? `<span class="lt">${esc(l.trans)}</span>` : ''}</button>`
   ).join('');
   updateLyricTick();
+}
+
+/* 偏移控件状态同步：np 面板与放大层各有一组 [data-off]/[data-reset]。 */
+function syncLrcOffUI() {
+  const ms = Math.round(Number(state.settings.lrc_offset_ms) || 0);
+  $$('[data-off]').forEach((el) => { el.textContent = (ms > 0 ? '+' : '') + ms + 'ms'; });
+  $$('[data-reset]').forEach((el) => { el.hidden = ms === 0; });
 }
 
 /* 把当前行滚到容器正中。
@@ -3075,9 +3189,10 @@ async function loadNpLyric(it) {
       platform: it.platform, id: it.id, time: it.time, sign: it.sign,
     });
     const raw = (d && (d.lyric || d.lrc || d.text || (typeof d === 'string' ? d : ''))) || '';
+    const trans = (d && typeof d === 'object' && (d.tlyric || d.tLyric || d.trans)) || '';
     currentLyric = raw;
     if (!state.playing || pk(state.playing) !== pk(it)) return;
-    lyricLines = parseLrc(raw);
+    lyricLines = parseLrc(raw, trans);
     renderLyricLines($('#npLyricBody'), false);
     if (!$('#lyricLayer').hidden) renderLyricLines($('#lyricBody'), true);
   } catch (e) {
@@ -3659,7 +3774,8 @@ async function showLyric() {
     if (!currentLyric && typeof d === 'object') {
       currentLyric = d.lyric || d.lrc || d.text || '';
     }
-    lyricLines = parseLrc(currentLyric);
+    const trans = (d && typeof d === 'object' && (d.tlyric || d.tLyric || d.trans)) || '';
+    lyricLines = parseLrc(currentLyric, trans);
     renderLyricLines($('#lyricBody'), true);
   } catch (e) {
     $('#lyricBody').innerHTML = `<span class="muted">取歌词失败：${esc(e.message)}</span>`;
@@ -4590,6 +4706,19 @@ document.addEventListener('click', async (e) => {
     case 'pq': openPlayQualityMenu(el); break;
     case 'nptab': state.npTab = el.dataset.tab || 'lyric'; renderNp(); break;
     case 'lyric-full': showLyric(); break;
+    case 'lrc-off': {
+      /* ±0.5s 累进、复位归零；±10s 封顶防手滑。改完立即重算当前行并落设置。 */
+      const isReset = el.dataset.d === '0';
+      const cur = Math.round(Number(state.settings.lrc_offset_ms) || 0);
+      const ms = isReset ? 0
+        : Math.max(-10000, Math.min(10000, cur + Math.round(Number(el.dataset.d) * 1000)));
+      state.settings.lrc_offset_ms = ms;
+      LRC_OFF = ms / 1000;
+      postSettings({ lrc_offset_ms: ms });
+      syncLrcOffUI();
+      updateLyricTick();
+      break;
+    }
     case 'lyric-seek': {
       const l = lyricLines[Number(el.dataset.i)];
       const a2 = audio();
@@ -4760,6 +4889,7 @@ async function refreshStore() {
   try {
     const d = await getJson('/api/store');
     state.settings = d.settings || {};
+    LRC_OFF = (Number(state.settings.lrc_offset_ms) || 0) / 1000;
     state.version = d._version || '';    // 单一来源：别在前端再写死一份版本号
     state.favs = d.favorites || [];
     state.playlists = d.playlists || [];
@@ -4792,6 +4922,7 @@ async function boot() {
   refreshTasks();
   restoreLast();
   loadRecommend().then(() => paintReco());   // 首页推荐：异步，不挡首屏
+  loadStats().then(() => paintStats());      // 首页统计：异步，不挡首屏
   loadUpdateStatus();                        // 更新追踪：读后端缓存 + 每 30 分钟轮询一次
   setInterval(() => loadUpdateStatus(), 30 * 60 * 1000);
   pollUpdateDl();                            // 若有进行中的版本下载（如刷新页面），恢复进度条

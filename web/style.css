@@ -970,6 +970,13 @@ input[type=range]:hover::-webkit-slider-thumb{background:var(--accent)}
 .lyric-line:hover{color:var(--ink-2)}
 .lyric-line.near{color:var(--ink-2);opacity:.85}
 .lyric-line.on{color:var(--ink);font-weight:600}
+/* 翻译副行：比主行小一号、次级色，跟随主行走 */
+.lyric-line .lt{display:block;font-size:.6em;font-weight:400;line-height:1.35;color:var(--ink-2);opacity:.9;margin-top:2px}
+.lyric-line.on .lt{opacity:1}
+/* 歌词时间轴偏移控件（np 面板 foot + 放大层 foot 各一组） */
+.lrc-tools{gap:6px;flex-wrap:wrap}
+.lrc-tools .mono{min-width:44px;text-align:center;align-self:center;font-size:12px}
+.lrc-tools .lrc-gap{width:10px}
 /* 全屏放大层：居中大字，SP 移动端样式 */
 .lyric-body .lyric-line{
   font-size:19px;font-weight:600;padding:11px 12px;text-align:center;
@@ -1158,6 +1165,29 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
   padding:10px 4px;border-top:1px solid var(--line);
 }
 .np-foot{display:flex;justify-content:center;margin-top:10px}
+
+/* ------------------------------------------------ 我的统计（首页只读卡） */
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:2px 0 8px}
+.stat{background:var(--card-2);border:1px solid var(--line);border-radius:var(--radius);
+  padding:12px 14px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.stat b{font-size:20px;font-weight:600;color:var(--ink)}
+.stat span{font-size:12px;color:var(--muted)}
+.stats-body{display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start}
+.stats-block{flex:1 1 220px;min-width:190px}
+.stats-cap{font-size:12px;color:var(--muted);margin-bottom:6px}
+.stats-bars{display:flex;align-items:flex-end;gap:2px;height:54px}
+.stats-bars i{flex:1;min-width:2px;background:var(--accent);opacity:.5;
+  border-radius:2px 2px 0 0;cursor:default}
+.stats-bars i:hover{opacity:.9}
+.stats-arts{display:flex;gap:8px;flex-wrap:wrap}
+.stats-art{display:flex;align-items:center;gap:6px;padding:4px 12px 4px 5px;
+  border:1px solid var(--line);border-radius:999px;background:var(--card-2);
+  cursor:pointer;font-size:12px;color:var(--ink-2);max-width:140px}
+.stats-art:hover{border-color:var(--line-2);color:var(--ink)}
+.stats-art img{width:22px;height:22px;border-radius:50%;object-fit:cover;flex:0 0 auto}
+.stats-art .ell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stats-empty{color:var(--muted);font-size:13px;padding:6px 0}
+.stats-skel{height:64px}
 
 /* --------------------------------------------- 首页 SP 化 / 口味画像页 */
 .shelf-acts{display:flex;align-items:center;gap:10px;flex-wrap:wrap}

@@ -37,7 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "Elysium"
 APP_TITLE = "Elysium - 在线音乐"
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 _BASE_URL = ""            # main() 里落值；桌面歌词小窗据此建页
 _LYRIC_WIN = None         # 桌面歌词小窗句柄（pywebview window 或 None）
 LEGACY_NAME = "FlacMusic"
@@ -107,12 +107,15 @@ DEFAULT_STORE = {
         "mode": "order",            # order / one / shuffle
         "last_track": None,         # 上次播放，用于续播
         "personalized": True,       # 个性化推荐总开关
+        "lrc_offset_ms": 0,         # 歌词时间轴整体偏移：正=歌词延后，负=提前
     },
     "favorites": [],                # 收藏：{kind: song|album|artist, ...}
     "history": [],                  # 搜索历史
     "recent": [],                   # 最近播放（去重，最多 60 首）
     "downloads": [],
-    "plays": {},                    # 当天收听计数 {key: {day, count, cached}}
+    "plays": {},                    # 当天收听计数 {key: {days, meta, ...}}，只留 7 天
+    "daily": {},                    # 日汇总 {date: {n: 次数, s: 秒}}，统计用，留 400 天
+    "hours": {},                    # 24 小时时段分布（累计）{"0"~"23": 次数}
     "feedback": {},                 # 显式反馈 {platform:id: {verdict, at}}
     "taste_note": "",               # 用户自述口味（旧字段，保留兼容，前端已不再暴露）
     "taste_genres": [],             # 用户手动选中的风格 id 列表
@@ -1443,6 +1446,38 @@ def _reco_page(prof, limit):
             "profile": prof, "pool": len(pool), "round": _RECO_ROUND, "limit": limit}
 
 
+def _explore_seeds(prof, plays_by_artist):
+    """探索种子：风格代表歌手里挑「没听过的」，口味加权 + 当日轮换。
+
+    familiar seed 永远是听过的歌手，推荐会越收越窄 —— 这里保证每天的
+    候选里都掺进没听过、但风格上顺路的人（探索配额的来源）。
+    同一天拿到同一批（当日种子），跨天自动换人。
+    """
+    known = set(plays_by_artist) | {a["name"] for a in prof["artists"]}
+    for r in (STORE.data.get("recent") or [])[:40]:
+        n = _artist_of(r)
+        if n:
+            known.add(n)
+    w = _style_weight()
+    day = _day_seed()
+    scored = []
+    for g in genre_list()["genres"]:
+        gw = w.get(g["id"], 0)
+        for i, s in enumerate(g["seeds"]):
+            if s in known:
+                continue
+            jitter = int(hashlib.md5(("%s|%s" % (day, s)).encode()).hexdigest()[:6], 16)
+            scored.append((gw * 2 - i, jitter, s))     # 口味加权 + 代表度 + 当日抖动
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    out = []
+    for _sc, _j, s in scored:
+        if s not in out:
+            out.append(s)
+        if len(out) >= 2:
+            break
+    return out
+
+
 def recommend_candidates(limit=12, fresh=False):
     """用 top 歌手当 seed，跨源搜相似曲目；排除已收藏/已排除/最近听过。
 
@@ -1472,6 +1507,13 @@ def recommend_candidates(limit=12, fresh=False):
         seeds = list(dict.fromkeys(
             _artist_of(r) for r in (STORE.data.get("recent") or []) if _artist_of(r)))[:3]
 
+    # 探索种子（防信息茧房）：没听过的风格代表歌手，掺进候选池。
+    # 冷启动（连 recent 都没有）时不掺 —— 没有任何口味依据时，
+    # 先让人听出画像再谈探索。
+    plays_by_artist, _ = _play_counts_by_artist()
+    explore = _explore_seeds(prof, plays_by_artist) if seeds else []
+    exp_set = set(explore)
+
     banned = set(prof["excluded"])
     seen = set(banned)
     for r in (STORE.data.get("recent") or [])[:40]:
@@ -1480,7 +1522,7 @@ def recommend_candidates(limit=12, fresh=False):
         if (f.get("kind") or "song") == "song":
             seen.add("%s:%s" % (f.get("platform"), f.get("id")))
 
-    out, seen_titles = [], set()
+    fam_pool, exp_pool, seen_titles = [], [], set()
     target = max(48, limit * 2)         # 池子要够长，换批才有东西可换
 
     def title_key(name, artist):
@@ -1489,7 +1531,7 @@ def recommend_candidates(limit=12, fresh=False):
         n = re.sub(r"[（(][^）)]*(电影|电视剧|主题曲|片尾曲|插曲)[^）)]*[）)]", "", n)
         return re.sub(r"\s+", "", n).lower() + "|" + re.sub(r"\s+", "", artist or "").lower()
 
-    for s in seeds[:4]:
+    for s in seeds[:4] + explore:
         try:
             d = _seed_search(s)
         except Exception:  # noqa: BLE001
@@ -1507,13 +1549,30 @@ def recommend_candidates(limit=12, fresh=False):
                 continue
             seen_titles.add(tk)
             it["reco_seed"] = s
-            out.append(it)
+            (exp_pool if s in exp_set else fam_pool).append(it)
             seen.add(key)
-            if len(out) >= target:
+            if len(fam_pool) + len(exp_pool) >= target:
                 break
-        if len(out) >= target:
+        if len(fam_pool) + len(exp_pool) >= target:
             break
-    _RECO_CACHE.update(at=now, pool=out, seeds=seeds)
+
+    # 交错合并：探索候选按 ~30%（7 熟悉配 3 探索）均匀混进池子，
+    # 而不是排成「前段全探索、后段全熟悉」两截。探索池天然偏小
+    # （每个探索 seed 只有一页检索），能给多少给多少，不硬凑。
+    out, fi, ei = [], 0, 0
+    while len(out) < target and (fi < len(fam_pool) or ei < len(exp_pool)):
+        for _ in range(7):
+            if fi < len(fam_pool) and len(out) < target:
+                out.append(fam_pool[fi])
+                fi += 1
+        for _ in range(3):
+            if ei < len(exp_pool) and len(out) < target:
+                out.append(exp_pool[ei])
+                ei += 1
+        if fi >= len(fam_pool) and ei >= len(exp_pool):
+            break
+
+    _RECO_CACHE.update(at=now, pool=out, seeds=seeds + explore)
     return _reco_page(prof, limit)
 
 
@@ -2370,7 +2429,7 @@ _LYRIC_NOW = {"data": {}, "lock": threading.Lock()}
 def lyric_now_set(payload):
     p = payload or {}
     out = {}
-    for k in ("title", "artist", "line", "next", "cover"):
+    for k in ("title", "artist", "line", "next", "cover", "trans"):
         out[k] = str(p.get(k) or "")[:200]
     out["playing"] = bool(p.get("playing"))
     with _LYRIC_NOW["lock"]:
@@ -2381,6 +2440,76 @@ def lyric_now_set(payload):
 def lyric_now_get():
     with _LYRIC_NOW["lock"]:
         return dict(_LYRIC_NOW["data"])
+
+
+def _clean_daily(daily, keep=400):
+    """日汇总只留最近 keep 天，防止无限膨胀。"""
+    if not daily:
+        return daily
+    cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - keep * 86400))
+    return {d: v for d, v in daily.items() if d >= cutoff}
+
+
+def stats_summary():
+    """听歌统计：纯只读聚合，不写任何业务数据。
+
+    plays 明细只留 7 天（缓存判定用的），历史统计走 daily 日汇总；
+    老数据没有 daily 时，累计口径回落到 7 天窗口的实测值 —— 宁可少报，不虚报。
+    """
+    data = STORE.data
+    plays = data.get("plays") or {}
+    daily = _clean_daily(data.get("daily") or {})
+    hours = data.get("hours") or {}
+
+    day = time.strftime("%Y-%m-%d")
+    plays_7d = 0
+    song_counts = {}                     # key -> (次数, meta)
+    for key, rec in plays.items():
+        if not isinstance(rec, dict):
+            continue
+        n = sum(int(v or 0) for v in (rec.get("days") or {}).values())
+        if n <= 0:
+            continue
+        plays_7d += n
+        song_counts[key] = (n, rec.get("meta") or {})
+
+    top_songs = []
+    for _k, (n, meta) in sorted(song_counts.items(), key=lambda kv: -kv[1][0])[:10]:
+        if not meta.get("name"):
+            continue
+        top_songs.append({"id": meta.get("id"), "platform": meta.get("platform"),
+                          "name": meta.get("name"), "artist": meta.get("artist"),
+                          "cover": meta.get("cover") or "", "plays": n})
+
+    artist_cnt, artist_cover = _play_counts_by_artist()
+    top_artists = [{"name": n, "plays": c, "cover": artist_cover.get(n) or ""}
+                   for n, c in sorted(artist_cnt.items(), key=lambda kv: -kv[1])[:10]]
+
+    total_plays = sum(int((v or {}).get("n") or 0) for v in daily.values()) or plays_7d
+    total_seconds = sum(int((v or {}).get("s") or 0) for v in daily.values())
+
+    days_seq = []
+    for i in range(29, -1, -1):
+        d = time.strftime("%Y-%m-%d", time.localtime(time.time() - i * 86400))
+        v = daily.get(d) or {}
+        days_seq.append({"date": d, "n": int(v.get("n") or 0), "s": int(v.get("s") or 0)})
+
+    return {
+        "today": int((daily.get(day) or {}).get("n") or 0),
+        "plays_7d": plays_7d,           # 7 天收听次数
+        "songs_7d": len(song_counts),   # 7 天不同曲目
+        "total_plays": total_plays,     # 累计次数（daily 全量）
+        "total_seconds": total_seconds, # 累计时长（秒）
+        "listening_days": len(daily),   # 累计天数
+        "by_day": days_seq,             # 近 30 天趋势（缺天补零）
+        "hours": [int(hours.get(str(h)) or 0) for h in range(24)],
+        "top_songs": top_songs,
+        "top_artists": top_artists,
+        "favorites": len(data.get("favorites") or []),
+        "playlists": len(data.get("playlists") or []),
+        "downloads": len(data.get("downloads") or []),
+        "empty": not daily and plays_7d == 0,
+    }
 
 
 def _migrate_play_record(rec, day):
@@ -2437,8 +2566,27 @@ def record_play(payload):
         if completed:
             days[day] = int(days.get(day) or 0) + 1
             rec["last_at"] = int(time.time())
-            rec["meta"] = {"id": item.get("id"), "name": item.get("name"),
-                           "artist": item.get("artist"), "platform": plat}
+            # meta 每次收听覆盖，但空字段保留旧值 —— 换个没带封面的来源续播时，
+            # 不能把之前记下的封面抹掉（统计 top 榜会丢图）
+            old_meta = rec.get("meta") or {}
+            rec["meta"] = {
+                "id": item.get("id"), "name": item.get("name") or old_meta.get("name"),
+                "artist": item.get("artist") or old_meta.get("artist"),
+                "platform": plat,
+                "cover": item.get("cover") or old_meta.get("cover") or "",
+            }
+            # 日汇总 + 时段分布：统计专用，与缓存判定（plays.days）无关
+            daily = STORE.data.setdefault("daily", {})
+            dv = daily.setdefault(day, {"n": 0, "s": 0})
+            dv["n"] = int(dv.get("n") or 0) + 1
+            try:
+                dv["s"] = int(dv.get("s") or 0) + int(float(item.get("duration") or 0))
+            except (TypeError, ValueError):
+                pass
+            STORE.data["daily"] = _clean_daily(daily)
+            hrs = STORE.data.setdefault("hours", {})
+            hh = str(time.localtime().tm_hour)
+            hrs[hh] = int(hrs.get(hh) or 0) + 1
             recent = STORE.data.setdefault("recent", [])
             recent[:] = [r for r in recent
                          if not (r.get("platform") == plat and str(r.get("id")) == str(sid))]
@@ -3319,6 +3467,10 @@ class Handler(BaseHTTPRequestHandler):
             if not key:
                 key = MediaCache.key_of(url)
             self._serve_media(key, url, ext)
+            return
+        if path == "/api/stats/summary":
+            # 听歌统计：纯只读聚合，不写任何业务数据
+            self._send(200, {"ok": True, "data": stats_summary()})
             return
         if path == "/api/taste":
             self._send(200, {"ok": True, "data": taste_profile()})

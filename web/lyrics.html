@@ -82,7 +82,7 @@
     mT.textContent = d.title || 'Elysium';
     mA.textContent = d.artist || '';
     el1.textContent = line || (d.playing ? '（纯音乐 · 无歌词）' : '已暂停');
-    el2.textContent = d.next || '';
+    el2.textContent = d.trans || d.next || '';
     mid.classList.toggle('idle', !line);
     var cov = d.cover || '';
     if (cov && art.getAttribute('src') !== cov) art.src = cov;
