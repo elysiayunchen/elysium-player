@@ -129,6 +129,8 @@ DEFAULT_STORE = {
     "taste_note": "",               # 用户自述口味（旧字段，保留兼容，前端已不再暴露）
     "taste_genres": [],             # 用户手动选中的风格 id 列表
     "playlists": [],                # 用户自建歌单 [{id, name, created_at, updated_at, items:[...]}]
+    "works": [],                    # K 歌作品（P8）[{id, name, artist, platform, sid, cover,
+                                    #   duration, created, file, size}]，文件在 data_dir()/works/
 }
 
 
@@ -162,6 +164,52 @@ def pl_item_of(src):
         if v not in (None, ""):
             out[k] = v
     return out
+
+
+# --------------------------------------------------------------------------
+# K 歌作品（P8）
+# --------------------------------------------------------------------------
+# 翻唱录音的落盘位置：data_dir()/works/，与 data.json 同级。
+# 刻意不放下载目录 —— 那是用户自己的音乐库，作品是应用数据，
+# 混进去会被「本地音乐」扫描到，把翻唱当原曲再播一遍。
+# works 元数据不同步 WebDAV（文件在本机，跨机没有意义，与本地曲目同口径）。
+WORKS_DIR = os.path.join(data_dir(), "works")
+WORK_MAX_BYTES = 200 * 1024 * 1024   # 4 分钟立体声 WAV ≈ 40MB，上限给足余量
+WORK_ID_RE = re.compile(r"^[a-z0-9]{1,12}(-[a-z0-9]{1,12}){0,2}$")
+
+
+def work_file(wid):
+    """作品音频路径。id 白名单先验过，这里只拼不查。"""
+    return os.path.join(WORKS_DIR, wid + ".wav")
+
+
+def work_new_id():
+    """毫秒时间戳 + 随机后缀：可读、可排序、碰不上。"""
+    return "%x-%s" % (int(time.time() * 1000) & 0xFFFFFFFF, os.urandom(4).hex())
+
+
+def _clamp_int(v, lo, hi, default=0):
+    try:
+        return max(lo, min(hi, int(v)))
+    except (TypeError, ValueError):
+        return default
+
+
+def work_meta(qs, size):
+    """从上传 query 组装元数据。字符串一律截断：这些值会进 data.json，
+    被页面反复渲染，放任长度等于给以后的自己埋雷。"""
+    one = lambda k, d="": str((qs.get(k) or [d])[0])   # noqa: E731
+    return {
+        "id": one("id"),
+        "name": (one("name") or "未命名作品")[:120],
+        "artist": one("artist")[:120],
+        "platform": one("platform")[:20],
+        "sid": one("sid")[:64],
+        "cover": one("cover")[:600],
+        "duration": _clamp_int(one("duration"), 0, 7200),
+        "created": int(time.time()),
+        "size": _clamp_int(size, 0, WORK_MAX_BYTES),
+    }
 
 
 class Store:
@@ -311,6 +359,18 @@ class Store:
                 self._pl_remove(payload or {})
             elif op == "playlist_reorder":
                 self._pl_reorder(payload or {})
+            elif op == "work_add":
+                item = dict(payload or {})
+                if item.get("id") and WORK_ID_RE.match(str(item["id"])):
+                    works = self.data.setdefault("works", [])
+                    works[:] = [w for w in works
+                                if w.get("id") != item["id"]]
+                    works.insert(0, item)
+                    del works[200:]          # 上限与歌单同级：本地录音不该无限吃 data.json
+            elif op == "work_remove":
+                wid = str((payload or {}).get("id") or "")
+                self.data["works"] = [w for w in self.data.setdefault("works", [])
+                                      if w.get("id") != wid]
             self.save()
             # 返回快照而不是活引用：序列化在锁外进行，交出活引用会和
             # /api/play 之类的并发写撞「dictionary changed size」；
@@ -1719,6 +1779,7 @@ AUDIO_MIME = {
     "m4a": "audio/mp4",
     "aac": "audio/aac",
     "ogg": "audio/ogg",
+    "wav": "audio/wav",
     "bin": "application/octet-stream",
 }
 
@@ -3450,10 +3511,28 @@ class Handler(BaseHTTPRequestHandler):
             if data.get("settings"):
                 data["settings"]["download_dir"] = "<本机音乐目录>"
                 data["settings"].pop("webdav", None)   # 同步凭据绝不外流
+            data.pop("works", None)    # 作品文件在本机，meta 出去也是僵尸条目
             self._send(200, {"ok": True, "data": data})
             return
         if path == "/api/sync/status":
             self._send(200, {"ok": True, "data": sync_engine.status()})
+            return
+        if path == "/api/works":
+            self._send(200, {"ok": True,
+                             "data": STORE.apply("load", None).get("works") or []})
+            return
+        if path == "/api/works/file":
+            # K 歌回放。id 在 work_file 里拼路径前已由白名单挡住路径穿越。
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            wid = (qs.get("id") or [""])[0]
+            if not WORK_ID_RE.match(wid):
+                self._send(400, {"error": "作品 id 不合法"})
+                return
+            p = work_file(wid)
+            if not os.path.isfile(p):
+                self._send(404, {"error": "作品文件不在了"})
+                return
+            self._serve_cached(p, "wav")
             return
         if path == "/api/downloads":
             self._send(200, {"ok": True, "data": {
@@ -3621,6 +3700,58 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, {"ok": False, "error": str(e)})
                 except Exception as e:                      # noqa: BLE001
                     self._send(200, {"ok": False, "error": "同步失败：%s" % e})
+                return
+
+            # ---------------------------------------------------------- K 歌作品
+            # 上传是 raw body（WAV 字节），元数据走 query —— 前端把两样一次送来，
+            # 服务端先落盘再登记 meta，顺序反了会出现「列表里有、文件没有」的僵尸条目。
+            if path == "/api/works/upload":
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                wid = work_new_id()
+                length = int(self.headers.get("Content-Length") or 0)
+                if not (44 <= length <= WORK_MAX_BYTES):
+                    self._send(200, {"ok": False, "error": "录音大小不对（%d 字节）" % length})
+                    return
+                os.makedirs(WORKS_DIR, exist_ok=True)
+                tmp = work_file(wid) + ".part"
+                dst = work_file(wid)
+                try:
+                    left, received = length, 0
+                    with open(tmp, "wb") as f:
+                        while left > 0:
+                            chunk = self.rfile.read(min(65536, left))
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            left -= len(chunk)
+                            received += len(chunk)
+                    if received != length:
+                        raise OSError("上传不完整（%d/%d）" % (received, length))
+                    os.replace(tmp, dst)
+                except Exception as e:                      # noqa: BLE001
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+                    self._send(200, {"ok": False, "error": "保存录音失败：%s" % e})
+                    return
+                meta = work_meta(qs, os.path.getsize(dst))
+                meta["id"] = wid
+                STORE.apply("work_add", meta)
+                self._send(200, {"ok": True, "data": meta})
+                return
+
+            if path == "/api/works/delete":
+                wid = str((self._json_body() or {}).get("id") or "")
+                if not WORK_ID_RE.match(wid):
+                    self._send(200, {"ok": False, "error": "作品 id 不合法"})
+                    return
+                try:
+                    os.remove(work_file(wid))
+                except OSError:
+                    pass                                    # 文件早没了也算删成功
+                STORE.apply("work_remove", {"id": wid})
+                self._send(200, {"ok": True})
                 return
 
             if path == "/api/update/download":
