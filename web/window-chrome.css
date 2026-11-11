@@ -99,6 +99,9 @@ html[data-chrome="on"]:not([data-platform="android"]) .drawer{top:var(--wc-title
 @supports not (color:color-mix(in srgb,red,blue)){
   .wc-title{background:var(--bg)}
 }
+/* Android 宿主没有窗口按钮和拖拽区，假标题栏任何宽度下都退场——
+   留着只会在 .shell 网格里抢一格（真机实测：和品牌区叠成重影）。 */
+html[data-platform="android"] .wc-title{display:none}
 .wc-brand{display:flex;align-items:center;gap:9px;flex:0 0 auto;color:var(--ink);font-size:12.5px;font-weight:650}
 .wc-brand img{width:20px;height:20px;border-radius:6px;display:block}
 .wc-drag{flex:1 1 auto;min-width:0;height:100%;cursor:default}
@@ -172,6 +175,12 @@ html[data-platform="android"] .drawer{top:0}
 html[data-platform="android"] body{background:var(--bg)}
 html[data-platform="android"]::after{display:none}
 html[data-platform="android"] .wc-ctrls{display:none}
+/* 手机窄屏：播放条压到 66px（业务侧移动布局在 style.css 的 ≤480px 段；
+   这里只把壳层行高跟上——必须写在本文件：上面的 android 规则优先级 (0,3,1)
+   高于 style.css 的媒体块，同文件后置才能盖得住） */
+@media (max-width:480px){
+  html[data-platform="android"][data-chrome="on"] .shell{grid-template-rows:minmax(0,1fr) 66px}
+}
 /* 没有 safe-area 的 WebView（旧 Android）退化成 0，不会撑破布局 */
 @supports not (padding:env(safe-area-inset-top)){
   html[data-platform="android"]{--wc-safe-top:0px;--wc-safe-bottom:0px}

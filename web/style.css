@@ -1638,3 +1638,92 @@ html[data-mini="on"] .pl-sub{font-size:10.5px}
 html[data-mini="on"] .pl-play{width:34px;height:34px}
 html[data-mini="on"] .pl-ctrl .ic{width:26px;height:26px}
 html[data-mini="on"] .pl-seek .mono{font-size:9.5px}
+
+/* ---------------------------------------------------------------- 手机端 ≤480px */
+/* Android WebView / 窄窗（beta1 实测教训）：桌面三栏压进 390px 会截断内容、
+   K 歌入口（右键菜单）够不着。手机有自己的布局——
+     · 侧栏收成左滑抽屉，顶栏汉堡开关（JS 在 app.js 抽屉段）
+     · 行内直接给 K 歌按钮（.tr-kar），不依赖右键
+     · 播放条压到 66px，砍掉桌面专属控件，进度/播放/队列保留
+   桌面（>480px）零改动；verify_ui 全部跑在 1240 宽下。 */
+.nav-btn,.tr-kar{display:none}          /* 桌面隐藏：汉堡与行内 K 歌只属于手机 */
+
+@media (max-width:480px){
+  .nav-btn,.tr-kar{display:grid}
+
+  /* 骨架：单列，播放条 66px */
+  .shell{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr) 66px}
+  /* .stage 基础规则 grid-column:2 是桌面双栏用的；单栏网格下它会掉进 0 宽
+     隐式列，真机主内容区整个消失（v1.6.0 内容挤成一细条的根源）。必须拉回。 */
+  .stage{grid-column:1;grid-row:1}
+  .player{grid-column:1;grid-row:2}
+
+  /* 侧栏 → 左滑抽屉（宽屏规则里 .side 是栅格列，这里改挂 fixed） */
+  .side{
+    position:fixed;z-index:40;top:0;bottom:0;left:0;width:min(82vw,320px);
+    transform:translateX(-104%);transition:transform .22s ease;
+    box-shadow:var(--shadow);
+    padding-top:max(14px,env(safe-area-inset-top));
+    padding-bottom:env(safe-area-inset-bottom);
+  }
+  .side.open{transform:none}
+  .snav-i{height:42px;justify-content:flex-start;padding:0 10px}   /* 手机触点 ≥40px */
+  .snav-i::before{display:block}
+  .side-item{padding:8px 10px}
+  /* ≤980 的「图标化侧栏」规则在手机抽屉里是灾难：只有图标没有文字，
+     K 歌入口根本认不出来。抽屉有 320px 宽，文字全部恢复。 */
+  .brand-txt,.snav-i span,.snav-i em{display:inline}
+  .brand-txt{display:flex}
+  .side-label{display:flex}
+  .side-scroll{display:block}
+  .side-foot{display:flex}
+  .side-brand{justify-content:flex-start}
+  .drawer-mask{z-index:39}              /* 侧栏 40 / 遮罩 39 / 右抽屉 30：层次不变 */
+  .drawer{bottom:66px}                  /* 原值 bottom:92px 是桌面播放条高度，硬编码 */
+
+  /* 顶栏：汉堡 + 返回 + 搜索 + 主题/队列；设置/全风格歌单都在抽屉里可达 */
+  .bar{grid-template-columns:auto minmax(0,1fr) auto;height:56px;padding:0 10px;gap:8px}
+  .bar-l{gap:4px}
+  #styleBtn,#settingsBtn{display:none}
+  .search-in{height:36px}
+
+  /* 播放条：单行 flex，进度线悬浮在底边（时间数字进 np 抽屉看）。
+     原 grid 三列在 390px 放不下，队列按钮会被挤到第二行。 */
+  .player{display:flex;align-items:center;gap:10px;height:66px;padding:0 12px;
+    padding-bottom:env(safe-area-inset-bottom)}
+  .pl-l{flex:1 1 auto}
+  .pl-m{flex:0 0 auto;width:auto;display:flex;flex-direction:row;align-items:center}
+  .pl-r{flex:0 0 auto}
+  #miniBtn,#lyricBtn,#plSub{display:none}
+  .pl-art{width:42px;height:42px}
+  .pl-play{width:34px;height:34px;margin:0 2px}
+  .pl-ctrl{gap:2px}
+  .pl-ctrl .ic{width:28px;height:28px}
+  .pl-seek{position:absolute;left:12px;right:12px;bottom:1px;width:auto;gap:0;
+    padding-bottom:env(safe-area-inset-bottom)}
+  .pl-seek .mono{display:none}
+
+  /* 曲目表：手机列表只要 封面/曲名/来源/操作；表头整行隐藏（移动端惯例） */
+  .thead{display:none}
+  .tr{gap:8px}
+  .tr-n,.tr-album,.tr-spec{display:none}
+  .tr-dur{width:40px;flex:0 0 40px}
+  .tr-act{width:92px;flex:0 0 92px}
+  .tr-act .ic{width:28px;height:28px}
+  .tr-cover{width:40px;height:40px;flex:0 0 40px}
+  .tr-name{font-size:13px}
+
+  /* 内容区与浮层 */
+  .page{padding:14px 12px 28px}
+  .vhead{padding:16px 14px}
+  .cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 10px}
+  .ask-card{width:min(360px,88vw)}
+  .qmenu,.ctxmenu{max-width:calc(100vw - 16px)}
+
+  /* K 歌层：控件多，允许换行，贴安全区 */
+  .k-head{padding:12px 14px 8px;gap:10px}
+  .k-stage{padding:4px 12px}
+  .k-lines{height:88px}
+  .k-ctl{flex-wrap:wrap;gap:8px;padding:8px 12px calc(10px + env(safe-area-inset-bottom))}
+  .k-vol input[type=range]{width:84px}
+}

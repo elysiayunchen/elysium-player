@@ -125,6 +125,11 @@ public class MainActivity extends Activity {
         web.getSettings().setJavaScriptEnabled(true);
         web.getSettings().setDomStorageEnabled(true);
         web.getSettings().setMediaPlaybackRequiresUserGesture(false);
+        // 本地服务端一直发 Cache-Control: no-store，但 WebView 的 HTTP 缓存以历史
+        // 响应头为准：旧版本若发过可缓存的头，升级 APK 后旧条目照样按旧头的新鲜度
+        // 命中，把旧版 UI 压在盘上（beta1 用户实测）。回环地址没有网络成本，
+        // 索性每次都向服务端取最新资源。
+        web.getSettings().setCacheMode(android.webkit.WebSettings.LOAD_NO_CACHE);
         // 只加载 127.0.0.1 的本地页面（见 shouldOverrideUrlLoading），桥不会暴露给外站
         web.addJavascriptInterface(new AppBridge(), "ElysiumAndroid");
         web.setWebViewClient(new WebViewClient() {

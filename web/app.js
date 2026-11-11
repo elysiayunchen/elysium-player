@@ -1988,6 +1988,7 @@ function rowHtml(it, i, opt = {}) {
     <div class="tr-spec">${spec}</div>
     <div class="tr-dur mono">${fmtTime(it.duration)}</div>
     <div class="tr-act">
+      <button class="ic tr-kar" data-act="tr-karaoke" data-i="${i}" title="K歌这一首">${icon('mic')}</button>
       <button class="ic${fav ? ' on' : ''}" data-act="fav" data-kind="song" data-i="${i}" title="收藏">${icon(fav ? 'heart' : 'heart-o')}</button>
       ${loc ? '' : `<button class="ic" data-act="dl" data-i="${i}" title="下载">${icon('dl')}</button>`}
     </div>
@@ -2046,12 +2047,17 @@ function artistCardHtml(a, hideFav = false) {
   const inner = a.cover
     ? `<img src="${esc(a.cover)}" alt="" loading="lazy" onerror="this.remove()">`
     : phImg('artist');
+  /* 搜索结果卡（带 platforms）不标曲目数：搜索命中的只是零头，标上去是假情报。
+     收藏歌手卡的 count 是歌手页双源抓全后存下的真实总数，照标。 */
+  const sub = a.platforms
+    ? a.platforms.map((p) => esc(srcOf({ platform: p }).label)).join(' · ')
+    : `${a.count ? `<span class="mono">${a.count}</span> 首` : '歌手'} · ${esc(srcOf(a).label)}`;
   return `<button class="card round" data-act="artist" data-name="${esc(a.name)}" data-platform="${esc(a.platform)}" data-aid="${esc(aid)}">
     <div class="card-art">${inner}
       <span class="cplay" data-act="artist-play" data-name="${esc(a.name)}" data-platform="${esc(a.platform)}" data-aid="${esc(aid)}">${icon('play')}</span>
     </div>
     <div class="card-name">${esc(a.name)}</div>
-    <div class="card-sub">${a.count ? `<span class="mono">${a.count}</span> 首` : '歌手'} · ${esc(srcOf(a).label)}${fav && !hideFav ? ' · 已收藏' : ''}</div>
+    <div class="card-sub">${sub}${fav && !hideFav ? ' · 已收藏' : ''}</div>
   </button>`;
 }
 
@@ -2719,7 +2725,7 @@ function viewSearch() {
         ? `<div style="text-align:center;padding:16px 0"><button class="btn sm" data-act="more">加载更多</button></div>`
         : '');
   } else if (tab === 'artist') {
-    body = `<p class="rule-note">以下为本次结果中出现的<b>记名演唱者</b>，只按歌曲署名归类；仅为作词 / 作曲 / 编曲参与的不并入，也不按搜索词合并。</p>`
+    body = `<p class="rule-note">以下为本次结果中出现的<b>记名演唱者</b>，只按歌曲署名归类；仅为作词 / 作曲 / 编曲参与的不并入，也不按搜索词合并。同名者已合并两个来源；曲目数不标在卡上——搜索命中的只是零头，点开抓全后才作数。</p>`
       + (artists.length
         ? `<div class="cards">${artists.map(artistCardHtml).join('')}</div>`
         : emptyHtml('mic', '没有识别出歌手', '试试直接搜歌手名字'));
@@ -2826,26 +2832,37 @@ function altswap(idx) {
    上游搜索是关键词相关性召回，搜「周杰伦」会带出他作词作曲给别人唱的歌
    （蔡依林《布拉格广场》、李玟《刀马旦》）和综艺学员翻唱。这些歌的
    artist / artist_id 是真实演唱者，必须按它归到本人名下，绝不按搜索词归。 */
-const artistKey = (it) => {
-  const aid = String(it.artist_id || '').trim();
-  return aid ? `${it.platform}:id:${aid}` : `${it.platform}:name:${String(it.artist || '').trim()}`;
-};
-
+/* 同一位歌手在两个源各有一个 id：按署名归一成一张卡，口径与专辑卡
+   的「专辑名 + 主艺人」一致；门面优先酷我，与折叠行（foldRows）同款。
+   点开歌手页后端本来就是双源并发抓全，按哪张卡进都不丢曲目。 */
 function groupArtists(items) {
   const map = new Map();
   items.forEach((it) => {
     const name = String(it.artist || '').trim();
     if (!name) return;
-    const key = artistKey(it);
-    if (!map.has(key)) {
+    const key = foldText(name);
+    const aid = String(it.artist_id || '').trim();
+    const hit = map.get(key);
+    if (!hit) {
       map.set(key, {
-        name, artist_id: String(it.artist_id || '').trim(),
-        count: 0, cover: it.cover, platform: it.platform,
+        name, artist_id: aid, count: 1, cover: it.cover,
+        platform: it.platform, platforms: [it.platform],
       });
+      return;
     }
-    map.get(key).count += 1;
+    hit.count += 1;
+    if (!hit.platforms.includes(it.platform)) hit.platforms.push(it.platform);
+    if (it.platform === 'kuwo' && hit.platform !== 'kuwo') {
+      hit.artist_id = aid;
+      hit.platform = 'kuwo';
+      hit.cover = it.cover || hit.cover;
+    }
   });
-  return [...map.values()].sort((a, b) => b.count - a.count);
+  /* platforms 只标「这位歌手在哪些源出现过」，按 SRC 固定顺序展示 */
+  const order = Object.keys(SRC);
+  return [...map.values()]
+    .map((a) => Object.assign(a, { platforms: order.filter((p) => a.platforms.includes(p)) }))
+    .sort((a, b) => b.count - a.count);
 }
 
 function groupAlbums(items) {
@@ -5045,10 +5062,31 @@ function bind() {
   /* 抽屉遮罩：任一抽屉打开即压暗主区；点遮罩全部关闭。
      用 MutationObserver 盯 hidden 属性，覆盖所有开关路径（互斥切换 / data-close / Escape），免得逐点插桩。 */
   const _drawers = ['#panelDrawer', '#npDrawer', '#settingsDrawer', '#importDrawer'].map((s) => $(s));
-  const syncDrawerMask = () => { $('#drawerMask').hidden = !_drawers.some((d) => !d.hidden); };
+  /* 手机侧栏抽屉（≤480px，样式在 style.css 移动端段）：侧栏滑入盖住主区，
+     遮罩同时管它——syncDrawerMask 与 mask 点击都要把它算进去。 */
+  const sideEl = $('.side');
+  const closeSideDrawer = () => { sideEl.classList.remove('open'); };
+  const sideOpen = () => sideEl.classList.contains('open');
+  const syncDrawerMask = () => { $('#drawerMask').hidden = !_drawers.some((d) => !d.hidden) && !sideOpen(); };
   const drawerObs = new MutationObserver(syncDrawerMask);
   _drawers.forEach((d) => drawerObs.observe(d, { attributes: true, attributeFilter: ['hidden'] }));
-  $('#drawerMask').addEventListener('click', () => _drawers.forEach((d) => { d.hidden = true; }));
+  $('#drawerMask').addEventListener('click', () => {
+    _drawers.forEach((d) => { d.hidden = true; });
+    closeSideDrawer();
+    syncDrawerMask();
+  });
+  $('#navBtn').addEventListener('click', () => {
+    sideEl.classList.toggle('open', !sideOpen());
+    syncDrawerMask();
+  });
+  // 抽屉里点任何导航（snav / 歌单 / 歌手）都收起——手机上点完就要看到内容
+  sideEl.addEventListener('click', (e) => {
+    if (e.target.closest('.snav-i') && sideOpen()) { closeSideDrawer(); syncDrawerMask(); }
+  });
+  // 窗口拉宽回桌面布局时自动归位（手机转横屏 / 桌面调试拖窗口）
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 480 && sideOpen()) { closeSideDrawer(); syncDrawerMask(); }
+  });
 
   /* 输入浮层（askText） */
   $('#askOk').addEventListener('click', () => _askDone($('#askInput').value));
@@ -5504,6 +5542,12 @@ document.addEventListener('click', async (e) => {
 
     /* ------------------------------------------------------ K 歌 / 作品 */
     case 'karaoke': karaokeStart(state.playing); break;
+    // 行内 K 歌按钮（手机主入口：没右键菜单；桌面 .tr-kar 默认隐藏）
+    case 'tr-karaoke': {
+      const it = state.list[idx];
+      if (it) karaokeStart(it);
+      break;
+    }
     case 'ctx-karaoke': {
       const t = _ctxTarget;
       closeCtxMenu();

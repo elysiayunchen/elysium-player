@@ -11,8 +11,8 @@ android {
         applicationId "com.elysium.player"
         minSdk 24
         targetSdk 34
-        versionCode 18
-        versionName "2.2.0-beta1"
+        versionCode 19
+        versionName "2.2.0-beta2"
         python {
             version "3.10"
         }
@@ -65,3 +65,25 @@ chaquopy {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 运行时源码同步：src/main/python 是「仓库根的构建镜像」，不入库（.gitignore）。
+// 教训（v2.2.0-beta1）：镜像此前靠构建机手工拷贝，构建时没拷新 → APK 里打包的
+// 是 v1.6.0 的旧前端旧后端，P9/P10 根本没进包。这里固化为构建前自动同步，
+// 任何 clone、任何机器构建都拿到当前源码。每次构建清空重拷（几 MB，不值得做增量）。
+// ---------------------------------------------------------------------------
+def repoRoot = rootProject.projectDir.parentFile
+
+tasks.register('syncPythonSources', Copy) {
+    description = '仓库根 main.py/importer.py/sync_engine.py/providers/web → Chaquopy python srcDir'
+    outputs.upToDateWhen { false }          // 每次都执行：清空重拷，防删除残留
+    doFirst {
+        delete layout.projectDirectory.dir('src/main/python')
+    }
+    into layout.projectDirectory.dir('src/main/python')
+    from(repoRoot) { include 'main.py', 'importer.py', 'sync_engine.py' }
+    from(repoRoot) { include 'providers/**' }
+    from(repoRoot) { include 'web/**' }
+}
+
+tasks.named('preBuild') { dependsOn 'syncPythonSources' }
