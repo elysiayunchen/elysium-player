@@ -39,7 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "Elysium"
 APP_TITLE = "Elysium - 在线音乐"
-VERSION = "2.1.0"
+VERSION = "2.2.0-beta2"
 _BASE_URL = ""            # main() 里落值；桌面歌词小窗据此建页
 _LYRIC_WIN = None         # 桌面歌词小窗句柄（pywebview window 或 None）
 LEGACY_NAME = "FlacMusic"
@@ -4551,6 +4551,12 @@ def main():
                           frameless=True, easy_drag=False,
                           transparent=material_on, shadow=True)
     webview.start(_apply_window_chrome, debug="--debug" in args)
+    # 窗口是应用的全部 UI：它一关，进程必须跟着死。
+    # 后台是 daemon 线程 + 两个模块级 ThreadPoolExecutor（_CRAWL/_PROBE，
+    # 线程非 daemon）——池里若有任务卡在挂起的网络上，解释器 shutdown 会
+    # 无限期等它，窗口没了进程还在（桌面版僵尸进程实测）。
+    # data.json / 索引都走 tmp+replace 原子写，硬退不毁库。
+    os._exit(0)
 
 
 if __name__ == "__main__":

@@ -51,7 +51,7 @@ def bind(**kw):
 # --------------------------------------------------------------------------
 DEFAULT_MANIFEST = {
     "rules_version": "2026-11-09.1",
-    "client_version": "1.6.0",
+    "client_version": "2.2.0-beta2",
     "update_url": "https://cdn.jsdelivr.net/gh/elysiayunchen/elysium-player@main/providers/manifest.json",
     "update_url_mirrors": [],
     "check_on_start": False,

@@ -1,6 +1,6 @@
 {
   "rules_version": "2026-11-09.1",
-  "client_version": "2.1.0",
+  "client_version": "2.2.0-beta2",
   "update_url": "https://cdn.jsdelivr.net/gh/elysiayunchen/elysium-player@main/providers/manifest.json",
   "update_url_mirrors": [
     "https://fastly.jsdelivr.net/gh/elysiayunchen/elysium-player@main/providers/manifest.json",
