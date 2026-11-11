@@ -87,3 +87,7 @@ tasks.register('syncPythonSources', Copy) {
 }
 
 tasks.named('preBuild') { dependsOn 'syncPythonSources' }
+// Chaquopy 的 merge*PythonSources 直接消费 src/main/python：Gradle 的隐式依赖
+// 校验要求「消费方显式依赖生产方」，只挂 preBuild 不够（beta2 构建实测报错）。
+tasks.matching { it.name.startsWith('merge') && it.name.endsWith('PythonSources') }
+     .configureEach { dependsOn 'syncPythonSources' }
