@@ -1680,6 +1680,11 @@ html[data-mini="on"] .pl-seek .mono{font-size:9.5px}
   .side-brand{justify-content:flex-start}
   .drawer-mask{z-index:39}              /* 侧栏 40 / 遮罩 39 / 右抽屉 30：层次不变 */
   .drawer{bottom:66px}                  /* 原值 bottom:92px 是桌面播放条高度，硬编码 */
+  /* ≤820 的 .drawer{max-width:420px} 在 <420px 视口反而放大宽抽屉：
+     .drawer.wide 基础宽度 430（优先级 0,2,0）压过媒体规则的 width:100%，
+     只剩 max-width:420 兜住 → 420 > 390 视口，右锚定向左溢出 30px，
+     内容左缘被裁（设置 / 正在播放抽屉实测）。手机上抽屉一律满宽。 */
+  .drawer,.drawer.wide,.drawer.xwide{width:100%;max-width:100%}
 
   /* 顶栏：汉堡 + 返回 + 搜索 + 主题/队列；设置/全风格歌单都在抽屉里可达 */
   .bar{grid-template-columns:auto minmax(0,1fr) auto;height:56px;padding:0 10px;gap:8px}
