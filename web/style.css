@@ -1570,6 +1570,10 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
 .kp-cents{font-size:11px;color:var(--muted);text-align:center}
 .k-pitch-score{font-size:13px;color:var(--ink-2)}
 .k-pitch-score b{color:#39d98a;font-size:18px}
+/* 听唱模式（.nomi）：拿不到麦克风（Android WebView 常态）时，
+   人声链路控件与实时音准条整体退场，只留伴奏音量 / 变调 / 消原唱 */
+.sing-layer.nomi .k-mic-only,
+.sing-layer.nomi .k-pitch{display:none}
 /* 迷你条 / 矮窗：收紧留白，别让控制条把歌词挤没 */
 @media (max-height:420px){
   .k-stage{padding:4px 16px}

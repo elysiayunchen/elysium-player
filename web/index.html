@@ -264,7 +264,7 @@
   <div class="k-prog"><div class="k-prog-fill" id="kProgFill"></div></div>
   <div class="k-stage" id="kStage"></div>
   <!-- 实时音准（P9）：大字音名 + 音分偏差 + CDEFGAB 音阶刻度条 -->
-  <div class="k-pitch" id="kPitch">
+  <div class="k-pitch" id="kPitchBar">
     <div class="kp-note mono" id="kpNote">—</div>
     <div class="kp-mid">
       <div class="kp-bar">
@@ -278,10 +278,10 @@
   <div class="k-lines" id="kLines"></div>
   <div class="k-ctl" id="kCtl">
     <label class="k-vol" title="伴奏音量"><svg><use href="#i-disc"/></svg><input type="range" id="kAccVol" min="0" max="150" value="90"/></label>
-    <label class="k-vol" title="人声音量"><svg><use href="#i-mic"/></svg><input type="range" id="kMicVol" min="0" max="200" value="100"/></label>
-    <span class="k-meter" title="麦克风电平"><span id="kMicLvl"></span></span>
-    <label class="k-vol" title="人声明亮 / 醇厚"><svg><use href="#i-spark"/></svg><input type="range" id="kTone" min="-6" max="6" step="1" value="0"/></label>
-    <select class="k-sel" id="kReverb" title="混响（耳返空间感）">
+    <label class="k-vol k-mic-only" title="人声音量"><svg><use href="#i-mic"/></svg><input type="range" id="kMicVol" min="0" max="200" value="100"/></label>
+    <span class="k-meter k-mic-only" title="麦克风电平"><span id="kMicLvl"></span></span>
+    <label class="k-vol k-mic-only" title="人声明亮 / 醇厚"><svg><use href="#i-spark"/></svg><input type="range" id="kTone" min="-6" max="6" step="1" value="0"/></label>
+    <select class="k-sel k-mic-only" id="kReverb" title="混响（耳返空间感）">
       <option value="dry">干声</option>
       <option value="room">小房间</option>
       <option value="studio" selected>录音棚</option>
@@ -306,7 +306,7 @@
         <option value="6">+6</option>
       </select>
     </label>
-    <label class="k-vocal" title="耳返：耳机里听自己的声音。外放时建议关闭防啸叫">
+    <label class="k-vocal k-mic-only" title="耳返：耳机里听自己的声音。外放时建议关闭防啸叫">
       <input type="checkbox" id="kEcho" checked/>耳返
     </label>
     <label class="k-vocal" title="消人声对「人声居中」的混音有效；自动判定结果在左侧标签">

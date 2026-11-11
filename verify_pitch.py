@@ -165,6 +165,21 @@ def make_driver(mic_wav):
     return d
 
 
+def make_driver_android():
+    """Android UA + 不带假麦：模拟手机 WebView（getUserMedia 必失败）。"""
+    o = Options()
+    for a in ("--headless=new", "--disable-gpu", "--window-size=412,915",
+              "--lang=zh-CN", "--autoplay-policy=no-user-gesture-required",
+              "--user-agent=Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"):
+        o.add_argument(a)
+    o.set_capability("goog:loggingPrefs", {"browser": "ALL"})
+    d = webdriver.Chrome(options=o)
+    d.set_window_size(412, 915)
+    d.set_page_load_timeout(45)
+    return d
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--keep", action="store_true")
@@ -388,7 +403,69 @@ def main():
         close_layer()
         d.execute_script("state.settings.karaoke_pitch = 0;")
 
+        # P9：Android 听唱模式（无麦克风）。手机 WebView 没有（或拿不到）麦克风，
+        # 但伴奏 / 歌词 / 变调 / 消原唱都不该被挡在门外：入口放行 + 开唱兜底降级。
+        # 单开一个 Android UA、不带假麦文件的 Chrome —— getUserMedia 必失败，
+        # 走的是「点开唱才发现没麦 → 转听唱」这条最接近真机的路径。
+        da = make_driver_android()
+        da_logs = []
+        try:
+            da.get(base + "/")
+            time.sleep(2.0)
+            u9 = da.execute_async_script(r"""
+              const [wid, done] = arguments;
+              (async () => {
+                try {
+                  const orig = window.rpc;
+                  if (typeof orig === 'function') {
+                    window.rpc = (fn, p) => (fn === 'getlyric'
+                      ? Promise.resolve({ lyric: '' }) : orig(fn, p));
+                  }
+                  await karaokeStart({ platform: 'work', id: wid, name: '听唱模式',
+                    artist: '信号组', cover: '', duration: 3 });
+                  done({ open: KAR.open, hidden:
+                    document.getElementById('singLayer').hidden,
+                    nomi: document.getElementById('singLayer').classList.contains('nomi') });
+                } catch (e) { done({ error: String(e) }); }
+              })();
+              """, wid_center)
+            check("P9a Android 无麦克风也能进 K 歌层（入口放行）",
+                  bool(u9) and u9.get("open") and not u9.get("hidden"), str(u9))
+
+            da.execute_script("document.getElementById('kBegin').click();")
+            ph9 = wait_js(da, "KAR.phase === 'sing' ? KAR.phase : null", timeout=30)
+            u9b = da.execute_script("""
+              const bar = document.querySelector('.k-pitch');
+              const mv = document.getElementById('kMicVol');
+              return { nomi: document.getElementById('singLayer').classList.contains('nomi'),
+                barHidden: bar ? getComputedStyle(bar).display === 'none' : null,
+                micHidden: mv ? getComputedStyle(mv.closest('label')).display === 'none' : null,
+                chunks: KAR.chunks.length };
+            """)
+            check("P9b 听唱模式进 sing、麦相关控件与音准条退场",
+                  ph9 == "sing" and u9b["nomi"] and u9b["barHidden"]
+                  and u9b["micHidden"] is True and u9b["chunks"] == 0, str(u9b))
+
+            time.sleep(1.5)
+            da.execute_script("document.getElementById('kFinish').click();")
+            rv9 = wait_js(da, "KAR.phase === 'review' ? KAR.phase : null", timeout=15)
+            u9c = da.execute_script("""
+              return { score: ((document.querySelector('.k-score')||{}).textContent || '').trim(),
+                hasSave: !!document.querySelector('[data-act="k-save"]') };
+            """)
+            check("P9c 听唱结算：「听唱完成」且无保存按钮",
+                  rv9 == "review" and u9c["score"] == "听唱完成"
+                  and not u9c["hasSave"], str(u9c))
+        finally:
+            try:
+                da_logs = [e["message"] for e in da.get_log("browser")
+                           if e["level"] == "SEVERE"]
+            except Exception:
+                pass
+            da.quit()
+
         logs = [e["message"] for e in d.get_log("browser") if e["level"] == "SEVERE"]
+        logs += ["[nomi] " + m for m in da_logs]
         check("U7 无未捕获的严重异常", not logs, (logs[:2] if logs else ""))
     finally:
         if d:
