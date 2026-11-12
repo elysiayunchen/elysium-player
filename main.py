@@ -235,19 +235,108 @@ def work_meta(qs, size):
     return meta
 
 
+# settings 里必须保持数值语义的键：写入前转 int 并钳制范围。
+# 不设防的话，一个 "abc" 或 -5 会一路落进 data.json，下一次读取时
+# （/api/cache、音量）int() 就崩，或者得到一个负的缓存上限。
+_SETTING_NUM = {
+    "volume": (0, 100),
+    "concurrency": (1, 4),
+    "cache_limit_mb": (0, 1024 * 1024),
+    "cache_min_plays": (1, 100),
+    "cache_week_plays": (1, 1000),
+    "cache_keep_days": (1, 365),
+    "lrc_offset_ms": (-10000, 10000),
+    "crossfade_ms": (0, 2000),
+}
+
+
+def _clean_settings(payload):
+    """settings 写入前的清洗：非 dict 拒绝，数值键转 int 并钳制，非法值丢弃。"""
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        raise ValueError("settings 必须是对象")
+    out = {}
+    for k, v in payload.items():
+        if k == "local_dirs":
+            # 必须是数组：写成字符串时老的 _local_roots 会逐字符当目录，
+            # 万一碰上 "." 就会把整个工作目录扫进曲库。
+            if isinstance(v, list):
+                out[k] = [str(x).strip() for x in v if str(x or "").strip()][:20]
+            continue
+        if k == "eq_gains":
+            if isinstance(v, list):
+                out[k] = v[:10]
+            continue
+        rule = _SETTING_NUM.get(k)
+        if not rule:
+            out[k] = v
+            continue
+        lo, hi = rule
+        try:
+            n = int(float(v))
+        except (TypeError, ValueError):
+            continue                        # 非法值不落盘，保留原值
+        out[k] = max(lo, min(hi, n))
+    return out
+
+
+def _int_setting(cfg, key, default):
+    """读 settings 里的整数项：脏数据（"abc" / null）回落到默认值。"""
+    try:
+        return int((cfg or {}).get(key, default))
+    except (TypeError, ValueError, AttributeError):
+        return default
+
+
+# 合法的 store 操作白名单。写在 apply 外面，HTTP 层与 apply 共用同一份，
+# 避免「接口放行、内部静默忽略」的两套口径。
+STORE_OPS = frozenset((
+    "load", "settings", "history_add", "history_clear",
+    "fav_toggle", "fav_remove", "download_add", "downloads_clear",
+    "favorites_clear", "recent_add", "recent_clear",
+    "feedback_set", "feedback_clear", "taste_note", "taste_genres",
+    "playlist_create", "playlist_rename", "playlist_delete",
+    "playlist_add", "playlist_remove", "playlist_reorder",
+    "work_add", "work_remove",
+))
+
+
 class Store:
     def __init__(self, path):
         self.path = path
         self.lock = threading.RLock()
         self.data = self._load()
 
+    def _quarantine(self):
+        """把读不动的 data.json 另存一份 .bak。
+
+        回落默认值后下一次 save 会覆盖原文件；留一份备份，收藏 / 歌单还有机会
+        人工抢救。只保留最近一份，反复损坏不会堆一堆文件。
+        """
+        try:
+            if os.path.getsize(self.path) <= 0:
+                return                      # 空文件没有可救的内容
+            shutil.copy2(self.path, self.path + ".bak")
+        except OSError:
+            pass
+
     def _load(self):
         if not os.path.isfile(self.path):
             return json.loads(json.dumps(DEFAULT_STORE))
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
+            # utf-8-sig：带 BOM 的文件（记事本 / 部分同步盘写出）以前会解析失败，
+            # 整份数据被当成损坏回落默认值 —— 用户的收藏就这样无声消失。
+            with open(self.path, "r", encoding="utf-8-sig") as f:
                 raw = json.load(f)
         except Exception:
+            self._quarantine()
+            return json.loads(json.dumps(DEFAULT_STORE))
+        if not isinstance(raw, dict):
+            # 被同步盘 / 编辑器写成一截字符串、数组或数字时，旧代码会直接在
+            # `(raw or {}).items()` 上抛 AttributeError —— 进程启动即死，用户
+            # 连设置页都打不开。类型不对一律按损坏处理，回落默认值。
+            self._quarantine()
             return json.loads(json.dumps(DEFAULT_STORE))
         merged = json.loads(json.dumps(DEFAULT_STORE))
         for k, v in (raw or {}).items():
@@ -291,11 +380,15 @@ class Store:
         return json.loads(json.dumps(v))
 
     def apply(self, op, payload):
+        if op not in STORE_OPS:
+            # 未知 op 早就不该被当成「什么都不做但保存一次」——那会把页面发来的
+            # 拼写错误吞掉，还白写一遍磁盘。
+            raise ValueError("未知操作 %r" % (op,))
         with self.lock:
             if op == "load":
                 return self._snapshot(self.data)
             if op == "settings":
-                self.data["settings"].update(payload or {})
+                self.data["settings"].update(_clean_settings(payload))
             elif op == "history_add":
                 q = (payload or {}).get("q", "").strip()
                 plat = (payload or {}).get("platform", "kuwo")
@@ -1743,9 +1836,17 @@ def sniff_ext(url, fallback="bin"):
     return fmt if fmt and fmt != "bin" else fallback
 
 
+_WIN_RESERVED = ({"CON", "PRN", "AUX", "NUL"}
+                 | {"COM%d" % i for i in range(1, 10)}
+                 | {"LPT%d" % i for i in range(1, 10)})
+
+
 def safe_name(s):
     s = re.sub(r'[\\/:*?"<>|\r\n\t]', "_", str(s or "")).strip(" .")
-    return s[:150] or "unknown"
+    s = s[:150] or "unknown"
+    if s.split(".")[0].upper() in _WIN_RESERVED:
+        s = "_" + s            # 设备名不能当文件名，加个前缀就落得下去
+    return s
 
 
 def render_template(tpl, item, fmt="", bitrate=""):
@@ -3245,8 +3346,12 @@ UPDATE_STATE = {
 
 
 def _ver_tuple(v):
-    """'v1.4.2-beta' -> (1, 4, 2)。只认数字段，后缀不参与比较。"""
-    return tuple(int(x) for x in re.findall(r"\d+", str(v or "").split("-")[0])) or (0,)
+    """'v1.4.2-beta' -> (1, 4, 2)。只认数字段，后缀不参与比较。
+
+    数字段截到 9 位：版本号不会有 10 位，而 int() 有 4300 位上限 ——
+    远端给一串超长数字时整条检查更新链路会抛异常。
+    """
+    return tuple(int(x[:9]) for x in re.findall(r"\d+", str(v or "").split("-")[0])) or (0,)
 
 
 def _fetch_json(url, timeout=8):
@@ -3540,6 +3645,21 @@ def diag_tone_wav():
     return _DIAG_TONE
 
 
+def _range_num(s, fallback):
+    """Range 里的数字：超过 18 位直接按 fallback 处理。
+
+    Python 3.11+ 的 int() 有 4300 位上限，把 5000 个 9 丢进去会抛
+    ValueError；而这段在 handler 主路径上、外面没有兜底 —— 一条请求就能让
+    连接无响应。正常 Range 数字不会超过 18 位（EB 级）。
+    """
+    if len(s) > 18:
+        return fallback
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return fallback
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "FlacMusic/" + VERSION
 
@@ -3550,30 +3670,46 @@ class Handler(BaseHTTPRequestHandler):
         """只服务本机回环发起的请求。服务虽然只绑 127.0.0.1，但显式校验 Host
         可以挡住 DNS rebinding（恶意网页把域名解析到 127.0.0.1 后摸 API）。"""
         host = (self.headers.get("Host") or "").strip().lower()
-        if host.count(":") == 1:            # host:port（IPv4 写法）
+        if host.startswith("["):            # [::1]:port / [::1]
+            host = host[1:].split("]", 1)[0]
+        elif host.count(":") == 1:          # 127.0.0.1:port
             host = host.rsplit(":", 1)[0]
-        return host.strip("[]") in ("127.0.0.1", "localhost", "::1")
+        return host in ("127.0.0.1", "localhost", "::1")
 
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
         if isinstance(body, (dict, list)):
             body = json.dumps(body, ensure_ascii=False).encode("utf-8")
         elif isinstance(body, str):
             body = body.encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            # 页面刷新、切歌、关窗都会先掐连接；写响应时报这些是常态，
+            # 不该让每次断连在日志里留一段 traceback。
+            pass
 
     def _json_body(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        if not length:
+        """读 JSON body：解析失败 / 不是对象 / 长度非法，一律返回 {}。
+
+        返回 dict 是硬约定 —— 上层直接 body.get(...)，返回 list / str 会在取
+        字段时抛 AttributeError，最后被兜底成一句看不出问题的 ok:false。
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            return {}
+        if length <= 0:
             return {}
         try:
-            return json.loads(self.rfile.read(length).decode("utf-8"))
+            data = json.loads(self.rfile.read(length).decode("utf-8"))
         except Exception:
             return {}
+        return data if isinstance(data, dict) else {}
 
     # -- 音频代理 / 缓存 ---------------------------------------------------
     def _serve_media(self, key, url, ext):
@@ -3597,11 +3733,11 @@ class Handler(BaseHTTPRequestHandler):
         if m and (m.group(1) or m.group(2)):
             partial = True
             if m.group(1):
-                start = int(m.group(1))
+                start = _range_num(m.group(1), size)
                 if m.group(2):
-                    end = min(int(m.group(2)), size - 1)
+                    end = min(_range_num(m.group(2), size - 1), size - 1)
             else:                                   # bytes=-N 取尾部
-                start = max(0, size - int(m.group(2)))
+                start = max(0, size - _range_num(m.group(2), size))
             if start > end or start >= size:
                 self.send_response(416)
                 self.send_header("Content-Range", "bytes */" + str(size))
@@ -3678,7 +3814,8 @@ class Handler(BaseHTTPRequestHandler):
         rel = (path.lstrip("/") or "index.html").split("?")[0].split("#")[0]
         target = os.path.normpath(os.path.join(resource_dir(), "web", rel))
         webroot = os.path.normpath(os.path.join(resource_dir(), "web"))
-        if not target.startswith(webroot) or not os.path.isfile(target):
+        if not (target == webroot or target.startswith(webroot + os.sep)) \
+                or not os.path.isfile(target):
             self._send(404, {"error": "not found"})
             return
         ext = os.path.splitext(target)[1].lower()
@@ -3840,16 +3977,19 @@ class Handler(BaseHTTPRequestHandler):
             plays = STORE.data.get("plays") or {}
             heard = 0
             for v in plays.values():
-                if isinstance(v, dict) and int((v.get("days") or {}).get(day) or 0) > 0:
+                if not isinstance(v, dict):
+                    continue
+                days = v.get("days")
+                if isinstance(days, dict) and _int_setting(days, day, 0) > 0:
                     heard += 1
             cfg = STORE.data["settings"]
             st.update({
                 "day": day,
                 "heard": heard,
-                "min_plays": int(cfg.get("cache_min_plays", 2)),
-                "week_plays": int(cfg.get("cache_week_plays", 5)),
-                "keep_days": int(cfg.get("cache_keep_days", 3)),
-                "limit": int(cfg.get("cache_limit_mb", 2048)),
+                "min_plays": _int_setting(cfg, "cache_min_plays", 2),
+                "week_plays": _int_setting(cfg, "cache_week_plays", 5),
+                "keep_days": _int_setting(cfg, "cache_keep_days", 3),
+                "limit": _int_setting(cfg, "cache_limit_mb", 2048),
             })
             self._send(200, {"ok": True, "data": st})
             return
@@ -3909,10 +4049,23 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/store":
+                try:
+                    clen = int(self.headers.get("Content-Length") or 0)
+                except (TypeError, ValueError):
+                    clen = 0
+                if clen > 4 * 1024 * 1024:
+                    # 用户数据的单次写入不该有 MB 级；放进来只会把 data.json 撑爆
+                    self._send(413, {"ok": False, "error": "请求体过大"})
+                    return
                 body = self._json_body()
                 op = body.get("op")
+                if op not in STORE_OPS:
+                    # 空 body / 非法 JSON / 拼错 op 以前会被当成「读取快照」，
+                    # 回一个 ok:true 还白写一次盘 —— 直接明确拒绝。
+                    self._send(400, {"ok": False, "error": "未知操作 %r" % (op,)})
+                    return
                 out = {"ok": True, "data": STORE.apply(op, body.get("payload"))}
-                if op and op != "load":
+                if op != "load":
                     sync_engine.touch()      # 让自动模式知道「本地变了」
                 self._send(200, out)
                 return
