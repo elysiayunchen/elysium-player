@@ -229,8 +229,11 @@ const _br = (m) => Number(m.bitrate) || 0;
 const PROBE = new Map();
 const pk = (it) => `${it.platform}:${it.id}`;
 
-/* 列表里的音质格子：只认实测结果，上游声称不算数 */
-function qualityChip(it, idx) {
+/* 列表里的音质格子：只认实测结果，上游声称不算数。
+   idx 有两个用途：探测徽标的波浪错峰（animation-delay）+ 失效行的「换源」钮
+   （data-i 指向 state.items 下标）。给没有 data-row 的容器（推荐卡）传 idx 时
+   必须同时传 noSwap —— 换源钮的下标语义在那种容器里是错的。 */
+function qualityChip(it, idx, noSwap) {
   if (it.platform === 'local') {            // 本地文件：mutagen 读出的就是真实值
     const fmt = (it.format === 'flac' ? 'FLAC' : String(it.format || '').toUpperCase());
     const br = it.bitrate ? ' ' + it.bitrate + 'k' : '';
@@ -242,14 +245,16 @@ function qualityChip(it, idx) {
   if (!p) {
     const q = bestQuality(it);
     const tip = q ? `正在实测真实格式与码率（上游声称 ${q.format === 'flac' ? 'FLAC' : q.bitrate + 'K'}）` : '正在实测';
-    return `<span class="chip probing" title="${esc(tip)}">检测中</span>`;
+    /* 负延迟按行错开：整列不再同步呼吸（25 枚徽标一起闪是视觉噪音），呈波浪扫过 */
+    const dl = idx == null ? '' : ` style="animation-delay:-${((idx % 10) * 0.22).toFixed(2)}s"`;
+    return `<span class="chip probing"${dl} title="${esc(tip)}">检测中</span>`;
   }
   /* 探测没跑出结果（请求失败 / 上游无响应）：落成静态「待测」，不再永远 pulse */
   if (p.unresolved) {
     return `<span class="chip wait" title="${esc(p.reason || '实测未完成')}">待测</span>`;
   }
   if (!p.valid) {
-    const btn = idx == null ? ''
+    const btn = (idx == null || noSwap) ? ''
       : `<button class="lnk" data-act="swap" data-i="${idx}" title="${esc(p.reason || '链接不可用')}">换源</button>`;
     return `<span class="chip dead" title="${esc(p.reason || '链接不可用')}">失效</span>${btn}`;
   }
@@ -1052,13 +1057,14 @@ const EQ_PRESETS = {
 };
 const EQ_LABEL = {
   flat: '平直', bass: '低音增强', vocal: '人声',
-  classical: '古典', pop: '流行', rock: '摇滚', custom: '自定义',
+  classical: '古典', pop: '流行', rock: '摇滚', custom: '自定义', autoeq: '导入',
 };
 const ENG_LEAD = 0.16;        // gapless 开闸提前量：160ms 的双向淡入淡出
 const PRELOAD_AT = 8;         // 剩余多少秒时把下一首塞进备用元素
 
 const ENG = {
-  on: false, ctx: null, master: null, eq: [], els: [], gains: [], srcs: [],
+  on: false, ctx: null, master: null, eq: [], els: [], gains: [], srcs: [], louds: [],
+  preamp: null, pbTimer: null,
   slot: 0, pre: null, cross: ENG_LEAD, gapless: true, eqTimer: null,
 };
 
@@ -1124,19 +1130,27 @@ function engBuild(elA, elB) {
     eq[eq.length - 1].connect(master);
     master.connect(ctx.destination);
 
+    const preamp = ctx.createGain();   // 前级：自动补偿 + 手动增益（发烧客 B-1），EQ 前统一一道闸
+    preamp.gain.value = 1;
+
     const els = [elA, elB];
     const gains = [];
     const srcs = [];
+    const louds = [];
     for (let i = 0; i < els.length; i += 1) {
       const src = ctx.createMediaElementSource(els[i]);   // 每个元素只能接一次
       const g = ctx.createGain();
-      g.gain.value = 1;
+      const lg = ctx.createGain();   // 响度预增益：mode=track 时按实测 LUFS 预置，跟曲走
+      lg.gain.value = 1;
       src.connect(g);
-      g.connect(eq[0]);
+      g.connect(lg);
+      lg.connect(preamp);
+      preamp.connect(eq[0]);
       srcs.push(src);
       gains.push(g);
+      louds.push(lg);
     }
-    Object.assign(ENG, { on: true, ctx, master, eq, els, gains, srcs, slot: 0 });
+    Object.assign(ENG, { on: true, ctx, master, preamp, eq, els, gains, srcs, louds, slot: 0 });
     return true;
   } catch (e) {
     return false;                          // 老内核 / Web Audio 被禁用：静默降级
@@ -1149,21 +1163,259 @@ function engCurve() {
   return EQ_FREQS.map((_, i) => Math.max(-12, Math.min(12, Number(g[i]) || 0)));
 }
 
+/** 参数模式实际生效的段表（eq_bands 唯一真相，≤10 段）。后端写入时已校验过，
+    这里再做一层防御性钳制 —— data.json 手改坏值不该有路径摸到音频图。 */
+function engBands() {
+  const v = (state.settings && state.settings.eq_bands) || [];
+  const out = [];
+  for (const b of (Array.isArray(v) ? v : [])) {
+    if (!b || typeof b !== 'object') continue;
+    const f = Number(b.f);
+    const q = Number(b.q);
+    const db = Number(b.db);
+    const type = (b.type === 'lowshelf' || b.type === 'highshelf') ? b.type : 'peaking';
+    if (!(Number.isFinite(f) && Number.isFinite(q) && Number.isFinite(db))) continue;
+    out.push({
+      type,
+      f: Math.max(20, Math.min(20000, f)),
+      q: Math.max(0.1, Math.min(10, q)),
+      db: Math.max(-12, Math.min(12, db)),
+    });
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
+/** 自动补偿量：抵掉段表里拉得最高的正增益，EQ 推再高叠加起来也过不了 0dB（B-3） */
+function engAutoPreampDb(dbs) {
+  if (state.settings.eq_auto_preamp === false) return 0;
+  const maxDb = (dbs || []).reduce((m, v) => Math.max(m, Number(v) || 0), 0);
+  return -Math.max(0, maxDb);
+}
+
 function engApplyEq(immediate) {
   if (!ENG.on) return;
   const on = state.settings.eq_enabled === true;
-  const curve = engCurve();
   const now = ENG.ctx.currentTime;
+  const parametric = on && (state.settings.eq_mode || 'graphic') === 'parametric';
+  const bands = parametric ? engBands() : null;
+  const curve = parametric ? null : engCurve();
+  /* 10 个 BiquadFilter 节点两模式复用（B-2/B-4）：参数模式按 eq_bands 重配
+     type/frequency/Q/gain，不足 10 段的余下节点落 identity；图形模式照旧
+     EQ_FREQS + Q=1。图不重建、不做节点动态增删 —— 加减段只是重配。
+     只有 gain 走平滑，type/frequency/Q 是瞬跳：切模式瞬间可能有一声轻「咔」，
+     10 节点复用的固有代价，实测可感度低。 */
   ENG.eq.forEach((b, i) => {
-    const v = on ? curve[i] : 0;
+    const bd = bands ? bands[i] : null;
+    const type = bd ? bd.type : 'peaking';
+    const f = bd ? bd.f : EQ_FREQS[i];
+    const q = bd ? bd.q : 1.0;
+    const db = parametric ? (bd ? bd.db : 0) : (on ? curve[i] : 0);
     try {
+      b.type = type;
+      b.frequency.value = f;
+      b.Q.value = q;
       b.gain.cancelScheduledValues(now);
-      if (immediate) b.gain.setValueAtTime(v, now);
-      else b.gain.setTargetAtTime(v, now, 0.03);   // 平滑过渡，切换预设不爆音
+      if (immediate) b.gain.setValueAtTime(db, now);
+      else b.gain.setTargetAtTime(db, now, 0.03);   // 平滑过渡，切换预设不爆音
     } catch (e) {
-      try { b.gain.value = v; } catch (e2) { /* ignore */ }
+      try { b.gain.value = db; } catch (e2) { /* ignore */ }
     }
   });
+  // 前级只在参数模式生效：图形模式是老十推子路径，升级前后听感必须一字不差
+  // （前级读数/补偿开关也只存在于参数面板，图形模式给了补偿却没处看 = 无感掉音量）
+  engApplyPreamp(parametric ? bands.map((x) => x.db) : null, on && parametric, immediate);
+}
+
+/** 前级增益：自动补偿 + 手动前级，setTargetAtTime 平滑防爆音（B-3）。
+    active 仅参数模式为真 —— 图形模式恒 0dB，老用户零变化。
+    自动补偿抵掉段表里拉得最高的正增益，EQ 推再高叠加起来也过不了 0dBFS。
+    响度增益挂在各槽 louds 节点上（跟曲走、钳 ±15dB），与本节点分层；
+    极端叠加（补偿关闭 + 段表全负 + 手动 +12 + 响度 +15）Web Audio 全程
+    浮点运算，只在设备端取整钳一次，不会中途削波（B-5）。 */
+function engApplyPreamp(dbs, active, immediate) {
+  if (!ENG.on || !ENG.preamp) return;
+  const auto = active ? engAutoPreampDb(dbs) : 0;
+  const manual = active ? Math.max(-12, Math.min(12, Number(state.settings.eq_preamp) || 0)) : 0;
+  const db = Math.max(-24, Math.min(12, auto + manual));
+  const lin = Math.pow(10, db / 20);
+  try {
+    const now = ENG.ctx.currentTime;
+    ENG.preamp.gain.cancelScheduledValues(now);
+    if (immediate) ENG.preamp.gain.setValueAtTime(lin, now);
+    else ENG.preamp.gain.setTargetAtTime(lin, now, 0.03);
+  } catch (e) {
+    try { ENG.preamp.gain.value = lin; } catch (e2) { /* ignore */ }
+  }
+}
+
+/* ---------------------------------------------------------------- 发烧客·响度归一化 */
+/* 按曲目实测响度（EBU R128 / ITU-R BS.1770-4）预置增益：实测过的歌播起来响度一致，
+   没实测的原样播放 —— 和音质徽标同一条铁律：没实测就不冒充。
+   测量跟播后台做（整曲解码 → K 加权 → 400ms 窗 / 100ms 步门控），一次一首、切歌作废；
+   结果走 loudness_set 落 data.json（上限 5000 条由后端按时间淘汰）。 */
+
+let LOUD_JOB = 0;                 // 令牌：切歌后旧测量的后续步骤全部作废
+let LOUD_FETCH = null;            // 在途下载，切歌即断
+let LOUD_DEC = null;              // 解码用 OfflineAudioContext（顺带统一重采样到 48k）
+
+function loudTargetVal() {
+  return Math.max(-40, Math.min(-6, Math.round(Number(state.settings.loudness_target) || -18)));
+}
+
+/** 当前曲该预置的增益 dB（没开 / 没实测 / 值离谱 = 0，绝不猜） */
+function loudGainDb(item) {
+  if (!item || (state.settings.loudness_mode || 'off') !== 'track') return 0;
+  const rec = (state.loudness || {})[`${item.platform}:${item.id}`];
+  if (!rec || !Number.isFinite(rec.lufs)) return 0;
+  return Math.max(-15, Math.min(15, loudTargetVal() - rec.lufs));
+}
+
+/** 预置增益跟曲走：换曲直接置位（不带上一首的拖尾），运行中改设置用平滑过渡 */
+function engSetLoudness(item, slot, smooth) {
+  if (!ENG.on || !ENG.louds || !ENG.louds.length) return;
+  const node = ENG.louds[(slot == null || slot < 0) ? ENG.slot : slot];
+  if (!node) return;
+  const lin = Math.pow(10, loudGainDb(item) / 20);
+  try {
+    const now = ENG.ctx.currentTime;
+    if (smooth) node.gain.setTargetAtTime(lin, now, 0.05);
+    else node.gain.setValueAtTime(lin, now);
+  } catch (e) {
+    try { node.gain.value = lin; } catch (e2) { /* ignore */ }
+  }
+}
+
+function loudPaintTarget() {
+  const el = $('#setLoudVal');
+  if (el) el.textContent = `−${Math.abs(loudTargetVal())} LUFS`;
+}
+
+function loudPaintCount() {
+  const el = $('#setLoudCount');
+  if (el) el.textContent = String(Object.keys(state.loudness || {}).length);
+}
+
+function loudNudgeTarget(d) {
+  const v = Math.max(-40, Math.min(-6, loudTargetVal() + d));
+  state.settings.loudness_target = v;
+  postSettings({ loudness_target: v });
+  loudPaintTarget();
+  engSetLoudness(state.playing, null, true);
+}
+
+/* BS.1770-4 的 48kHz 标准 K 加权两级系数：stage1 高频搁板(+4dB) + stage2 RLB 高通。
+   直接按系数手写双二阶，不借 Web Audio 的 highshelf/highpass 近似（曲线不一致）。
+   系数取自 libebur128 的设计常数（f0=38.1355 Q=0.50033 RBJ 双二阶）在 48kHz 的精确
+   解 —— a2 抄成 0.9900422… 会让极点落到 1.0005，十几秒就爆到 1e48（实测过）。 */
+const KWB = [
+  [1.53512485958697, -2.69169618940638, 1.19839281085285, -1.69065929318241, 0.73248077421585],
+  [1.0, -2.0, 1.0, -1.99004745483398, 0.99007225036621],
+];
+
+/* 对一段已重采样到 48k 的声道数据做 K 加权滤波，返回每 100ms 块的 Σy²（两声道共用调用）。
+   state = 滤波器跨块状态 {x1,x2,y1,y2 × 2 级}，块间续着用。 */
+function kwChunk(x, from, to, state2) {
+  const [b0, b1, b2, a1, a2] = KWB[0];
+  const [c0, c1, c2, d1, d2] = KWB[1];
+  let s1x1 = state2.s1x1, s1x2 = state2.s1x2, s1y1 = state2.s1y1, s1y2 = state2.s1y2;
+  let s2x1 = state2.s2x1, s2x2 = state2.s2x2, s2y1 = state2.s2y1, s2y2 = state2.s2y2;
+  let acc = 0;
+  for (let i = from; i < to; i += 1) {
+    const yi = b0 * x[i] + b1 * s1x1 + b2 * s1x2 - a1 * s1y1 - a2 * s1y2;
+    s1x2 = s1x1; s1x1 = x[i]; s1y2 = s1y1; s1y1 = yi;
+    const y = c0 * yi + c1 * s2x1 + c2 * s2x2 - d1 * s2y1 - d2 * s2y2;
+    s2x2 = s2x1; s2x1 = yi; s2y2 = s2y1; s2y1 = y;
+    acc += y * y;
+  }
+  state2.s1x1 = s1x1; state2.s1x2 = s1x2; state2.s1y1 = s1y1; state2.s1y2 = s1y2;
+  state2.s2x1 = s2x1; state2.s2x2 = s2x2; state2.s2y1 = s2y1; state2.s2y2 = s2y2;
+  return acc;
+}
+
+/** EBU R128 集成响度（LUFS）。分块算、每 2s 让出主线程一次，5 分钟的歌也不卡 UI。 */
+async function ebur128Lufs(ab, my) {
+  const AC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if (!AC) return null;
+  try {
+    LOUD_DEC = LOUD_DEC || new AC(2, 1, 48000);
+    const raw = await LOUD_DEC.decodeAudioData(ab);      // 解码顺带重采样到 48k（BS.1770 系数按 48k 定死）
+    if (my !== LOUD_JOB || raw.numberOfChannels < 1 || raw.numberOfChannels > 2) return null;
+    const data = [];
+    for (let c = 0; c < raw.numberOfChannels; c += 1) data.push(raw.getChannelData(c));
+    const n = raw.length;
+    const CH = 4800;                                     // 100ms 一块
+    const nblk = Math.ceil(n / CH);
+    const sums = new Float64Array(nblk);                 // 每块 Σy²（两声道相加）
+    const st = data.map(() => ({ s1x1: 0, s1x2: 0, s1y1: 0, s1y2: 0, s2x1: 0, s2x2: 0, s2y1: 0, s2y2: 0 }));
+    for (let b = 0; b < nblk; b += 1) {
+      const from = b * CH;
+      const to = Math.min(n, from + CH);
+      let acc = 0;
+      for (let c = 0; c < data.length; c += 1) acc += kwChunk(data[c], from, to, st[c]);
+      sums[b] = acc;
+      if ((b & 31) === 31) {                             // 每 32 块（3.2s）让一次主线程
+        if (my !== LOUD_JOB) return null;
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    }
+    /* 400ms 窗 = 相邻 4 个 100ms 块（滑动求和）；窗响度 = -0.691 + 10lg(Σy²/19200) */
+    const W = 19200;
+    const l = [];
+    for (let j = 0; j + 4 <= nblk; j += 1) {
+      const s = sums[j] + sums[j + 1] + sums[j + 2] + sums[j + 3];
+      if (s > 0) l.push(-0.691 + 10 * Math.log10(s / W));
+    }
+    if (!l.length) return null;
+    /* 门控（BS.1770-4）：绝对阈 -70，再按剩余均值 -10 出相对阈 */
+    const abs = l.filter((v) => v > -70);
+    if (!abs.length) return null;
+    const meanAbs = abs.reduce((a, v) => a + Math.pow(10, v / 10), 0);
+    const relThr = -0.691 + 10 * Math.log10(meanAbs / abs.length) - 10;
+    const keep = abs.filter((v) => v > relThr);
+    if (!keep.length) return null;
+    const mean = keep.reduce((a, v) => a + Math.pow(10, v / 10), 0);
+    return -0.691 + 10 * Math.log10(mean / keep.length);
+  } catch (e) {
+    return null;                                         // 解码失败 / 中断：静默，下次播放再试
+  }
+}
+
+/** 跟播实测：mode=track 且这首歌还没记录时，后台下载→解码→算响度→落盘→当前曲即刻生效 */
+async function loudMeasure(item) {
+  if (!ENG.on || !item) return;                          // 引擎 1.x 没有 Web Audio 链，没处挂增益
+  if (item.platform === 'diag' || item.platform === 'work') return;
+  if (typeof AbortController !== 'function') return;     // 老内核没有取消能力：不测，播到下次再试
+  const key = `${item.platform}:${item.id}`;
+  if ((state.loudness || {})[key]) return;
+  if ((state.settings.loudness_mode || 'off') !== 'track') return;
+  const q = playCandidates(item)[0];
+  if (!q) return;
+  const my = ++LOUD_JOB;
+  if (LOUD_FETCH) { try { LOUD_FETCH.abort(); } catch (e) { /* ignore */ } }
+  const ctrl = new AbortController();
+  LOUD_FETCH = ctrl;
+  try {
+    const resp = await fetch(mediaSrc(item, q), { signal: ctrl.signal });
+    const ab = await resp.arrayBuffer();
+    if (my !== LOUD_JOB) return;
+    let lufs = await ebur128Lufs(ab, my);
+    if (my !== LOUD_JOB || !Number.isFinite(lufs)) return;
+    // 与后端 loudness_set 的钳制口径一致（[-70,0]）：内存与落盘同一份值，
+    // 否则极响曲目（integrated > 0 LUFS）重启后增益会跳
+    lufs = Math.max(-70, Math.min(0, lufs));
+    state.loudness = state.loudness || {};
+    state.loudness[key] = { lufs: Math.round(lufs * 10) / 10, at: Math.floor(Date.now() / 1000) };
+    post('/api/store', { op: 'loudness_set', payload: { platform: item.platform, id: item.id, lufs } })
+      .catch(() => {});
+    const p = state.playing;
+    if (p && String(p.id) === String(item.id) && p.platform === item.platform) {
+      engSetLoudness(p, null, true);                     // 正在播的就是这首：立刻接上增益
+    }
+    loudPaintCount();
+  } catch (e) {
+    /* 切歌 abort / 网络失败：静默，下一次播到这首再试 */
+  }
 }
 
 function engSetPreset(name) {
@@ -1185,6 +1437,164 @@ function engSetBand(i, db) {
   ENG.eqTimer = setTimeout(() => {
     postSettings({ eq_gains: engCurve(), eq_preset: 'custom' });
   }, 350);
+}
+
+/* ------------------------------------------------ 发烧客·参数 EQ 与 AutoEq（B/C-3/D 组） */
+/* 参数段的值改动走 350ms 防抖（同图形推子，D-5），结构性改动（加减段/换类型/
+   切模式）即时落盘 —— 后者用户手感是「点了一下」，拖尾反而让设置页重开时闪旧值。 */
+
+/** 参数段值改动：先落内存 + 立刻听感，落盘防抖。
+    定时器到点现读内存、不闭包捕获当时的数组：拖完推子 350ms 内又做了删段/
+    导入这类即时落盘的结构操作时，旧定时器会把改动前的段表再写回去。 */
+function engParamChanged() {
+  engApplyEq();
+  if (ENG.pbTimer) clearTimeout(ENG.pbTimer);
+  ENG.pbTimer = setTimeout(() => postSettings({ eq_bands: state.settings.eq_bands }), 350);
+}
+
+/** 结构改动：撤掉挂着的防抖写盘（它带的是旧表），自己即时落盘 */
+function engParamStructural() {
+  if (ENG.pbTimer) { clearTimeout(ENG.pbTimer); ENG.pbTimer = null; }
+  engApplyEq();
+  postSettings({ eq_bands: state.settings.eq_bands });
+}
+
+function engSetParamBand(i, patch) {
+  const bands = engBands();
+  if (!bands[i]) return;
+  Object.assign(bands[i], patch);
+  state.settings.eq_bands = bands;
+  engParamChanged();
+}
+
+function engAddParamBand() {
+  const bands = engBands();
+  if (bands.length >= 10) { toast('最多 10 段'); return false; }
+  bands.push({ type: 'peaking', f: 1000, q: 1, db: 0 });
+  state.settings.eq_bands = bands;
+  engParamStructural();
+  return true;
+}
+
+function engDelParamBand(i) {
+  const bands = engBands();
+  if (!bands[i]) return;
+  bands.splice(i, 1);
+  state.settings.eq_bands = bands;
+  engParamStructural();
+}
+
+function engSetBandType(i, type) {
+  const bands = engBands();
+  if (!bands[i] || bands[i].type === type) return;
+  bands[i].type = type;
+  state.settings.eq_bands = bands;
+  engParamStructural();
+}
+
+function engSetEqMode(mode) {
+  const m = mode === 'parametric' ? 'parametric' : 'graphic';
+  if ((state.settings.eq_mode || 'graphic') === m) return;
+  state.settings.eq_mode = m;
+  postSettings({ eq_mode: m });
+  engApplyEq();               // 平滑过渡，切换不当场爆音
+  paintEqMode();
+}
+
+function engNudgePreamp(d) {
+  const v = Math.max(-12, Math.min(12,
+    Math.round(((Number(state.settings.eq_preamp) || 0) + d) * 10) / 10));
+  state.settings.eq_preamp = v;
+  postSettings({ eq_preamp: v });
+  engApplyEq();
+  paintEqPreamp();
+}
+
+function engSetAutoPreamp(v) {
+  state.settings.eq_auto_preamp = !!v;
+  postSettings({ eq_auto_preamp: !!v });
+  engApplyEq();
+  paintEqPreamp();
+}
+
+/** 应用档案库里的一份调音（换耳机一键切回）：段表 + 前级整包落，型号名同步 */
+function engApplyEqPresetLib(name) {
+  const rec = (state.eqpresets || {})[name];
+  if (!rec || !Array.isArray(rec.bands) || !rec.bands.length) {
+    toast('这份档案没有可用调音段，不能应用', 'err');
+    return;
+  }
+  if (ENG.pbTimer) { clearTimeout(ENG.pbTimer); ENG.pbTimer = null; }   // 别让挂着的防抖把旧段表写回来
+  state.settings.eq_mode = 'parametric';
+  state.settings.eq_bands = rec.bands;
+  state.settings.eq_preamp = Math.max(-12, Math.min(12, Number(rec.preamp) || 0));
+  state.settings.eq_headphone = name;
+  postSettings({
+    eq_mode: 'parametric', eq_bands: rec.bands,
+    eq_preamp: state.settings.eq_preamp, eq_headphone: name,
+  });
+  engApplyEq();
+  paintEqMode();
+  paintEqParam();
+  paintEqPreamp();
+  paintEqLib();
+  toast(`已切到「${name}」`);
+}
+
+/** AutoEq 导入（C-2/C-3）：文本 POST 给后端解析 —— 段表校验口径只在 main.py
+    一份，前端不复刻第二遍；拿回段表落参数模式，顺手存一份进档案库。 */
+async function eqImportSubmit() {
+  const txtEl = $('#eqImportText');
+  const hpEl = $('#eqHpModel');
+  const txt = (txtEl && txtEl.value) || '';
+  const model = ((hpEl && hpEl.value) || '').trim().slice(0, 80);
+  if (!txt.trim()) { toast('先粘贴 autoeq.app 导出的 ParametricEQ 文本', 'err'); return; }
+  const btn = $('#eqImportGo');
+  if (btn) { btn.disabled = true; btn.textContent = '解析中…'; }
+  try {
+    const d = await post('/api/eq/parse', { text: txt });
+    // post() 对「响应不是约定形状」（网关 502 / 非 JSON）不抛错，这里必须自己验：
+    // 拿不到段表就停，绝不把用户的当前调音清空
+    if (!d || d.ok !== true) throw new Error((d && d.error) || '解析服务没有按约定应答');
+    const r = d.data || {};
+    const bands = Array.isArray(r.bands) ? r.bands : [];
+    if (!bands.length) throw new Error('没有解析到可用调音段，已保留当前设置');
+    const preamp = Math.max(-12, Math.min(12, Number(r.preamp) || 0));
+    state.settings.eq_mode = 'parametric';
+    state.settings.eq_bands = bands;
+    state.settings.eq_preamp = preamp;
+    state.settings.eq_headphone = model;
+    state.settings.eq_preset = 'autoeq';
+    postSettings({
+      eq_mode: 'parametric', eq_bands: bands, eq_preamp: preamp,
+      eq_headphone: model, eq_preset: 'autoeq',
+    });
+    engApplyEq();
+    paintEqMode();
+    paintEqParam();
+    paintEqPreamp();
+    const name = model || 'AutoEq 导入';
+    try {
+      await post('/api/store', { op: 'eqpreset_set', payload: { name, bands, preamp } });
+      state.eqpresets = state.eqpresets || {};
+      state.eqpresets[name] = { bands, preamp, at: Math.floor(Date.now() / 1000) };
+      paintEqLib();
+    } catch (e2) {
+      toast(`导入已应用，但存进档案库失败：${e2.message}`, 'err');
+    }
+    const extra = r.truncated ? `，超 10 段截掉 ${r.truncated} 段` : '';
+    toast(`已导入${model ? `「${model}」` : ''} ${bands.length} 段 · 前级 ${eqFmtDb(preamp)} dB${extra}`);
+    // 成功即收：盒子还开着容易让人再点一次或以为没生效
+    const box = $('#eqImportBox');
+    if (box) box.hidden = true;
+    const ib = $('#eqImportBtn');
+    if (ib) ib.textContent = '导入 AutoEq';
+    if (txtEl) txtEl.value = '';
+  } catch (e) {
+    toast(e.message || '解析失败', 'err');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '解析并应用'; }
+  }
 }
 
 /** 预载失败也一样要走：拿不到音质候选（缺 minfo）就交给 ended 路径回源补全 */
@@ -1212,6 +1622,7 @@ function engPreload() {
     b.volume = engActive().volume;
     b.src = mediaSrc(item, q);
     b.load();
+    engSetLoudness(item, 1 - ENG.slot);   // 预载那首的预增益提前放好，开闸即用
   } catch (e) { return; }
   ENG.pre = { index: idx, item, q, el: b, at: Date.now() };
 }
@@ -1299,7 +1710,9 @@ function engCross(remain) {
   }
 
   ENG.slot = 1 - ENG.slot;             // 先换槽：之后 audio() 读到的就是新曲
+  engSetLoudness(pre.item, ENG.slot);  // 换槽即置位（预载时已放过一次，这里兜底对齐）
   engAdopt(pre.index, pre.item, pre.q);
+  loudMeasure(pre.item);               // 无缝接的下一首也要实测（若有记录会直接跳过）
   oldEl.__coolUntil = Date.now() + sec * 1000 + 250;   // 淡出期不许被预载抢走
   engRecycle(oldEl, gOld, sec * 1000 + 120);
   engResume();
@@ -1342,6 +1755,7 @@ function engHaltOther() {
 function engTeardown() {
   ENG.pre = null;
   if (ENG.eqTimer) { clearTimeout(ENG.eqTimer); ENG.eqTimer = null; }
+  if (ENG.pbTimer) { clearTimeout(ENG.pbTimer); ENG.pbTimer = null; }
   if (ENG.ctx) { try { ENG.ctx.close(); } catch (e) { /* ignore */ } }
   // 引擎没起来时 ENG.els 是空的，但 DOM 里仍有 #audio —— 一并收走，否则重建会撞 id
   const els = ENG.els.length
@@ -1350,7 +1764,10 @@ function engTeardown() {
   els.forEach((el) => {
     try { el.pause(); el.removeAttribute('src'); el.remove(); } catch (e) { /* ignore */ }
   });
-  Object.assign(ENG, { on: false, ctx: null, master: null, eq: [], els: [], gains: [], srcs: [], slot: 0 });
+  Object.assign(ENG, {
+    on: false, ctx: null, master: null, preamp: null, eq: [], els: [],
+    gains: [], srcs: [], louds: [], slot: 0,
+  });
 }
 
 function engBoot() {
@@ -1679,14 +2096,59 @@ function setMini(on) {
   try { api.mini_mode(!!on); } catch (e) { /* 窗口改不动就保持布局，至少不崩 */ }
 }
 
+/** Hi-Res 徽标文案：只认实测 —— probe 探头解出的 FLAC STREAMINFO（位深/采样率
+    来自文件本体，上游声称不算数）。超过 CD 规格（48kHz/16bit）才标，
+    44.1k/16 的 FLAC 不是 Hi-Res；没数据不显示（不给假情报）。
+    单位写全 kHz：音质 chip 里「900k」的 k 是码率，徽标里再缩写就撞量纲了。 */
+function hiresTag(item) {
+  if (!item) return '';
+  const p = PROBE.get(pk(item));
+  if (!p || !p.valid || !p.hires) return '';
+  const sr = Number(p.hires.sample_rate) || 0;
+  const bits = Number(p.hires.bit_depth) || 0;
+  if (!sr || !bits || (sr <= 48000 && bits <= 16)) return '';
+  const k = sr % 1000 === 0 ? String(sr / 1000) : (sr / 1000).toFixed(1);
+  return `${k}kHz/${bits}bit`;
+}
+
+/** 当前曲没探测过就补一发探测（256B 探头，代价极小），给 Hi-Res 徽标供数。
+    播放链路拿到的歌不一定在列表里被探过。TTL 按探测音质记：先以 MP3 探过
+    （无 hires）再切 FLAC 的歌不能吃 10 分钟的旧账，得换档重探。 */
+function probeForHires(item) {
+  if (!item || item.platform === 'local' || item.platform === 'work' || item.platform === 'diag') return;
+  const q = state.currentQuality;
+  const qKey = q ? `${q.format}|${q.bitrate}` : '';
+  const hit = PROBE.get(pk(item));
+  if (hit && hit._pq === qKey && Date.now() - (hit.at || 0) < PROBE_TTL) return;
+  post('/api/probe', {
+    items: [Object.assign({}, item, {
+      _probeq: q ? { format: q.format, bitrate: q.bitrate } : {},
+    })],
+    limit: 1,
+  }).then((res) => {
+    Object.entries(res.data || {}).forEach(([k, v]) =>
+      PROBE.set(k, Object.assign({ at: Date.now(), _pq: qKey }, v)));
+    const p = PROBE.get(pk(item));
+    if (p && p.valid && p.hires) paintSpec();     // 探到了才值得重画
+  }).catch(() => {});
+}
+
 function paintSpec() {
   const q = state.currentQuality;
   const el = $('#plSpec');
-  if (!q) { el.textContent = '—'; return; }
-  if (state.playing && state.playing.platform === 'work') { el.textContent = '作品 · WAV'; return; }
-  el.textContent = (q.format === 'flac' ? 'FLAC' : 'MP3') + ' · ' + q.bitrate + 'k';
   const np = $('#npSpec');
-  if (np) np.textContent = el.textContent;   // 展开页曲目信息行的音质 chip 同步
+  if (!q) {
+    if (el) el.textContent = '—';
+    if (np) np.textContent = '—';
+    return;
+  }
+  const base = (state.playing && state.playing.platform === 'work') ? '作品 · WAV'
+    : (q.format === 'flac' ? 'FLAC' : 'MP3') + ' · ' + q.bitrate + 'k';
+  const hr = hiresTag(state.playing);
+  const txt = base + (hr ? ' · ' + hr : '');
+  if (el) el.textContent = txt;
+  if (np) np.textContent = txt;   // 展开页曲目信息行的音质 chip 同步
+  probeForHires(state.playing);
 }
 
 let lastCountedKey = '';
@@ -1743,6 +2205,7 @@ async function startTrack(item, cands, i, position, opts = {}) {
     engGainReset();                   // 新曲从满增益开始，别继承上一轮未走完的淡出
     a.src = mediaSrc(item, q);        // 同步设 src，保住用户手势
     a.dataset.media = a.src;
+    engSetLoudness(item, null);       // 响度预增益跟曲走：实测过才预置，没测过 = 原样
     engVolume((Number(state.settings.volume ?? 80)) / 100);
     if (position > 0) {
       a.addEventListener('loadedmetadata', () => {
@@ -1810,6 +2273,7 @@ async function playAt(list, index, opts = {}) {
     list === (state.reco && state.reco.list) ? '为你推荐'
       : list === state.recent ? '最近播放'
         : (QUEUE_SRC[state.route.name] || '播放列表'));
+  loudMeasure(item);                     // mode=track 且没实测过：后台测，测完自动接上增益
   paintPlayer(item);
   renderPlaying();
   renderQueue();
@@ -1912,11 +2376,19 @@ function restoreLast() {
         const r = Math.min(1, pos / dur);
         $('#seekFill').style.width = (r * 100).toFixed(2) + '%';
         $('#seekDot').style.left = (r * 100).toFixed(2) + '%';
+        seekAria($('#seekBar'), pos, dur);
       }
     }
     toast(`上次听到「${item.name}」，按播放接着听`);
   }
   return true;
+}
+
+/* 进度条 slider 语义：.seek 是 div，读屏器只认 aria-valuenow/valuetext（role=slider 在 index.html） */
+function seekAria(el, cur, dur) {
+  if (!el) return;
+  el.setAttribute('aria-valuenow', (dur ? Math.min(100, (cur / dur) * 100) : 0).toFixed(1));
+  el.setAttribute('aria-valuetext', fmtTime(cur) + ' / ' + fmtTime(dur));
 }
 
 function paintSeek() {
@@ -1931,6 +2403,7 @@ function paintSeek() {
     const end = a.buffered.end(a.buffered.length - 1);
     $('#seekBuf').style.width = (d ? Math.min(1, end / d) * 100 : 0).toFixed(2) + '%';
   }
+  seekAria($('#seekBar'), a.currentTime, d);
   /* 全屏展开层的进度条：同一份数据，不再另起一个时钟 */
   const nc = $('#npCurTime'), na = $('#npAllTime');
   if (nc) nc.textContent = fmtTime(a.currentTime);
@@ -1942,6 +2415,7 @@ function paintSeek() {
     const end = a.buffered.end(a.buffered.length - 1);
     nb.style.width = (d ? Math.min(1, end / d) * 100 : 0).toFixed(2) + '%';
   }
+  seekAria($('#npSeekBar'), a.currentTime, d);
 }
 
 /* ------------------------------------------------------------------ 渲染组件 */
@@ -2239,7 +2713,7 @@ function paintStats() {
    之前是 div 不带 data-act（点不动）+ 右下角 cplay + 左下角三个圆钮，
    两套控件叠在一起，看起来像两种 UI。 */
 function recoCardHtml(it, i) {
-  const spec = qualityChip(it);
+  const spec = qualityChip(it, i, true);   // 带卡位错峰但不给换源钮：data-i 在推荐卡里不是 state.items 下标
   return `<div class="card reco" role="button" tabindex="0" data-act="reco-play" data-i="${i}"
       data-pk="${esc(pk(it))}" data-pk-i="${i}" title="播放 ${esc(it.name || '')}">
     <div class="card-art">
@@ -2708,7 +3182,7 @@ function viewSearch() {
       <div class="kicker">SEARCH</div>
       <h1>${keyword ? esc(keyword) : '搜索'}</h1>
       <p class="sub">${keyword
-        ? `${items.length} 首${state.q.merged ? ' · 已合并重复曲目' : ''}`
+        ? (state.q.error ? '搜索没有完成' : `${items.length} 首${state.q.merged ? ' · 已合并重复曲目' : ''}`)
         : '输入歌名、歌手、专辑，或粘贴链接'}</p>
     </div>
     <div class="vhead-acts">
@@ -2727,6 +3201,12 @@ function viewSearch() {
     </div>${Array.from({ length: 6 }, () => '<div class="skel"></div>').join('')}</div>`;
   }
 
+  /* 搜索失败就地报错（对齐歌词错误态：小字 + 重试），不再只靠会消失的 toast */
+  if (state.q.error) {
+    return `<div class="page">${head}<p class="rule-note">搜索失败：${esc(state.q.error)}
+      <button class="btn ghost sm" data-act="search-retry" title="重新搜索">重试</button></p></div>`;
+  }
+
   const tabs = `<div class="stabs">
     <button class="stab${tab === 'song' ? ' on' : ''}" data-act="stab" data-tab="song">歌曲 <em>${items.length}</em></button>
     <button class="stab${tab === 'artist' ? ' on' : ''}" data-act="stab" data-tab="artist">歌手 <em>${artists.length}</em></button>
@@ -2742,7 +3222,9 @@ function viewSearch() {
   if (tab === 'song') {
     body = trackListHtml(items, { empty: '换个关键词，或粘贴专辑 / 歌单链接' })
       + (items.length && state.q.more
-        ? `<div style="text-align:center;padding:16px 0"><button class="btn sm" data-act="more">加载更多</button></div>`
+        ? `<div style="text-align:center;padding:16px 0">${state.q.moreErr
+          ? `<p class="rule-note" style="margin:0 0 8px">加载更多失败：${esc(state.q.moreErr)}</p><button class="btn sm" data-act="more">重试</button>`
+          : `<button class="btn sm" data-act="more">加载更多</button>`}</div>`
         : '');
   } else if (tab === 'artist') {
     body = `<p class="rule-note">以下为本次结果中出现的<b>记名演唱者</b>，只按歌曲署名归类；仅为作词 / 作曲 / 编曲参与的不并入，也不按搜索词合并。同名者已合并两个来源；曲目数不标在卡上——搜索命中的只是零头，点开抓全后才作数。</p>`
@@ -3587,11 +4069,7 @@ function syncNpDock() {
   if (vb) vb.innerHTML = icon(a.muted ? 'vol-x' : 'vol');
   const vol = $('#npVol');
   if (vol) vol.value = Math.round(Number(state.settings.volume ?? 80));
-  const q = state.currentQuality;
-  const sp = $('#npSpec');
-  if (sp) sp.textContent = !q ? '—'
-    : (state.playing && state.playing.platform === 'work') ? '作品 · WAV'
-    : (q.format === 'flac' ? 'FLAC' : 'MP3') + ' · ' + q.bitrate + 'k';
+  paintSpec();   // 展开页音质 chip 与播放条同一来源（含 Hi-Res 徽标）
 }
 
 /* 顶部信息 + 队列按钮状态（当前在队列视图时，按钮变成「回到歌词」） */
@@ -4307,6 +4785,64 @@ function eqBandsHtml() {
     </div>`).join('');
 }
 
+/* 参数段行：频率/Q 用对数滑条 —— 线性轴上 20-20kHz 的九成都被低频吃掉，
+   100Hz 以下挤成一条缝没法调。滑条值 0-1000：频率 20-20000（三个十倍频程）、
+   Q 0.1-10（两个十倍频程）；增益线性 ±12。 */
+function fToSlider(f) {
+  return Math.round(1000 * Math.log(Math.max(20, Math.min(20000, f)) / 20) / Math.log(1000));
+}
+function sliderToF(t) { return 20 * Math.pow(1000, (Number(t) || 0) / 1000); }
+function qToSlider(q) {
+  return Math.round(1000 * Math.log10(Math.max(0.1, Math.min(10, q)) / 0.1) / 2);
+}
+function sliderToQ(t) { return 0.1 * Math.pow(100, (Number(t) || 0) / 1000); }
+
+function eqFmtF(f) {
+  if (f >= 1000) return (f / 1000).toFixed(f >= 10000 ? 1 : 2).replace(/\.?0+$/, '') + 'k';
+  return String(Math.round(f));
+}
+function eqFmtQ(q) { return (Math.round(q * 100) / 100).toFixed(2); }
+/** dB 读数：负号用 U+2212（与响度目标/K 歌变调读数同一排版口径） */
+function eqFmtDb(db) {
+  const v = Math.round(db * 10) / 10;
+  const s = Math.abs(v).toFixed(1);
+  return v > 0 ? '+' + s : v < 0 ? '−' + s : '0.0';
+}
+
+const EQB_TYPE_LABEL = { peaking: '峰', lowshelf: '低架', highshelf: '高架' };
+
+function eqbRowHtml(i, key, label, sliderVal, txt) {
+  const isDb = key === 'db';
+  return `
+      <div class="eqb-row">
+        <span class="eqb-lab">${label}</span>
+        <input type="range" class="eqb-fader" data-k="${key}"
+          min="${isDb ? -12 : 0}" max="${isDb ? 12 : 1000}" step="${isDb ? 0.5 : 1}"
+          value="${sliderVal}" aria-label="第 ${i + 1} 段 ${label}"/>
+        <span class="eqb-val mono" data-v="${key}">${txt}</span>
+      </div>`;
+}
+
+function eqParamBandsHtml() {
+  const bands = engBands();
+  if (!bands.length) {
+    return '<p class="eq-empty">还没有参数段 · 点「加一段」从零调，或导入 AutoEq 档案</p>';
+  }
+  return bands.map((b, i) => `
+    <div class="eqb" data-b="${i}">
+      <div class="eqb-head">
+        <div class="km-chips eqb-type" role="group" aria-label="第 ${i + 1} 段滤波类型">
+          ${['peaking', 'lowshelf', 'highshelf'].map((t) =>
+            `<button type="button" data-t="${t}" title="${EQB_TYPE_LABEL[t]}滤波器"${b.type === t ? ' class="on"' : ''}>${EQB_TYPE_LABEL[t]}</button>`).join('')}
+        </div>
+        <button type="button" class="eqb-del" data-del="${i}" title="删掉这段" aria-label="删除第 ${i + 1} 段">×</button>
+      </div>
+      ${eqbRowHtml(i, 'f', '频率', fToSlider(b.f), eqFmtF(b.f))}
+      ${eqbRowHtml(i, 'q', 'Q 值', qToSlider(b.q), eqFmtQ(b.q))}
+      ${eqbRowHtml(i, 'db', '增益', b.db, eqFmtDb(b.db))}
+    </div>`).join('');
+}
+
 function viewSettings() {
   const s = state.settings;
   return `
@@ -4366,18 +4902,92 @@ function viewSettings() {
         <option value="2000">2 秒</option>
       </select>
     </div>
+  </div>
+
+  <div class="set-sec">
+    <h4>均衡器</h4>
     <div class="field">
-      <div><label>均衡器</label><p class="tip">10 段参数均衡，拖动即时生效，只作用于本机播放</p></div>
+      <div><label>均衡器</label><p class="tip">拖动即时生效，只作用于本机播放；依赖播放引擎 2.0</p></div>
       <input type="checkbox" class="switch" id="setEqOn"/>
     </div>
     <div class="field">
-      <div><label>预设</label><p class="tip">挑一个再微调；动过推子之后自动记为「自定义」</p></div>
-      <select id="setEqPreset">
-        ${Object.keys(EQ_PRESETS).map((k) => `<option value="${k}">${EQ_LABEL[k]}</option>`).join('')}
-        <option value="custom">自定义</option>
+      <div><label>模式</label><p class="tip">图形十段快速调音；参数模式自由增减段数、可导入 AutoEq 耳机修正档案</p></div>
+      <div class="set-seg" id="eqModeSeg" role="group" aria-label="均衡器模式">
+        <button type="button" data-mode="graphic">图形</button>
+        <button type="button" data-mode="parametric">参数</button>
+      </div>
+    </div>
+    <div id="eqGraphicPane">
+      <div class="field">
+        <div><label>预设</label><p class="tip">挑一个再微调；动过推子之后自动记为「自定义」</p></div>
+        <select id="setEqPreset">
+          ${Object.keys(EQ_PRESETS).map((k) => `<option value="${k}">${EQ_LABEL[k]}</option>`).join('')}
+          <option value="custom">自定义</option>
+          ${s.eq_preset === 'autoeq' ? `<option value="autoeq" disabled>${EQ_LABEL.autoeq}</option>` : ''}
+        </select>
+      </div>
+      <div class="eq-bands" id="eqBands">${eqBandsHtml()}</div>
+    </div>
+    <div id="eqParamPane" hidden>
+      <div class="field">
+        <div><label>前级</label><p class="tip">手动前级，与自动补偿相加才是链路实际增益；AutoEq 档案自带前级，自动补偿会把各段拉高的部分先压掉，防削波</p></div>
+        <div class="loud-target">
+          <button class="loud-tbtn" id="eqPreDown" title="前级 −0.5 dB" aria-label="前级减 0.5 dB">−</button>
+          <span class="mono eq-pre-val" id="eqPreVal">0.0 dB</span>
+          <button class="loud-tbtn" id="eqPreUp" title="前级 +0.5 dB" aria-label="前级加 0.5 dB">＋</button>
+        </div>
+      </div>
+      <div class="field">
+        <div><label>自动补偿</label><p class="tip">按各段里增益拉得最高的那段自动压前级；关掉后前级只听手动值</p></div>
+        <input type="checkbox" class="switch" id="setEqAutoPre"/>
+      </div>
+      <div class="field">
+        <div><label>档案库</label><p class="tip">导入过与存过的调音档案（耳机型号即档案名），换耳机一键切回；上限 50 份，超出淘汰最旧，仅存本机</p></div>
+        <div class="field-acts">
+          <select id="setEqLib"></select>
+          <button class="btn ghost sm danger" id="eqLibDel" title="删除选中的档案">删档案</button>
+        </div>
+      </div>
+      <div class="eq-params" id="eqParamBands">${eqParamBandsHtml()}</div>
+      <div class="set-actions">
+        <button class="btn sm primary" id="eqAddBand">＋ 加一段</button>
+        <button class="btn ghost sm" id="eqImportBtn">导入 AutoEq</button>
+      </div>
+      <div class="eq-import" id="eqImportBox" hidden>
+        <div class="field">
+          <div><label>耳机型号</label><p class="tip">作为档案名存进档案库，方便下次一键切回</p></div>
+          <input type="text" id="eqHpModel" maxlength="80" placeholder="如 HD 650"/>
+        </div>
+        <div class="field">
+          <div><label>APO 配置文本</label><p class="tip">在 autoeq.app 结果页打开 ParametricEQ.txt，全文复制粘贴到这里</p></div>
+        </div>
+        <textarea id="eqImportText" rows="7" spellcheck="false"
+          placeholder="Preamp: -3.5 dB&#10;Filter 1: ON PK Fc 105 Hz Gain 6.5 dB Q 0.71&#10;Filter 2: ON LS Fc 40 Hz Gain -4.2 dB Q 0.7&#10;…"></textarea>
+        <div class="set-actions">
+          <button class="btn sm" id="eqImportGo">解析并应用</button>
+        </div>
+        <p class="eq-import-tip">预设数据来自 <span class="mono">autoeq.app</span>（CC-BY-4.0）。解析在本机完成：能解才应用，解不了会明确报错。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="set-sec">
+    <h4>响度归一化</h4>
+    <div class="field">
+      <div><label>归一化</label><p class="tip">按曲目实测响度（EBU R128）预置增益，歌与歌之间不再忽大忽小。只对实测过的歌生效，没测的原样播放——和音质徽标同一条规矩：没实测就不冒充。切歌后后台实测，测完自动接上；依赖播放引擎 2.0</p></div>
+      <select id="setLoudMode">
+        <option value="off">关闭</option>
+        <option value="track">按曲目（实测增益）</option>
       </select>
     </div>
-    <div class="eq-bands" id="eqBands">${eqBandsHtml()}</div>
+    <div class="field">
+      <div><label>目标响度</label><p class="tip">ReplayGain 2.0 惯例 −18 LUFS，流媒体常取 −14；范围 −40 ~ −6。已实测 <span class="mono" id="setLoudCount">0</span> 首，播到哪测到哪</p></div>
+      <div class="loud-target">
+        <button class="loud-tbtn" id="setLoudDown" title="目标响度 −1 LUFS" aria-label="目标响度减 1 LUFS">−</button>
+        <span class="mono loud-tval" id="setLoudVal">−18 LUFS</span>
+        <button class="loud-tbtn" id="setLoudUp" title="目标响度 +1 LUFS" aria-label="目标响度加 1 LUFS">＋</button>
+      </div>
+    </div>
   </div>
 
   <div class="set-sec">
@@ -4592,6 +5202,58 @@ function viewSettings() {
   <div class="set-ver">ELYSIUM ${state.version ? 'v' + esc(state.version) : ''} · 本机运行</div>`;
 }
 
+/* —— 均衡器区绘制：模式两态 / 参数段行 / 前级读数 / 档案库（发烧客 D 组） ——
+   只在设置抽屉开着时干活（$ 找不到节点就空过），改设置后随手调，不用管开没开。 */
+function paintEqMode() {
+  const seg = $('#eqModeSeg');
+  const mode = (state.settings.eq_mode || 'graphic') === 'parametric' ? 'parametric' : 'graphic';
+  if (seg) seg.querySelectorAll('button[data-mode]').forEach((b) => b.classList.toggle('on', b.dataset.mode === mode));
+  const g = $('#eqGraphicPane');
+  const p = $('#eqParamPane');
+  if (g) g.hidden = mode !== 'graphic';
+  if (p) p.hidden = mode !== 'parametric';
+}
+
+function paintEqParam() {
+  const box = $('#eqParamBands');
+  if (box) box.innerHTML = eqParamBandsHtml();
+}
+
+/** 前级读数：手动值 + 自动补偿分开摆（D-3）—— 步进器只动手动值，
+    补偿量是引擎按段表现算的，混在一起写就成假读数了。
+    补偿生效且手动非零时补第三段「实际」，三个数各自有出处。 */
+function paintEqPreamp() {
+  const el = $('#eqPreVal');
+  if (!el) return;
+  const manual = Math.round((Number(state.settings.eq_preamp) || 0) * 10) / 10;
+  const active = state.settings.eq_enabled === true
+    && (state.settings.eq_mode || 'graphic') === 'parametric';
+  const auto = active ? engAutoPreampDb(engBands().map((b) => b.db)) : 0;
+  let txt = `${eqFmtDb(manual)} dB`;
+  if (auto < 0) {
+    txt += ` · 补偿 ${eqFmtDb(auto)}`;
+    if (manual !== 0) txt += ` · 实际 ${eqFmtDb(auto + manual)}`;
+  }
+  el.textContent = txt;
+}
+
+function paintEqLib() {
+  const sel = $('#setEqLib');
+  if (!sel) return;
+  const lib = state.eqpresets || {};
+  const names = Object.keys(lib).sort((a, b) => (lib[b].at || 0) - (lib[a].at || 0));
+  const cur = state.settings.eq_headphone || '';
+  sel.innerHTML = '<option value="">选择档案，一键切回…</option>' + names.map((n) =>
+    `<option value="${esc(n)}"${n === cur ? ' selected' : ''}>${esc(n)}</option>`).join('');
+}
+
+function paintEqAll() {
+  paintEqMode();
+  paintEqParam();
+  paintEqPreamp();
+  paintEqLib();
+}
+
 function fillSettings() {
   const s = state.settings;
   const set = (id, v) => { const el = $(id); if (el) el.value = v; };
@@ -4616,8 +5278,17 @@ function fillSettings() {
   chk('#setEqOn', s.eq_enabled === true);
   const cf = Number(s.crossfade_ms) || 0;
   set('#setCrossfade', String([500, 1000, 2000].indexOf(cf) >= 0 ? cf : 0));
-  set('#setEqPreset', EQ_PRESETS[s.eq_preset] || s.eq_preset === 'custom' ? s.eq_preset : 'flat');
-  // ↑ 预设名不在表里（老版本写坏的值）就退回平直，别让下拉框空着
+  // ↑ 预设名不在表里（老版本写坏的值）就退回平直，别让下拉框空着；autoeq 是导入标记，下拉里单独给选项
+  set('#setEqPreset',
+    EQ_PRESETS[s.eq_preset] || s.eq_preset === 'custom' || s.eq_preset === 'autoeq' ? s.eq_preset : 'flat');
+  set('#setLoudMode', s.loudness_mode === 'track' ? 'track' : 'off');
+  loudPaintTarget();
+  loudPaintCount();
+  /* ---- 均衡器（发烧客）：模式两态 + 参数段 + 前级读数 + 档案库 ---- */
+  chk('#setEqAutoPre', s.eq_auto_preamp !== false);
+  const hp = $('#eqHpModel');
+  if (hp) hp.value = s.eq_headphone || '';
+  paintEqAll();
 
   // ---- 多端同步（密码不回传，只告诉前端「有没有」）
   const wd = s.webdav || {};
@@ -4828,6 +5499,7 @@ function bindSettings() {
   on('#setEqOn', 'change', (e) => {
     save('eq_enabled', e.target.checked);
     engApplyEq();                // 平滑过渡，切换不当场爆音
+    paintEqPreamp();             // 补偿量跟总开关走，读数同步
     toast(e.target.checked ? '均衡器已开启' : '均衡器已关闭');
   });
   on('#setEqPreset', 'change', (e) => {
@@ -4846,6 +5518,104 @@ function bindSettings() {
       if (sel) sel.value = 'custom';
     });
   });
+
+  /* ---- 均衡器·参数模式与 AutoEq（发烧客 B/C/D 组） ---- */
+  const modeSeg = $('#eqModeSeg');
+  if (modeSeg) {
+    modeSeg.addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-mode]');
+      if (b) engSetEqMode(b.dataset.mode);
+    });
+  }
+  const pb = $('#eqParamBands');
+  if (pb) {
+    pb.addEventListener('input', (e) => {
+      const inp = e.target.closest('input[data-k]');
+      if (!inp) return;
+      const row = inp.closest('.eqb');
+      if (!row) return;
+      const i = Number(row.dataset.b);
+      const k = inp.dataset.k;
+      let val = null;
+      let txt = '';
+      if (k === 'f') {
+        val = Math.round(sliderToF(inp.value) * 10) / 10;
+        txt = eqFmtF(val);
+      } else if (k === 'q') {
+        val = Math.round(sliderToQ(inp.value) * 100) / 100;
+        txt = eqFmtQ(val);
+      } else {
+        val = Math.round(Number(inp.value) * 10) / 10;
+        txt = eqFmtDb(val);
+      }
+      engSetParamBand(i, { [k]: val });
+      const out = row.querySelector(`.eqb-val[data-v="${k}"]`);
+      if (out) out.textContent = txt;
+      paintEqPreamp();   // 段增益变了补偿量就变，前级读数同步
+    });
+    pb.addEventListener('click', (e) => {
+      const del = e.target.closest('button[data-del]');
+      if (del) {
+        engDelParamBand(Number(del.dataset.del));
+        paintEqParam();
+        paintEqPreamp();
+        return;
+      }
+      const chip = e.target.closest('button[data-t]');
+      if (chip) {
+        const row = chip.closest('.eqb');
+        if (row) {
+          engSetBandType(Number(row.dataset.b), chip.dataset.t);
+          paintEqParam();
+        }
+      }
+    });
+  }
+  on('#eqAddBand', 'click', () => {
+    if (engAddParamBand()) {
+      paintEqParam();
+      paintEqPreamp();
+    }
+  });
+  on('#eqPreDown', 'click', () => engNudgePreamp(-0.5));
+  on('#eqPreUp', 'click', () => engNudgePreamp(0.5));
+  on('#setEqAutoPre', 'change', (e) => engSetAutoPreamp(e.target.checked));
+  on('#setEqLib', 'change', (e) => {
+    if (e.target.value) engApplyEqPresetLib(e.target.value);
+  });
+  on('#eqLibDel', 'click', async () => {
+    const sel = $('#setEqLib');
+    const name = sel ? sel.value : '';
+    if (!name) { toast('先在档案库里选中一份'); return; }
+    // 与删歌单/清收藏同级：不可撤销（删了只能回 autoeq.app 重新导入），先问一句
+    if (!confirm(`删除档案「${name}」？\n删除后可在 autoeq.app 重新导入。`)) return;
+    try {
+      await post('/api/store', { op: 'eqpreset_del', payload: { name } });
+      if (state.eqpresets) delete state.eqpresets[name];
+      paintEqLib();
+      toast(`已删除档案「${name}」`);
+    } catch (e) {
+      toast('删除失败：' + e.message, 'err');
+    }
+  });
+  on('#eqImportBtn', 'click', () => {
+    const box = $('#eqImportBox');
+    if (!box) return;
+    box.hidden = !box.hidden;
+    const btn = $('#eqImportBtn');
+    if (btn) btn.textContent = box.hidden ? '导入 AutoEq' : '收起导入';
+    if (!box.hidden) box.scrollIntoView({ block: 'nearest' });   // 段卡多时盒子常在视口外
+  });
+  on('#eqImportGo', 'click', eqImportSubmit);
+
+  /* ---- 响度归一化 ---- */
+  on('#setLoudMode', 'change', (e) => {
+    save('loudness_mode', e.target.value);
+    engSetLoudness(state.playing, null, true);   // 立刻听感：开=预置增益，关=回原样
+    toast(e.target.value === 'track' ? '响度归一化：实测过的歌自动预置增益' : '响度归一化已关闭');
+  });
+  on('#setLoudDown', 'click', () => loudNudgeTarget(-1));
+  on('#setLoudUp', 'click', () => loudNudgeTarget(1));
 }
 
 /* ------------------------------------------------------------------ 歌词 */
@@ -4977,15 +5747,17 @@ async function doSearch(text, opts = {}) {
     render();
     if (!state.items.length) toast('两个来源都没搜到，换个关键词试试');
   } catch (e) {
+    /* 失败留在页面里（in-place）：toast 会自己消失，用户回来只剩一个空搜索页 */
     state.loading = false;
+    state.q.error = e.message || '网络请求失败';
     render();
-    toast('搜索失败：' + e.message, 'err');
   }
 }
 
 async function loadMore() {
   if (state.loading) return;
   state.loading = true;
+  state.q.moreErr = '';               // 重试前清掉上一轮错误
   try {
     const page = ++state.q.page;
     const d = await rpc('search', { keyword: state.q.keyword, page, size: 20 });
@@ -4996,7 +5768,9 @@ async function loadMore() {
     state.q.more = !!d.has_more;
     state.q.merged = state.items.some((it) => it.alts && it.alts.length);
   } catch (e) {
-    toast('加载失败：' + e.message, 'err');
+    /* 页底加载失败不走 toast：结果还挂在页面上，错误写在加载按钮旁边并给重试 */
+    state.q.page -= 1;                // 页码回退，重试才是同一页
+    state.q.moreErr = e.message || '网络请求失败';
   }
   state.loading = false;
   render();
@@ -5525,6 +6299,9 @@ document.addEventListener('click', async (e) => {
     case 'lrc-retry':                       // 歌词失败后的就地重试（NP 层 / 桌面歌词共用）
       if (state.playing) loadNpLyric(state.playing);
       else toast('当前没有在播的歌');
+      break;
+    case 'search-retry':                    // 搜索失败后的就地重试（对齐歌词错误态模式）
+      doSearch(state.q.keyword);
       break;
     case 'resume': {
       const lt = pickLastTrack();
@@ -6107,6 +6884,8 @@ async function refreshStore() {
     state.playlists = d.playlists || [];
     state.recent = d.recent || [];
     state.downloads = d.downloads || [];
+    state.loudness = d.loudness || {};   // 发烧客：已实测响度表 {platform:id: {lufs, at}}
+    state.eqpresets = d.eqpresets || {}; // 发烧客：参数 EQ 档案库 {name: {bands, preamp, at}}
     state.platform = state.settings.platform || 'kuwo';
     state.quality = state.settings.quality || 'best';
     state.mode = state.settings.mode || 'order';
@@ -6118,6 +6897,8 @@ async function refreshStore() {
     $('#modeBtn').title = m.label;
     $('#modeBtn').classList.toggle('on', state.mode !== 'order');
     engBoot();                 // 设置到手才开始搭音频图（要读 engine_v2 / eq_* 决定取舍）
+    engApplyEq(true);          // 图已在（同步合并后 refreshStore）：eq_* 热生效
+    engSetLoudness(state.playing, null, true);   // 响度设置同理跟一次
   } catch (e) {
     toast('读取本地数据失败：' + e.message, 'err');
   }
@@ -6570,6 +7351,9 @@ function karBuild(stream) {
       KAR.ringN = 0;
       KAR.userHist = [];
       micTap.onaudioprocess = (e) => {
+        /* 关闭层时 ringBuf 先被清 null、ctx.close() 还没走完：音频线程可能再进一次回调，
+           不挡就 Uncaught TypeError（verify_karaoke U11 偶发复现过） */
+        if (!KAR.ringBuf) return;
         const d = e.inputBuffer.getChannelData(0);
         let s = 0;
         for (let i = 0; i < d.length; i += 1) s += d[i] * d[i];
