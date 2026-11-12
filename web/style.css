@@ -1623,10 +1623,12 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
 }
 .k-fader:hover::-webkit-slider-thumb{background:var(--accent)}
 /* —— 模式行：原唱/伴唱 segmented + 变调步进 + 调音按钮 —— */
-.k-seg{display:flex;background:var(--card-2);border:1px solid var(--line);border-radius:9px;padding:2px;gap:2px}
-.k-seg button{height:26px;padding:0 14px;border-radius:7px;font-size:12px;color:var(--muted);cursor:pointer;transition:.13s}
-.k-seg button:hover{color:var(--ink)}
-.k-seg button.on{background:var(--accent-dim);color:var(--accent)}
+/* segmented 两态基类：K 歌坞与设置抽屉均衡器共用一份（.set-seg 是 EQ 区的别名，
+   拆开必漂移） */
+.k-seg,.set-seg{display:flex;background:var(--card-2);border:1px solid var(--line);border-radius:9px;padding:2px;gap:2px}
+.k-seg button,.set-seg button{height:26px;padding:0 13px;border-radius:7px;font-size:12px;color:var(--muted);cursor:pointer;transition:.13s}
+.k-seg button:hover,.set-seg button:hover{color:var(--ink)}
+.k-seg button.on,.set-seg button.on{background:var(--accent-dim);color:var(--accent)}
 .k-step{display:flex;align-items:center;background:var(--card-2);border:1px solid var(--line);border-radius:9px;padding:2px;gap:1px}
 .k-pitch-btn{width:26px;height:26px;border-radius:7px;font-size:14px;color:var(--ink-2);cursor:pointer;transition:.13s}
 .k-pitch-btn:hover{background:var(--hover-2);color:var(--ink)}
@@ -2019,6 +2021,72 @@ html[data-chrome="on"]:not([data-platform="android"]) .np-layer{top:var(--wc-tit
   .np-lyric{padding-top:4vh;padding-bottom:18vh;font-size:clamp(19px,2.6vw,26px)}
   .np-dock{padding-bottom:10px}
   .np-head{padding-top:12px}
+}
+
+/* ---------------------------------------------------------------- 响度归一化 */
+/* 目标响度步进器：沿用 K 歌变调步进的语汇（小方钮 + 等宽读数），控件带读数 */
+.loud-target{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+.loud-tbtn{width:26px;height:26px;border:1px solid var(--line);border-radius:7px;
+  background:transparent;font-size:14px;color:var(--ink-2);cursor:pointer;transition:.13s}
+.loud-tbtn:hover{background:var(--hover-2);color:var(--ink)}
+.loud-tbtn:active{transform:scale(.94)}
+.loud-tval{font-size:12px;color:var(--ink);min-width:76px;text-align:center}
+
+/* ---------------------------------------------------------------- 均衡器·参数模式（发烧客 P2） */
+/* segmented 见 .k-seg 基类（K 歌坞共基，防漂移） */
+
+/* 参数段卡片：一块一段，类型 chips + 三条带读数的横推子（控件带标签读数，
+   对齐 K 歌调音台）；增删改即时听感，落盘走 350ms 防抖 */
+.eq-params{display:flex;flex-direction:column;gap:8px;padding:12px 2px 4px;
+  border-top:1px solid var(--line);margin-top:4px}
+.eqb{background:var(--card-2);border:1px solid var(--line);border-radius:9px;padding:9px 10px 7px}
+.eqb-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}
+.eqb-del{width:22px;height:22px;border-radius:6px;border:1px solid transparent;background:transparent;
+  color:var(--muted);font-size:13px;line-height:1;cursor:pointer;transition:.13s;flex:0 0 auto}
+.eqb-del:hover{color:var(--accent);border-color:var(--accent)}
+.eqb-row{display:flex;align-items:center;gap:8px;padding:3px 0}
+.eqb-lab{font-size:11px;color:var(--muted);flex:0 0 30px}
+.eqb-row input[type=range]{flex:1 1 auto;min-width:0}
+.eqb-val{font-size:10.5px;color:var(--ink-2);flex:0 0 52px;text-align:right;
+  font-variant-numeric:tabular-nums}
+.eqb-fader{height:4px;border-radius:2px}
+.eqb-fader::-webkit-slider-thumb{
+  width:12px;height:12px;border-radius:50%;background:var(--ink);
+  box-shadow:0 1px 4px rgba(0,0,0,.45);
+}
+.eqb-fader:hover::-webkit-slider-thumb{background:var(--accent)}
+.eq-empty{font-size:11.5px;color:var(--muted);text-align:center;padding:16px 2px;margin:0}
+
+/* 前级读数：内容比响度目标（−18 LUFS）长一截，不吃 .loud-tval 的 76px 定宽，
+   两个步进器各自按内容收缩，避免同页两个组件宽度对不上 */
+.eq-pre-val{font-size:12px;color:var(--ink);text-align:center;white-space:nowrap}
+
+/* AutoEq 导入盒：型号 + 粘贴框 + 解析按钮，数据来源署名放页脚 */
+.eq-import{border:1px solid var(--line);border-radius:9px;background:var(--card-2);
+  padding:10px 10px 8px;margin-top:10px}
+.eq-import textarea{
+  width:100%;min-width:0;font-family:ui-monospace,Consolas,monospace;font-size:11px;
+  line-height:1.55;background:var(--card);border:1px solid var(--line);border-radius:7px;
+  color:var(--ink);padding:8px;outline:0;resize:vertical;
+}
+.eq-import textarea:focus{border-color:var(--line-2)}
+.eq-import-tip{font-size:10.5px;color:var(--muted);line-height:1.6;margin:8px 0 2px}
+
+@media (max-width:480px){
+  /* 手机段触点抬到 ≥28px（视觉不变，命中区加高 —— np-seek「16px 拇指裹 3px 轨」
+     同一范式）：设置抽屉窄，参数段卡片是本次新增控件里触点最密的地方 */
+  .set-seg button{height:30px;padding:0 12px}
+  .km-chips.eqb-type button{height:30px}
+  .loud-tbtn{width:30px;height:30px}
+  .eqb{padding:7px 8px 5px}
+  .eqb-del{width:28px;height:28px}
+  .eqb-row input[type=range]{height:24px;background:transparent}
+  .eqb-row input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:var(--hover-2)}
+  .eqb-row input[type=range]::-webkit-slider-thumb{width:16px;height:16px;margin-top:-6px}
+  /* 主动作（加一段/导入）分掉整行宽度；删档案在档案库行内，不参与 */
+  #eqParamPane .set-actions .btn{flex:1 1 auto}
+  /* 徽标尾巴（96kHz/24bit）别把 390px 展开页的标题挤折行 */
+  .np-spec{max-width:132px;overflow:hidden;text-overflow:ellipsis}
 }
 
 /* ---------------------------------------------------------------- 动效降级 */
