@@ -290,30 +290,41 @@ def pack():
 # diff（dry-run，一个字节都不写）
 # --------------------------------------------------------------------------
 def _fav_key(f):
+    if not isinstance(f, dict):
+        return ("", "", None)
     return ((f.get("kind") or "song"), str(f.get("id")), f.get("platform"))
 
 
 def _item_key(i):
+    if not isinstance(i, dict):
+        return ("", "")
     return (str(i.get("platform") or ""), str(i.get("id") or ""))
 
 
+def _dicts(seq):
+    """只留对象项：远端包被同步盘截断 / 手改后可能混进 null 和字符串。"""
+    return [x for x in (seq or []) if isinstance(x, dict)] if isinstance(seq, list) else []
+
+
 def _same_content(a, b):
-    ka = sorted(_item_key(x) for x in (a.get("items") or []))
-    kb = sorted(_item_key(x) for x in (b.get("items") or []))
+    ka = sorted(_item_key(x) for x in _dicts(a.get("items")))
+    kb = sorted(_item_key(x) for x in _dicts(b.get("items")))
     return ka == kb
 
 
 def diff(remote):
     """把远端包和本机数据比一比，只描述差异，不改任何本地数据。"""
+    if not isinstance(remote, dict):
+        raise DavError("远端的 elysium-sync.json 不是有效对象（可能被同步盘截断）")
     store = _BOUND["store"]
     loc = store.data
-    loc_favs = loc.get("favorites") or []
-    loc_pls = loc.get("playlists") or []
+    loc_favs = _dicts(loc.get("favorites"))
+    loc_pls = _dicts(loc.get("playlists"))
     loc_lt = (loc.get("settings") or {}).get("last_track")
 
     # ---- 收藏：只认「远端多了什么」，本地的一律不动（不静默删）
     have = {_fav_key(f) for f in loc_favs}
-    fav_add = [f for f in (remote.get("favorites") or [])
+    fav_add = [f for f in _dicts(remote.get("favorites"))
                if _fav_key(f) not in have]
 
     # ---- 歌单：按 id 对齐，同名不同 id 单独列冲突
@@ -323,15 +334,15 @@ def diff(remote):
         name_to_local.setdefault(str(p.get("name") or ""), []).append(p)
 
     pl_new, pl_fill, pl_conflict = [], [], []
-    for rp in (remote.get("playlists") or []):
+    for rp in _dicts(remote.get("playlists")):
         rid = rp.get("id")
         local = by_id.get(rid)
         if local is not None:
-            have_items = {_item_key(x) for x in (local.get("items") or [])}
-            extra = [x for x in (rp.get("items") or []) if _item_key(x) not in have_items]
+            have_items = {_item_key(x) for x in _dicts(local.get("items"))}
+            extra = [x for x in _dicts(rp.get("items")) if _item_key(x) not in have_items]
             if extra:
                 pl_fill.append({"id": rid, "name": rp.get("name"),
-                                "add": len(extra), "total": len(rp.get("items") or []),
+                                "add": len(extra), "total": len(_dicts(rp.get("items"))),
                                 "items": extra})
             continue
         same_name = name_to_local.get(str(rp.get("name") or "")) or []
@@ -341,14 +352,14 @@ def diff(remote):
         if same_name:
             pl_conflict.append({
                 "name": rp.get("name"),
-                "remote": {"id": rid, "count": len(rp.get("items") or []),
-                           "items": rp.get("items") or []},
+                "remote": {"id": rid, "count": len(_dicts(rp.get("items"))),
+                           "items": _dicts(rp.get("items"))},
                 "local": {"id": same_name[0].get("id"),
-                          "count": len(same_name[0].get("items") or [])},
+                          "count": len(_dicts(same_name[0].get("items")))},
             })
             continue
         pl_new.append({"id": rid, "name": rp.get("name"),
-                       "count": len(rp.get("items") or []), "items": rp.get("items") or []})
+                       "count": len(_dicts(rp.get("items"))), "items": _dicts(rp.get("items"))})
 
     # ---- 进度：at 大者胜；只是告知，用户勾了才切
     lt_take = None

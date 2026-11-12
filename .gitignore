@@ -26,6 +26,9 @@ _art/*.md
 _tmp_*
 _tmp/
 
+# 边缘测试报告是 verify_edge.py 每次重跑生成的产物
+edge_report.md
+
 # 编辑器 / 代理工具生成的会话计划，不属于项目
 .zcode/
 .codex/

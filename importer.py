@@ -38,6 +38,9 @@ _CAND_MAX = 600
 _HTTP_TIMEOUT = 20
 _EXT_RE = r"\.(?:mp3|flac|wav|m4a|ape|ogg|wma|aac|mp4|kgm)"
 _LINE_NO_RE = re.compile(r"^\s*\d+\s+")
+# 单行长度上限。正常歌单条目不会超过 2KB（Windows 路径上限才 260），
+# 超过它的基本是误贴的长文本 / base64 / 二进制 —— 交给下面的正则会病态回溯。
+_MAX_LINE = 2048
 _URL_RE = re.compile(r"https?://[^\s\u4e00-\u9fff<>\"'）)】\]]+", re.I)
 
 
@@ -224,6 +227,42 @@ def _track(name, artist, raw="", duration=0):
             "raw": str(raw or "").strip(), "duration": int(duration or 0)}
 
 
+def _looks_path(s):
+    """这行像文件路径 / 文件名吗（m3u8、KGL 的每一行都是）。"""
+    t = str(s or "").strip().replace("\\", "/")
+    return (t.startswith("/") or t.startswith("./") or t.startswith("../")
+            or bool(re.match(r"^[A-Za-z]:/", t))
+            or bool(re.search(_EXT_RE + r"$", t, re.I)))
+
+
+def _path_stem(s):
+    """文件名行 -> 纯曲名：剥目录、剥音频扩展名、砍掉 KGL 行尾元数据。
+
+    只对「看起来是路径 / 文件名」的行剥目录 —— 否则「AC/DC - Back in Black」
+    这类带斜杠的歌名会被砍成后半截。
+    """
+    t = str(s or "").strip().replace("\\", "/")
+    # 完整 KGL 行是「歌手 - 歌名.mp3 . 大小 码率 ... 歌词路径 ...」：
+    # 第一处音频扩展名之后的都是元数据。限制 400 字符内，避免长行回溯。
+    m = re.search(_EXT_RE, t, re.I)
+    if m and m.start() <= 400:
+        t = t[:m.end()]
+    if _looks_path(t):
+        t = t.rsplit("/", 1)[-1]
+    t = re.sub(r"^[A-Za-z]:", "", t).strip()
+    t = re.sub(_EXT_RE + r"$", "", t, flags=re.I).strip()
+    return t
+
+
+def _split_stem(stem):
+    """「A - B」拆成 (歌名, 歌手)。默认按 KGL 的「歌手 - 歌名」；
+    反过来的解释交给 alt + 匹配阶段投票，这里不猜。"""
+    parts = re.split(r"\s+[-–—]\s+|\s*[-–—]\s*", stem, maxsplit=1)
+    if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+        return parts[1].strip(), parts[0].strip()
+    return str(stem or "").strip(), ""
+
+
 # --------------------------------------------------------------------------
 # A 通道：本地文件 / 文本
 # --------------------------------------------------------------------------
@@ -262,6 +301,8 @@ def parse_text(text, filename=""):
                        if re.search(r"artist|singer|艺人|歌手", h, re.I)), 1)
             tracks = []
             for ln in lines:
+                if len(ln) > _MAX_LINE:
+                    continue
                 cols = re.split(r"[,\t]", ln)
                 if len(cols) <= max(ti, ai):
                     continue
@@ -271,28 +312,42 @@ def parse_text(text, filename=""):
             return _dedup(tracks)
 
     tracks = []
-    for ln in lines:
-        ln = _LINE_NO_RE.sub("", ln.strip())
+    pending = None          # #EXTINF 的元数据，等下一行的文件名来配对
+    for raw_ln in lines:
+        if len(raw_ln) > _MAX_LINE:
+            # 超长单行不是歌单条目：放进去会让下面那条正则病态回溯
+            # （实测 20KB=1.3s、100KB=33s、1MB>120s），导入预览直接卡死。
+            continue
+        ln = _LINE_NO_RE.sub("", raw_ln.strip())
         if not ln:
             continue
         if ln.startswith("#"):
-            m = re.match(r"#EXTINF\s*:\s*-?\d+\s*,\s*(.*)", ln, re.I)
-            if not m:
-                continue
-            ln = m.group(1).strip()
-        if not ln or re.fullmatch(r"[\d\s.,:]+", ln):
+            m = re.match(r"#EXTINF\s*:\s*(-?\d+)?\s*,\s*(.*)", ln, re.I)
+            if m:
+                title = m.group(2).strip()
+                if title:
+                    name, artist = _split_stem(_path_stem(title))
+                    pending = {"name": name, "artist": artist,
+                               "dur": max(0, int(m.group(1) or 0)), "raw": ln}
+            continue                    # #EXTM3U / #EXTGRP 等指令一律跳过
+        if re.fullmatch(r"[\d\s.,:]+", ln):
             continue
-        # 去掉文件名扩展名（KGL 每行是一个音频文件名）
-        hit = re.search(r"(.+?" + _EXT_RE + r")\b", ln, re.I)
-        stem = re.sub(_EXT_RE + r"$", "", hit.group(1), flags=re.I).strip() if hit else ln
-        stem = re.sub(r"^[A-Za-z]:\\.*?[\\/]", "", stem).strip()   # 去掉本地路径前缀
-        parts = re.split(r"\s+[-–—]\s+|\s*[-–—]\s*", stem, maxsplit=1)
-        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
-            a, b = parts[0].strip(), parts[1].strip()
-            # 默认按 KGL 的「歌手 - 歌名」；alt 给「歌名 - 歌手」
-            t = _track(b, a, ln)
+        if pending is not None and _looks_path(ln):
+            # m3u8 用「#EXTINF 一行 + 文件名一行」描述一首歌。两行各出一条
+            # 会重复，而且文件名那条还会带着目录（/xx/晴天）；用 EXTINF 的
+            # 元数据 + 文件行的上下文合成一条。
+            t = _track(pending["name"] or _path_stem(ln), pending["artist"],
+                       pending["raw"], pending["dur"])
+            pending = None
         else:
-            t = _track(stem, "", ln)
+            if pending is not None:
+                # EXTINF 后面不是文件行（畸形 m3u8）：它自己成一条，别静默丢
+                tracks.append(_with_alt(
+                    _track(pending["name"], pending["artist"],
+                           pending["raw"], pending["dur"]), "artist-first"))
+                pending = None
+            name, artist = _split_stem(_path_stem(ln))
+            t = _track(name, artist, ln)
         tracks.append(_with_alt(t, "artist-first"))
     return _dedup(tracks)
 
