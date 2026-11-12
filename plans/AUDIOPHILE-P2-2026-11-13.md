@@ -12,7 +12,7 @@
 | --- | --- | --- | --- |
 | A-1 | `eq_mode` | `'graphic'` \| `'parametric'`，默认 graphic | 白名单外丢弃 |
 | A-2 | `eq_bands` | ≤10 段 `[{type,f,q,db}]`，type: peaking/lowshelf/highshelf | f∈[20,20000]、q∈[0.1,10]、db∈[-12,12]，**isfinite 硬墙**（NaN 落 data.json = 整库报废，同 loudness/pitch 铁律）；单段非法丢单段，非数组整表丢弃 |
-| A-3 | `eq_preamp` | 前级增益 dB，默认 0 | `_SETTING_NUM` 钳 [-12,12] |
+| A-3 | `eq_preamp` | 前级增益 dB，默认 0 | 钳 [-12,12]，**保留一位小数**（AutoEq 解析值 -6.5 这类小数，走 `_SETTING_NUM` 的 int 口径会被截断；2026-11-13 起为独立分支） |
 | A-4 | `eq_auto_preamp` | 自动前级补偿开关，默认 true | 非 bool 丢弃 |
 | A-5 | `eq_headphone` | AutoEq 导入的耳机型号名（仅显示用） | strip + 截断 80 字符 |
 
@@ -28,13 +28,14 @@
 | B-4 | 段数增减 | `engApplyEq` | 固定 10 节点不动（加/删段只是重配），不做图的动态增删 |
 | B-5 | 响度预留 | `engApplyEq` | 2b 的响度增益落 master，与 preamp 相加后**上限钳 0dB**（防叠加削波）；本期只留变量位与注释 |
 
-## C. AutoEq 导入（前端）
+## C. AutoEq 导入（C-1 后端已做，C-2/C-3 前端）
 
 | ID | 项 | 做法 |
 | --- | --- | --- |
-| C-1 | 文本解析器 | APO/parametric 格式：`Preamp: -3.5 dB` + `Filter N: ON PK/LS/HS Fc 105 Hz Gain 6.5 dB Q 0.71`，逐行正则；PK→peaking、LS→lowshelf、HS→highshelf；≤10 段（超出的截断并提示）；**一条都解不出来 = 报错不落盘** |
+| C-1 | 文本解析器 | **后端已落地（2026-11-13）**：`parse_autoeq_apo(text)` + POST `/api/eq/parse`。APO/parametric 格式：`Preamp: -3.5 dB` + `Filter N: ON PK/LS/HS Fc 105 Hz Gain 6.5 dB Q 0.71`，逐行正则；PK→peaking、LS→lowshelf、HS→highshelf；≤10 段（超出截断并报 `truncated` 数）；**一条都解不出来 = 400 报错不落盘**。解析放后端的原因：段表校验口径只写 main.py 一处（`_clean_bands` 与 settings `eq_bands` 同源），不在 JS 里复刻第二遍。前端 C-2 只 POST 文本拿 `{preamp, bands, total, dropped, truncated}` |
 | C-2 | 入口 UI | 均衡器区「导入 AutoEq」：粘贴框 + 型号输入（填 `eq_headphone`）+ 导入；数据来源 autoeq.app（CC-BY-4.0 署名放设置页脚注） |
-| C-3 | 导入后 | `eq_mode=parametric`、`eq_preamp=解析值`、`eq_preset='autoeq'`（`EQ_LABEL` 增 autoeq:导入） |
+| C-3 | 导入后 | `eq_mode=parametric`、`eq_preamp=解析值`、`eq_preset='autoeq'`（`EQ_LABEL` 增 autoeq:导入）；顺手 `eqpreset_set` 存一份进预设库，换耳机一键切回 |
+| C-4 | 预设库存取（后端已落地） | store op `eqpreset_set` / `eqpreset_del`：`{name: {bands, preamp, at}}`，name strip 截 80、段表走 `_clean_bands` 同源校验（NaN 硬墙）、preamp 钳 [-12,12] 保留一位小数、空名或空段表不写；`EQPRESET_MAX 50` 超限按 at 淘汰最旧（与 LOUDNESS_MAX 同策略）；列表随 `load` 快照带出，WebDAV 同步免费搭车 |
 
 ## D. UI（设置抽屉均衡器区升级，遵 UI 审美硬标准）
 
@@ -56,13 +57,14 @@
 ## 验收
 
 ```bash
-# 后端（A 组，立即）：
-python verify_audiophile.py        # 增 H 组：A-1~A-5 全部校验路径 + 老键 eq_gains 回归，全绿
+# 后端（A 组 + C 组半边，均已落地）：
+python verify_audiophile.py        # H 组 A-1~A-5 + I 解析器 / J 预设库 / K HTTP 端到端，全绿
 python verify_edge.py              # E 组（store 脏数据）不回归
+python verify_import.py --no-ui    # 31/31；verify_sync 26/26（eqpresets 随同步搭车）
 # 前端（B/C/D 组，UI 收尾后）：verify_engine 风格 selenium
 #   - 参数模式拖推子 → biquad type/frequency/Q/gain 实测变化
 #   - 自动前级数值：bands [6,0,...] → preamp -6
-#   - AutoEq 解析：好文本 / 垃圾 / 超 10 段 / preamp 行
+#   - AutoEq 导入 UI：POST /api/eq/parse 好/坏文本 + eqpreset_set 存档
 #   - 老用户回归：eq_mode 缺省 graphic + eq_gains 照旧（verify_np / verify_ui 不破坏）
 python verify_np.py && python verify_ui.py
 ```
@@ -71,8 +73,9 @@ python verify_np.py && python verify_ui.py
 
 ## 分工与顺序
 
-1. **后端 A 组契约 + H 组验证**（后端侧做，不碰 web/*——那是前端 WIP，提交时按文件归组）
-2. **前端 B/C/D**（UI 优化收尾后动工）
+1. **后端 A 组契约 + H 组验证**（已落地 856987a）+ **C 组半边：C-1 解析器 + C-4 预设库**（已落地，
+   I/J/K 组验证；不碰 web/*——那是前端 WIP，提交时按文件归组）
+2. **前端 B/C-2/C-3/D**（UI 优化收尾后动工；C-2/C-3 只 POST 文本 + 存预设，不再自己解析）
 3. **E 组 2b**（响度/徽标，B 组落地后）
 
 ## 落地记录
@@ -81,3 +84,10 @@ python verify_np.py && python verify_ui.py
   isfinite 硬墙 + 逐段校验 + 截 10 段 / eq_auto_preamp 只收 bool / eq_headphone 截 80）+
   `_SETTING_NUM` 增 `eq_preamp` 钳 [-12,12]；verify_audiophile 增 H 组 16 例，**54/54 全绿**
   （含老 eq_gains 键回归，详见 `audiophile_report.md`）。
+- 2026-11-13 后端 C 组半边（解析器 + 预设库）：`_clean_bands(v, cap)` 从 `_clean_settings` 抽出
+  （settings 与 AutoEq 解析一套口径；语义升级为「先收合法段再截断」，前面段非法不占后面段名额）；
+  `parse_autoeq_apo` + POST `/api/eq/parse`（纯解析不落盘，400 带可展示错误文案）；`eqpresets`
+  预设库 + `eqpreset_set/eqpreset_del`（C-4，上限 50 按 at 淘汰，`_prune_by_at` 与 loudness 共用）；
+  `eq_preamp` 迁出 `_SETTING_NUM` 改一位小数（AutoEq 解析值 -6.5 不再被截成 -6）；verify_audiophile
+  增 I/J/K 三组 41 例，**95/95 全绿**；回归 edge 91 PASS/0 FAIL/1 WARN、import 31/31、sync 26/26
+  基线不变。
