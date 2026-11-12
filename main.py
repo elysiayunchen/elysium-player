@@ -40,7 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "Elysium"
 APP_TITLE = "Elysium - 在线音乐"
-VERSION = "2.2.0-beta2"
+VERSION = "2.3.0-beta1"
 _BASE_URL = ""            # main() 里落值；桌面歌词小窗据此建页
 _LYRIC_WIN = None         # 桌面歌词小窗句柄（pywebview window 或 None）
 LEGACY_NAME = "FlacMusic"
@@ -351,7 +351,9 @@ def _clean_settings(payload):
                 out[k] = v
             continue
         if k == "eq_headphone":
-            if isinstance(v, str) and v.strip():
+            # 型号名仅显示用。空串是合法状态（用户清掉了型号）：显式清空要落盘，
+            # 以前当脏数据丢弃会让前端清空后重启、旧型号又复活回 UI。
+            if isinstance(v, str):
                 out[k] = v.strip()[:80]
             continue
         rule = _SETTING_NUM.get(k)
