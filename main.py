@@ -7,6 +7,7 @@ FlacMusic - 无损音乐桌面客户端
         /                  静态前端（web/）
         /api/rpc           转发到 flac.music.hi.cn/ajax.php（绕开 CORS）
         /api/store         本地用户数据（收藏 / 历史 / 下载记录 / 设置）
+        /api/eq/parse      AutoEq APO 文本解析（发烧客参数 EQ 导入，只解析不落盘）
         /api/downloads*    下载队列（并发、速度、取消、重试、自动降级）
         /api/save-lyric    保存 .lrc
     pywebview 开窗指向本地服务。
@@ -146,6 +147,8 @@ DEFAULT_STORE = {
     "hours": {},                    # 24 小时时段分布（累计）{"0"~"23": 次数}
     "feedback": {},                 # 显式反馈 {platform:id: {verdict, at}}
     "loudness": {},                 # 响度扫描 {platform:id: {lufs, tp, lra, at}}，上限 LOUDNESS_MAX
+    "eqpresets": {},                # 参数 EQ 预设库 {name: {bands, preamp, at}}，
+                                    # AutoEq 导入的耳机档案 / 用户自存调音，上限 EQPRESET_MAX
     "taste_note": "",               # 用户自述口味（旧字段，保留兼容，前端已不再暴露）
     "taste_genres": [],             # 用户手动选中的风格 id 列表
     "playlists": [],                # 用户自建歌单 [{id, name, created_at, updated_at, items:[...]}]
@@ -261,8 +264,47 @@ _SETTING_NUM = {
     "lrc_offset_ms": (-10000, 10000),
     "crossfade_ms": (0, 2000),
     "loudness_target": (-40, -6),   # 归一化目标 LUFS：别让用户把「目标」设成啸叫
-    "eq_preamp": (-12, 12),          # 参数 EQ 前级：越界即丢给 _SETTING_NUM 钳
 }
+
+
+def _clean_bands(v, cap=10):
+    """参数 EQ 段表清洗，settings 写入与 AutoEq 解析共用同一套口径。
+
+    NaN/inf 是硬墙：落进 data.json 后 json.dump 写出非法字面量，下次启动
+    整个数据文件报废（与 loudness/pitch 同一条铁律）。单段非法只丢那一段，
+    整表不是数组返回 None。返回 (合法段表, 丢弃数, 截断数)——丢弃 = 逐段
+    校验没过的，截断 = 合法但超出 cap 的；先收合法段再截断，前面的段非法
+    不占后面合法段的名额。
+    """
+    if not isinstance(v, list):
+        return None, 0, 0
+    bands, dropped, truncated = [], 0, 0
+    for b in v:
+        if len(bands) >= cap:
+            truncated += 1
+            continue
+        if not isinstance(b, dict):
+            dropped += 1
+            continue
+        try:
+            f = float(b.get("f"))
+            q = float(b.get("q"))
+            db = float(b.get("db"))
+        except (TypeError, ValueError):
+            dropped += 1
+            continue
+        t = str(b.get("type") or "peaking")
+        if t not in ("peaking", "lowshelf", "highshelf"):
+            dropped += 1
+            continue
+        if not (math.isfinite(f) and 20 <= f <= 20000
+                and math.isfinite(q) and 0.1 <= q <= 10
+                and math.isfinite(db) and -12 <= db <= 12):
+            dropped += 1
+            continue
+        bands.append({"type": t, "f": round(f, 1),
+                      "q": round(q, 3), "db": round(db, 1)})
+    return bands, dropped, truncated
 
 
 def _clean_settings(payload):
@@ -289,30 +331,20 @@ def _clean_settings(payload):
                 out[k] = v
             continue
         if k == "eq_bands":
-            # 参数 EQ 段表。NaN/inf 硬墙：落进 data.json 后 json.dump 写出非法
-            # 字面量，下次启动整个数据文件报废（与 loudness/pitch 同一条铁律）。
-            # 单段非法只丢那一段，整表不是数组才整表丢弃。
-            if isinstance(v, list):
-                bands = []
-                for b in v[:10]:
-                    if not isinstance(b, dict):
-                        continue
-                    try:
-                        f = float(b.get("f"))
-                        q = float(b.get("q"))
-                        db = float(b.get("db"))
-                    except (TypeError, ValueError):
-                        continue
-                    t = str(b.get("type") or "peaking")
-                    if t not in ("peaking", "lowshelf", "highshelf"):
-                        continue
-                    if not (math.isfinite(f) and 20 <= f <= 20000
-                            and math.isfinite(q) and 0.1 <= q <= 10
-                            and math.isfinite(db) and -12 <= db <= 12):
-                        continue
-                    bands.append({"type": t, "f": round(f, 1),
-                                  "q": round(q, 3), "db": round(db, 1)})
+            # 参数 EQ 段表，校验口径全在 _clean_bands（AutoEq 解析同源）。
+            bands = _clean_bands(v)[0]
+            if bands is not None:
                 out[k] = bands
+            continue
+        if k == "eq_preamp":
+            # 参数 EQ 前级保留一位小数：AutoEq 解析值是 -6.5 这类小数，走
+            # _SETTING_NUM 的 int 口径会被截成 -6，跟解析值、UI 读数对不上。
+            try:
+                n = float(v)
+            except (TypeError, ValueError):
+                continue                # 非法值不落盘，保留原值
+            if math.isfinite(n):        # NaN/inf 硬墙，与段表同一条铁律
+                out[k] = round(max(-12.0, min(12.0, n)), 1)
             continue
         if k == "eq_auto_preamp":
             if isinstance(v, bool):
@@ -343,6 +375,94 @@ def _int_setting(cfg, key, default):
         return default
 
 
+# --------------------------------------------------------------------------
+# AutoEq 导入解析（plans/AUDIOPHILE-P2 C-1，解析放后端：段表校验口径只写
+# main.py 一处，前端粘贴文本拿到的是可直接落 settings 的 eq_bands，不在
+# JS 里复刻第二遍）。文本格式 = Equalizer APO / autoeq.app 的
+# ParametricEQ.txt：
+#     Preamp: -6.5 dB
+#     Filter 1: ON PK Fc 31 Hz Gain 7.9 dB Q 0.70
+#     Filter 8: ON HS Fc 10000 Hz Gain -2.0 dB Q 0.70
+# PK/LS/HS → peaking/lowshelf/highshelf；其余行（注释 / 空行 / 其它工具的
+# 导出段落）跳过；None 占位与 OFF 滤波器是作者主动空着 / 停用的，不算数据。
+# --------------------------------------------------------------------------
+_AUTOEQ_PREAMP_RE = re.compile(
+    r"^preamp\s*:\s*([+-]?\d+(?:\.\d+)?)\s*dB\s*$", re.I)
+_AUTOEQ_FILTER_RE = re.compile(
+    r"^filter\s*\d+\s*:\s*(on|off)\s+(\S+)"
+    r"\s+fc\s+(\d+(?:\.\d+)?)\s*(hz|khz)?"
+    r"(?:\s+gain\s+([+-]?\d+(?:\.\d+)?)\s*dB)?"
+    r"(?:\s+q\s+(\d+(?:\.\d+)?))?\s*$", re.I)
+_AUTOEQ_TYPES = {"PK": "peaking", "LS": "lowshelf", "HS": "highshelf"}
+AUTOEQ_TEXT_MAX = 65536          # 正则先限长（verify_edge 同款教训）
+
+
+def parse_autoeq_apo(text):
+    """解析 AutoEq 导出的 APO 参数 EQ 文本，返回可直接落 settings 的段表。
+
+    返回 {"preamp": dB(已按 eq_preamp 口径钳 [-12,12])，"bands": [...],
+          "total": 识别出的滤波器行数, "dropped": 校验没过的段数,
+          "truncated": 超 10 段被截掉的合法段数}。
+    一条滤波器都解不出来、或识别到的段全部无效时抛 ValueError —— 宁可不
+    导入，不给假情报（plans/AUDIOPHILE-P2 C-1）。
+    """
+    if not isinstance(text, str):
+        raise ValueError("导入内容必须是文本")
+    if len(text) > AUTOEQ_TEXT_MAX:
+        raise ValueError("导入内容过长（上限 %d 字符）" % AUTOEQ_TEXT_MAX)
+    preamp = 0.0
+    candidates = []                  # 段 dict 或 None（None = 解析到但校验必挂）
+    total = 0
+    for line in text.lstrip("\ufeff").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = _AUTOEQ_PREAMP_RE.match(line)
+        if m:
+            try:
+                v = float(m.group(1))
+                if math.isfinite(v):
+                    preamp = v
+            except ValueError:
+                pass
+            continue
+        m = _AUTOEQ_FILTER_RE.match(line)
+        if not m:
+            continue
+        state, ftype, fc, unit, gain, q = m.groups()
+        if state.lower() != "on":
+            continue                  # OFF = 作者主动停用，不是要导入的数据
+        ftype = ftype.upper()
+        if ftype == "NONE":
+            continue                  # 老版 AutoEq 的空槽占位行
+        total += 1
+        if ftype not in _AUTOEQ_TYPES:
+            candidates.append(None)   # LP/HP/BP/NO 等本应用不支持的类型
+            continue
+        try:
+            f = float(fc) * (1000.0 if (unit or "hz").lower() == "khz" else 1.0)
+            db = float(gain) if gain is not None else 0.0
+            qv = float(q) if q is not None else 1.0
+        except ValueError:
+            candidates.append(None)
+            continue
+        if not (math.isfinite(f) and math.isfinite(db) and math.isfinite(qv)):
+            candidates.append(None)
+            continue
+        candidates.append({"type": _AUTOEQ_TYPES[ftype],
+                           "f": f, "q": qv, "db": db})
+    bands, dropped, truncated = _clean_bands(candidates, cap=10)
+    if not bands:
+        if not total:
+            raise ValueError("没有识别到任何滤波器行（应为 AutoEq / "
+                             "Equalizer APO 的 ParametricEQ 文本）")
+        raise ValueError("识别到 %d 段滤波器但没有一段可用（频率 20-20k / "
+                         "Q 0.1-10 / 增益 ±12dB）" % total)
+    return {"preamp": round(max(-12.0, min(12.0, preamp)), 1),
+            "bands": bands, "total": total,
+            "dropped": dropped, "truncated": truncated}
+
+
 # 合法的 store 操作白名单。写在 apply 外面，HTTP 层与 apply 共用同一份，
 # 避免「接口放行、内部静默忽略」的两套口径。
 STORE_OPS = frozenset((
@@ -353,18 +473,28 @@ STORE_OPS = frozenset((
     "playlist_create", "playlist_rename", "playlist_delete",
     "playlist_add", "playlist_remove", "playlist_reorder",
     "work_add", "work_remove", "loudness_set",
+    "eqpreset_set", "eqpreset_del",
 ))
 
 # 响度扫描结果条数上限：一首一条，正常人几千首也用不满；
 # 超限按扫描时间淘汰最旧的，data.json 不许无限长。
 LOUDNESS_MAX = 5000
 
+# 参数 EQ 预设上限：一款耳机一条，AutoEq 库虽大但用户只会导入真用过的
+# 几款；超限按保存时间淘汰最旧的，与 LOUDNESS_MAX 同一条策略。
+EQPRESET_MAX = 50
+
+
+def _prune_by_at(d, cap):
+    """按 at 时间戳裁掉最旧的条目，字典不许无限长（响度 / EQ 预设共用）。"""
+    if len(d) <= cap:
+        return
+    for k in sorted(d, key=lambda k: d[k].get("at", 0))[:len(d) - cap]:
+        d.pop(k, None)
+
 
 def _loudness_prune(d):
-    if len(d) <= LOUDNESS_MAX:
-        return
-    for k in sorted(d, key=lambda k: d[k].get("at", 0))[:len(d) - LOUDNESS_MAX]:
-        d.pop(k, None)
+    _prune_by_at(d, LOUDNESS_MAX)
 
 
 class Store:
@@ -578,6 +708,33 @@ class Store:
                     loud = self.data.setdefault("loudness", {})
                     loud[key] = rec
                     _loudness_prune(loud)
+            elif op == "eqpreset_set":
+                # 参数 EQ 预设库（AutoEq 导入的耳机档案 / 用户自存调音）。
+                # 段表走 _clean_bands 同一套口径（isfinite 硬墙 + 逐段校验）；
+                # name 是检索键，空名不写、bands 为空不写——存一条空预设只会
+                # 让预设列表里出现点了没反应的幽灵条目。
+                it = payload if isinstance(payload, dict) else {}
+                name = str(it.get("name") or "").strip()[:80]
+                bands = _clean_bands(it.get("bands"))[0] or []
+                try:
+                    preamp = float(it.get("preamp"))
+                    if not math.isfinite(preamp):
+                        preamp = 0.0
+                except (TypeError, ValueError):
+                    preamp = 0.0
+                if name and bands:
+                    pre = self.data.setdefault("eqpresets", {})
+                    pre[name] = {
+                        "bands": bands,
+                        "preamp": round(max(-12.0, min(12.0, preamp)), 1),
+                        "at": int(time.time()),
+                    }
+                    _prune_by_at(pre, EQPRESET_MAX)
+            elif op == "eqpreset_del":
+                it = payload if isinstance(payload, dict) else {}
+                name = str(it.get("name") or "").strip()[:80]
+                if name:
+                    self.data.setdefault("eqpresets", {}).pop(name, None)
             self.save()
             # 返回快照而不是活引用：序列化在锁外进行，交出活引用会和
             # /api/play 之类的并发写撞「dictionary changed size」；
@@ -4232,6 +4389,26 @@ class Handler(BaseHTTPRequestHandler):
                 if op != "load":
                     sync_engine.touch()      # 让自动模式知道「本地变了」
                 self._send(200, out)
+                return
+
+            # ---------------------------------------------------------- AutoEq 导入
+            # 纯解析查询，不写盘。段表校验口径在 parse_autoeq_apo 里与
+            # settings eq_bands 同源；解析失败 400 + 明确原因，前端拿到的
+            # 要么是可预览的段表、要么是能直接展示给用户的错误文案。
+            if path == "/api/eq/parse":
+                try:
+                    clen = int(self.headers.get("Content-Length") or 0)
+                except (TypeError, ValueError):
+                    clen = 0
+                if clen > 1024 * 1024:
+                    self._send(413, {"ok": False, "error": "请求体过大"})
+                    return
+                try:
+                    data = parse_autoeq_apo((self._json_body() or {}).get("text"))
+                except ValueError as e:
+                    self._send(400, {"ok": False, "error": str(e)})
+                    return
+                self._send(200, {"ok": True, "data": data})
                 return
 
             # ---------------------------------------------------------- 多端同步

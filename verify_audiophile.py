@@ -11,6 +11,11 @@
   G data.json 持久化：loudness 落盘再读回一致，NaN 绝不写出非法字面量
   H Phase 2 参数 EQ 设置契约：eq_mode/eq_bands/eq_preamp/eq_auto_preamp/eq_headphone
     （plans/AUDIOPHILE-P2 A 组）+ 老 eq_gains 键回归
+  I C-1 后端 AutoEq APO 文本解析：好文本 / 单位 / 大小写 / 占位与 OFF 行 /
+    截断 / 全无效报错 / preamp 钳制 / 超长文本
+  J 参数 EQ 预设库存取：eqpreset_set/eqpreset_del、NaN 硬墙、name 规整、
+    preamp 钳制、上限裁剪、落盘往返
+  K HTTP 端到端：/api/eq/parse 好/坏文本 + /api/store 预设与设置全链路
 
 用法：
     python verify_audiophile.py            # 全部
@@ -476,13 +481,19 @@ def group_H():
         {"eq_bands": "junk"}), "无该键", str(main._clean_settings({"eq_bands": "junk"})))
     ok(g, "空段表收", main._clean_settings({"eq_bands": []}).get("eq_bands") == [],
        "[]", str(main._clean_settings({"eq_bands": []})))
-    # A-3 eq_preamp 钳制
+    # A-3 eq_preamp 钳制（一位小数口径：AutoEq 解析值 -6.5 这类小数要保得住）
     ok(g, "eq_preamp 上钳", main._clean_settings(
-        {"eq_preamp": 99}).get("eq_preamp") == 12, "12", str(main._clean_settings(
+        {"eq_preamp": 99}).get("eq_preamp") == 12.0, "12.0", str(main._clean_settings(
             {"eq_preamp": 99})))
     ok(g, "eq_preamp 下钳", main._clean_settings(
-        {"eq_preamp": -99}).get("eq_preamp") == -12, "-12", str(main._clean_settings(
+        {"eq_preamp": -99}).get("eq_preamp") == -12.0, "-12.0", str(main._clean_settings(
             {"eq_preamp": -99})))
+    ok(g, "eq_preamp 小数保留", main._clean_settings(
+        {"eq_preamp": -6.5}).get("eq_preamp") == -6.5, "-6.5", str(main._clean_settings(
+            {"eq_preamp": -6.5})))
+    ok(g, "eq_preamp NaN/inf 丢", "eq_preamp" not in main._clean_settings(
+        {"eq_preamp": "nan"}) and "eq_preamp" not in main._clean_settings(
+        {"eq_preamp": "inf"}), "无该键", str(main._clean_settings({"eq_preamp": "nan"})))
     ok(g, "eq_preamp 非法丢", "eq_preamp" not in main._clean_settings(
         {"eq_preamp": "abc"}), "无该键", str(main._clean_settings({"eq_preamp": "abc"})))
     # A-4 eq_auto_preamp 只收 bool
@@ -517,9 +528,262 @@ def group_H():
                            "eq_preamp": -3.5, "eq_headphone": "HD 800 S"})
     s2 = st.data["settings"]
     ok(g, "apply 落盘往返", s2["eq_mode"] == "parametric"
-       and s2["eq_bands"][1]["f"] == 1234.6 and s2["eq_preamp"] == -3
-       and s2["eq_headphone"] == "HD 800 S", "parametric/1234.6/-3/HD 800 S",
+       and s2["eq_bands"][1]["f"] == 1234.6 and s2["eq_preamp"] == -3.5
+       and s2["eq_headphone"] == "HD 800 S", "parametric/1234.6/-3.5/HD 800 S",
        str((s2["eq_mode"], s2["eq_bands"][1]["f"], s2["eq_preamp"], s2["eq_headphone"])))
+
+
+# --------------------------------------------------------------------------
+def group_I():
+    """C-1 后端 AutoEq APO 文本解析（plans/AUDIOPHILE-P2）。"""
+    g = "I"
+    import main
+
+    def raises(fn):
+        try:
+            fn()
+            return None
+        except ValueError as e:
+            return str(e)
+
+    full = "\n".join([
+        "Preamp: -6.5 dB",
+        "Filter 1: ON PK Fc 31 Hz Gain 7.9 dB Q 0.70",
+        "Filter 2: ON PK Fc 63 Hz Gain 5.5 dB Q 0.80",
+        "Filter 3: ON LS Fc 105 Hz Gain 6.5 dB Q 0.71",
+        "Filter 4: ON PK Fc 1234.5 Hz Gain -3.2 dB Q 1.41",
+        "Filter 8: ON HS Fc 10000 Hz Gain -2.0 dB Q 0.70",
+    ])
+    out = main.parse_autoeq_apo(full)
+    ok(g, "完整文本解析", out.get("preamp") == -6.5 and len(out.get("bands") or []) == 5
+       and out.get("total") == 5 and out.get("dropped") == 0 and out.get("truncated") == 0
+       and out["bands"][0] == {"type": "peaking", "f": 31.0, "q": 0.7, "db": 7.9}
+       and out["bands"][2]["type"] == "lowshelf" and out["bands"][4]["type"] == "highshelf",
+       "preamp-6.5/5段全合法", str(out))
+    # 解析结果与 settings eq_bands 同口径：直接过 _clean_bands 一段不丢
+    ok(g, "解析结果过段表校验", main._clean_bands(out["bands"])[0] == out["bands"],
+       "原样通过", str(main._clean_bands(out["bands"])[0]))
+    out = main.parse_autoeq_apo("Filter 1: ON PK Fc 2 kHz Gain 1.0 dB Q 1.0")
+    ok(g, "kHz 单位换算", out["bands"] == [{"type": "peaking", "f": 2000.0,
+       "q": 1.0, "db": 1.0}], "f=2000", str(out["bands"]))
+    out = main.parse_autoeq_apo("filter 3 : on pk fc 100 hz gain 3 db q 0.7")
+    ok(g, "小写与空格容忍", out["total"] == 1 and out["bands"][0]["f"] == 100.0,
+       "1 段 f=100", str(out))
+    out = main.parse_autoeq_apo("\ufeffPreamp: -4.0 dB\r\nFilter 1: ON PK Fc 100 Hz "
+                                "Gain 3.0 dB Q 0.7\r\n")
+    ok(g, "BOM 与 CRLF 容忍", out["preamp"] == -4.0 and len(out["bands"]) == 1,
+       "preamp-4/1段", str(out))
+    # None 占位 / OFF 行：作者空着或停用的槽位，不算数据
+    out = main.parse_autoeq_apo("\n".join([
+        "Preamp: -6.5 dB",
+        "Filter 1: ON PK Fc 31 Hz Gain 7.9 dB Q 0.70",
+        "Filter 2: ON None Fc 0 Hz Gain 0.0 dB Q 1.00",
+        "Filter 3: OFF PK Fc 63 Hz Gain 5.5 dB Q 0.80",
+    ]))
+    ok(g, "None 占位与 OFF 跳过", out["total"] == 1 and len(out["bands"]) == 1,
+       "total=1", str(out))
+    # Gain/Q 缺省：AutoEq 少数导出只有 Fc
+    out = main.parse_autoeq_apo("Filter 1: ON PK Fc 500 Hz")
+    ok(g, "Gain/Q 缺省补 0/1", out["bands"] == [{"type": "peaking", "f": 500.0,
+       "q": 1.0, "db": 0.0}], "db0/q1", str(out["bands"]))
+    # 不认识的类型计入 dropped，不影响好段
+    out = main.parse_autoeq_apo("Filter 1: ON PK Fc 100 Hz Gain 1.0 dB Q 1.0\n"
+                                "Filter 2: ON LP Fc 500 Hz")
+    ok(g, "未知类型计 dropped", out["total"] == 2 and out["dropped"] == 1
+       and len(out["bands"]) == 1, "total2/dropped1/kept1", str(out))
+    # 超 10 段截断：12 段合法 → 收前 10，truncated=2
+    lines = ["Preamp: -6.5 dB"] + ["Filter %d: ON PK Fc %d Hz Gain 1.0 dB Q 1.0"
+                                   % (i, 100 * (i + 1)) for i in range(12)]
+    out = main.parse_autoeq_apo("\n".join(lines))
+    ok(g, "超 10 段截断", len(out["bands"]) == 10 and out["truncated"] == 2
+       and out["total"] == 12, "10段/truncated2", str(out))
+    # preamp 缺省 0；越界按 eq_preamp 口径钳 [-12,12]
+    out = main.parse_autoeq_apo("Filter 1: ON PK Fc 100 Hz Gain 1.0 dB Q 1.0")
+    ok(g, "preamp 缺省 0", out["preamp"] == 0.0, "0.0", str(out["preamp"]))
+    out = main.parse_autoeq_apo("Preamp: -30 dB\nFilter 1: ON PK Fc 100 Hz "
+                                "Gain 1.0 dB Q 1.0")
+    ok(g, "preamp 下钳", out["preamp"] == -12.0, "-12.0", str(out["preamp"]))
+    out = main.parse_autoeq_apo("Preamp: +99 dB\nFilter 1: ON PK Fc 100 Hz "
+                                "Gain 1.0 dB Q 1.0")
+    ok(g, "preamp 上钳", out["preamp"] == 12.0, "12.0", str(out["preamp"]))
+    # 报错路径：一条都解不出来 / 识别到但全无效 / 超长 / 非文本
+    err = raises(lambda: main.parse_autoeq_apo("hello world\nnot an eq preset"))
+    ok(g, "垃圾文本报错", err is not None and "滤波器" in err, "ValueError",
+       str(err))
+    err = raises(lambda: main.parse_autoeq_apo(""))
+    ok(g, "空文本报错", err is not None, "ValueError", str(err))
+    err = raises(lambda: main.parse_autoeq_apo(None))
+    ok(g, "非文本报错", err is not None, "ValueError", str(err))
+    err = raises(lambda: main.parse_autoeq_apo("Preamp: -6.5 dB\n"
+                                               "Filter 1: ON PK Fc 10 Hz Gain 99 dB"))
+    ok(g, "全无效段报错", err is not None and "没有一段可用" in err, "ValueError",
+       str(err))
+    err = raises(lambda: main.parse_autoeq_apo("x" * (main.AUTOEQ_TEXT_MAX + 1)))
+    ok(g, "超长文本报错", err is not None and "过长" in err, "ValueError", str(err))
+    # 常见真实样本：autoeq.app 十段输出（低架 + 峰 + 高架混排）
+    autoeq10 = ["Preamp: -6.1 dB"] + [
+        "Filter 1: ON PK Fc 21 Hz Gain -5.2 dB Q 0.7",
+        "Filter 2: ON PK Fc 45 Hz Gain 6.3 dB Q 0.8",
+        "Filter 3: ON PK Fc 82 Hz Gain -3.6 dB Q 0.9",
+        "Filter 4: ON PK Fc 145 Hz Gain 3.1 dB Q 1.0",
+        "Filter 5: ON PK Fc 240 Hz Gain -2.4 dB Q 1.1",
+        "Filter 6: ON PK Fc 480 Hz Gain 1.8 dB Q 1.2",
+        "Filter 7: ON PK Fc 950 Hz Gain -1.6 dB Q 1.1",
+        "Filter 8: ON PK Fc 2100 Hz Gain 2.2 dB Q 1.0",
+        "Filter 9: ON PK Fc 4800 Hz Gain -2.8 dB Q 0.9",
+        "Filter 10: ON HS Fc 9000 Hz Gain 1.5 dB Q 0.8",
+    ]
+    out = main.parse_autoeq_apo("\n".join(autoeq10))
+    ok(g, "十段真实样本全收", out["preamp"] == -6.1 and len(out["bands"]) == 10
+       and out["dropped"] == 0 and out["bands"][0]["f"] == 21.0
+       and out["bands"][9]["type"] == "highshelf", "preamp-6.1/10段/dropped0",
+       "preamp=%s n=%s dropped=%s" % (out["preamp"], len(out["bands"]),
+                                      out["dropped"]))
+
+
+def group_J():
+    """参数 EQ 预设库存取（eqpreset_set / eqpreset_del）。"""
+    g = "J"
+    import main
+    ddir = os.path.join(TMP_ROOT, "storeJ")
+    os.makedirs(ddir, exist_ok=True)
+    pf = os.path.join(ddir, "data.json")
+    st = main.Store(pf)
+    ok(g, "默认空预设库", st.data["eqpresets"] == {}, "{}",
+       str(st.data["eqpresets"]))
+    bands = [{"type": "peaking", "f": 100, "q": 0.7, "db": 3.2}]
+    st.apply("eqpreset_set", {"name": "HD 800 S", "bands": bands, "preamp": -6.5})
+    rec = st.data["eqpresets"].get("HD 800 S")
+    ok(g, "正常写入", rec is not None and rec["bands"] == [
+        {"type": "peaking", "f": 100.0, "q": 0.7, "db": 3.2}]
+       and rec["preamp"] == -6.5 and "at" in rec,
+       "bands舍入/preamp-6.5/at", str(rec))
+    st.apply("eqpreset_set", {"name": "HD 800 S", "bands": bands, "preamp": -3.0})
+    ok(g, "覆盖同名", st.data["eqpresets"]["HD 800 S"]["preamp"] == -3.0, "-3.0",
+       str(st.data["eqpresets"]["HD 800 S"]))
+    # NaN 硬墙：段全被丢 → 空预设不写
+    st.apply("eqpreset_set", {"name": "NaN机", "bands": [
+        {"f": 100, "q": 1, "db": "nan"}], "preamp": -1})
+    st.apply("eqpreset_set", {"name": "垃圾段", "bands": "junk", "preamp": -1})
+    st.apply("eqpreset_set", {"name": "空段表", "bands": [], "preamp": -1})
+    st.apply("eqpreset_set", {"name": "  ", "bands": bands, "preamp": -1})
+    st.apply("eqpreset_set", None)
+    st.apply("eqpreset_set", "junk")
+    ghosts = [k for k in st.data["eqpresets"]
+              if k not in ("HD 800 S",)]
+    ok(g, "NaN/垃圾/空段表/空名/payload 非法全不写", not ghosts, "只剩 HD 800 S",
+       str(ghosts))
+    st.apply("eqpreset_set", {"name": "长" * 200, "bands": bands, "preamp": -1})
+    ok(g, "name 截 80", ("长" * 80) in st.data["eqpresets"], "80 字名",
+       str(len([k for k in st.data["eqpresets"] if len(k) == 80])))
+    st.apply("eqpreset_set", {"name": "钳上", "bands": bands, "preamp": 99})
+    st.apply("eqpreset_set", {"name": "钳下", "bands": bands, "preamp": -99})
+    st.apply("eqpreset_set", {"name": "钳垃圾", "bands": bands, "preamp": "abc"})
+    st.apply("eqpreset_set", {"name": "钳NaN", "bands": bands, "preamp": "nan"})
+    pre = st.data["eqpresets"]
+    ok(g, "preamp 钳 ±12 / 垃圾回落 0",
+       pre["钳上"]["preamp"] == 12.0 and pre["钳下"]["preamp"] == -12.0
+       and pre["钳垃圾"]["preamp"] == 0.0 and pre["钳NaN"]["preamp"] == 0.0,
+       "12.0/-12.0/0/0",
+       str((pre["钳上"]["preamp"], pre["钳下"]["preamp"],
+            pre["钳垃圾"]["preamp"], pre["钳NaN"]["preamp"])))
+    # 超 10 段截断
+    st.apply("eqpreset_set", {"name": "截断", "preamp": 0,
+                              "bands": [{"type": "peaking", "f": 100 * (i + 1),
+                                         "q": 1, "db": 1} for i in range(12)]})
+    ok(g, "超 10 段截断", len(pre["截断"]["bands"]) == 10, "10 段",
+       str(len(pre["截断"]["bands"])))
+    # 删除：存在 / 不存在 / payload 非法都不崩
+    st.apply("eqpreset_del", {"name": "HD 800 S"})
+    st.apply("eqpreset_del", {"name": "不存在"})
+    st.apply("eqpreset_del", None)
+    st.apply("eqpreset_del", "junk")
+    ok(g, "删除与非法 payload", "HD 800 S" not in st.data["eqpresets"],
+       "已删", str(sorted(st.data["eqpresets"].keys())))
+    ok(g, "白名单收录", "eqpreset_set" in main.STORE_OPS
+       and "eqpreset_del" in main.STORE_OPS, "True", "True")
+    # 上限裁剪：灌满再触发
+    n = main.EQPRESET_MAX + 5
+    for i in range(n):
+        pre["p:%d" % i] = {"bands": [], "preamp": 0, "at": i}
+    main._prune_by_at(pre, main.EQPRESET_MAX)
+    ok(g, "超上限裁剪最旧", len(pre) == main.EQPRESET_MAX and "p:0" not in pre
+       and "p:%d" % (n - 1) in pre, "=%d 且尾部保留" % main.EQPRESET_MAX,
+       "len=%d p:0 in=%s tail in=%s" % (len(pre), "p:0" in pre,
+                                        "p:%d" % (n - 1) in pre))
+    # 落盘往返：重实例化读回
+    st.apply("eqpreset_set", {"name": "ER2SE", "bands": bands, "preamp": -2.5})
+    st.save()
+    st2 = main.Store(pf)
+    rec = st2.data["eqpresets"].get("ER2SE")
+    ok(g, "落盘往返", rec is not None and rec["preamp"] == -2.5 and rec["bands"],
+       "ER2SE 可读回", str(rec))
+
+
+def group_K():
+    """HTTP 端到端：/api/eq/parse + /api/store 预设与设置全链路。"""
+    g = "K"
+    home = mkhome("http_eq")
+    env = spawn(home)
+    try:
+        if not env["boot"]:
+            ok(g, "服务启动", False, "boot",
+               open(env["log"], "rb").read().decode("utf-8", "replace")[-600:])
+            return
+        good = ("Preamp: -6.5 dB\nFilter 1: ON PK Fc 31 Hz Gain 7.9 dB Q 0.70\n"
+                "Filter 2: ON HS Fc 10000 Hz Gain -2.0 dB Q 0.70")
+        st, r = http(env, "POST", "/api/eq/parse", {"text": good})
+        d = r.get("data") or {}
+        ok(g, "解析好文本", st == 200 and r.get("ok") and d.get("preamp") == -6.5
+           and len(d.get("bands") or []) == 2, "200+preamp-6.5+2段",
+           "%s %s" % (st, r))
+        st, r = http(env, "POST", "/api/eq/parse", {"text": "hello"})
+        ok(g, "垃圾文本 400", st == 400 and r.get("ok") is False
+           and isinstance(r.get("error"), str), "400+ok=False+error",
+           "%s %s" % (st, r))
+        st, r = http(env, "POST", "/api/eq/parse", {})
+        ok(g, "空 body 400", st == 400 and r.get("ok") is False, "400+ok=False",
+           "%s %s" % (st, r))
+        st, r = http(env, "POST", "/api/eq/parse", {"text": 123})
+        ok(g, "非文本 400", st == 400 and r.get("ok") is False, "400+ok=False",
+           "%s %s" % (st, r))
+        # 解析 → 设置 → 存预设 → 回读 → 删除 全链路
+        st, r = http(env, "POST", "/api/store", {"op": "settings", "payload": {
+            "eq_mode": "parametric", "eq_bands": d["bands"],
+            "eq_preamp": d["preamp"], "eq_headphone": "HD 800 S"}})
+        s = (r.get("data") or {}).get("settings") or {}
+        ok(g, "设置参数模式", st == 200 and r.get("ok")
+           and s.get("eq_mode") == "parametric" and s.get("eq_preamp") == -6.5
+           and s.get("eq_bands") == d["bands"], "parametric/-6.5/段表一致",
+           "%s %s" % (st, {k: s.get(k) for k in ("eq_mode", "eq_preamp")}))
+        st, r = http(env, "POST", "/api/store", {"op": "eqpreset_set", "payload": {
+            "name": "HD 800 S", "bands": d["bands"], "preamp": d["preamp"]}})
+        rec = ((r.get("data") or {}).get("eqpresets") or {}).get("HD 800 S")
+        ok(g, "存预设", st == 200 and r.get("ok") and rec is not None
+           and rec["preamp"] == -6.5 and rec["bands"] == d["bands"],
+           "200+预设可回读", "%s %s" % (st, rec))
+        st, data = http(env, "GET", "/api/store")
+        ok(g, "GET 回读预设与设置", data["eqpresets"].get("HD 800 S") is not None
+           and data["settings"].get("eq_mode") == "parametric",
+           "预设+parametric", "%s %s" % (bool(data["eqpresets"]),
+                                         data["settings"].get("eq_mode")))
+        st, r = http(env, "POST", "/api/store", {"op": "eqpreset_del",
+                                                 "payload": {"name": "HD 800 S"}})
+        ok(g, "删预设", ((r.get("data") or {}).get("eqpresets") or {}) == {},
+           "{}", str((r.get("data") or {}).get("eqpresets")))
+        st, r = http(env, "POST", "/api/store", {"op": "eqpreset_set", "payload": {
+            "name": "", "bands": []}})
+        ok(g, "空名不写", ((r.get("data") or {}).get("eqpresets") or {}) == {},
+           "{}", str((r.get("data") or {}).get("eqpresets")))
+        # 落盘不得出现非法字面量（NaN/inf 硬墙最后一道）
+        dpath = os.path.join(home, "Elysium", "data.json")
+        with open(dpath, "r", encoding="utf-8") as f:
+            raw = f.read()
+        ok(g, "落盘无 NaN/Infinity", "NaN" not in raw and "Infinity" not in raw,
+           "clean json", "NaN in=%s Infinity in=%s" % ("NaN" in raw,
+                                                       "Infinity" in raw))
+    finally:
+        kill(env)
 
 
 # --------------------------------------------------------------------------
@@ -569,8 +833,14 @@ def main(argv=None):
             group_E()
         if want("H"):
             group_H()
+        if want("I"):
+            group_I()
+        if want("J"):
+            group_J()
         if want("G"):
             group_G()
+        if want("K"):
+            group_K()
         if want("F"):
             group_F()
     except Exception:                                       # noqa: BLE001
