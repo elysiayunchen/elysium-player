@@ -91,3 +91,39 @@ python verify_np.py && python verify_ui.py
   `eq_preamp` 迁出 `_SETTING_NUM` 改一位小数（AutoEq 解析值 -6.5 不再被截成 -6）；verify_audiophile
   增 I/J/K 三组 41 例，**95/95 全绿**；回归 edge 91 PASS/0 FAIL/1 WARN、import 31/31、sync 26/26
   基线不变。
+- 2026-11-13 前端 B/C-2/C-3/D + 2b 徽标：引擎图 `src→gain→loud→preamp→eq[0..9]→master`（B-1，
+  节点名 preamp——`ENG.pre` 已被预载信息占用）；`engApplyEq` 双模式重配（B-2/B-4，10 节点复用，
+  不足 10 段落 identity，图形模式照旧）；自动前级 `−max(0, maxBandDb) + eq_preamp` 钳 [-24,12]
+  setTargetAtTime 平滑（B-3，响度增益在各槽 louds 分层不相加，注释说明 B-5）；C-2/C-3 导入 UI
+  （型号 + APO 粘贴框 + 解析按钮，POST `/api/eq/parse` 不在 JS 复刻口径；成功落 parametric +
+  eqpreset_set 存档案库，失败 err toast 段表不动）；D 组设置抽屉 EQ 独立分区（模式 segmented
+  对齐 K 歌 .k-seg 语汇；参数段卡片 = 类型 chips + 频率/Q/增益三横推子带读数，频率/Q 对数轴
+  0-1000 映射三/两个十倍频程；前级步进 ±0.5 读数「手动 dB · 补偿 −x.x」（负号 U+2212 对齐
+  响度/变调读数排版）；档案库一键切回 + 删档案；值改动 350ms 防抖、结构改动即时落盘）；Hi-Res
+  徽标读 probe STREAMINFO 实测（>48kHz 或 >16bit 才标，44.1k/16 与无数据都不显示），播放条
+  没测过的歌后台补一发探测；refreshStore 增 `state.eqpresets`，同步合并后 `engApplyEq(true)`+
+  响度跟一次（修 eq_* 同步回来不热生效的旧缺口）；EQ_LABEL 增 autoeq:导入。新增 verify_eq.py
+  （A 老用户回归 / B 参数引擎实测含对数轴与防抖 / C 导入好坏文本与档案库 / D 徽标 / E 收尾，
+  **38/38 全绿**；顺带抓出「段增益拖动不刷新前级读数」一缺陷）；回归 verify_np 27/27、
+  verify_ui 20/20、import 31/31、sync 26/26、audiophile 95/95、edge 91 PASS/1 WARN 基线不变。
+- 2026-11-13 三路评审收口（前端代码 / 后端契约 / 交互设计，并行子代理）：
+  **前端 2 P1** —— ①参数段防抖闭包捕获旧数组，拖动 350ms 内做结构改动会把改动前段表
+  写回服务端（改「定时器到点现读内存」+ 结构改动/应用档案/teardown 撤防抖，verify_eq 增
+  B19 交错钉子）；②自动补偿/手动前级在图形模式同样生效但控件全在参数面板（老用户无感
+  掉音量，违背「图形模式零变化」）—— 前级收窄为参数模式专属（engApplyPreamp active 闸，
+  图形恒 0dB，verify_eq 增 A6 钉子）。**后端 1 P2 语义修正** —— eq_headphone 空串从
+  「丢弃保留旧值」改为「显式清空落盘」（否则前端清空型号重启后旧型号复活回 UI），
+  verify_audiophile 增 round-trip 断言 + /api/eq/parse 超 1MB、/api/store 超 4MB 两个 413
+  用例 → 98/98。**导入链路加固** —— eqImportSubmit 校验响应形状（ok!==true / 空段表一律
+  报错，绝不把用户当前调音清空）、eqpreset_set 存档改 await 不吞错、删档案走 confirm
+  二次确认 + 失败 toast。**交互打磨** —— ≤480 触点抬到 ≥28-30px（seg/chips/步进钮/删钮/
+  推子命中区，np-seek 范式）、`set-actions` 弹性规则收窄到 `#eqParamPane`（旧规则会把
+  数据区的清空类危险按钮一起等分拉宽）、删档案挪到档案库行内 + danger 色、「加一段」升
+  primary、前级 tip 改「手动 + 补偿相加才是链路实际增益」+ 读数补「实际」段、eq-pre-val
+  去定宽、Hi-Res 徽标单位写全 kHz（与码率 k 撞量纲）、≤480 np-spec 加省略防挤标题、
+  导入盒展开 scrollIntoView + 成功自动收盒清文本、loudness up 按钮 ＋ 全角统一、`.set-seg`
+  并入 `.k-seg` 基类防漂移、「段表」黑话退役、reduced-motion 注释同步 probepulse、
+  loudness 内存与落盘同口径钳 [-70,0]、AbortController 缺失守卫、probeForHires 按探测音质
+  记 TTL（MP3 探过切 FLAC 能重探）、推荐卡探测徽标错峰（qualityChip 拆 delay/swap 语义）。
+  np-seek 轨道 3px→3.5px 对齐统一后的 --seek-h。**verify_eq 40/40**；回归 verify_np 27/27、
+  verify_ui 20/20、import 31/31、sync 26/26、audiophile 98/98、edge 91 PASS/1 WARN 不变。

@@ -507,8 +507,10 @@ def group_H():
     ok(g, "eq_headphone 截 80", len(main._clean_settings(
         {"eq_headphone": "森" * 200}).get("eq_headphone", "")) == 80, "80 字",
        str(len(main._clean_settings({"eq_headphone": "森" * 200}).get("eq_headphone", ""))))
-    ok(g, "eq_headphone 空丢", "eq_headphone" not in main._clean_settings(
-        {"eq_headphone": "   "}), "无该键", str(main._clean_settings({"eq_headphone": "   "})))
+    # 2026-11-13 起空串 = 显式清空要落盘（前端清空型号后重启，旧型号不得复活回 UI）
+    ok(g, "eq_headphone 空串显式清空", main._clean_settings(
+        {"eq_headphone": "   "}).get("eq_headphone") == "", "空串落盘",
+       str(main._clean_settings({"eq_headphone": "   "})))
     # 老键回归：eq_gains 原路径不动
     ok(g, "老 eq_gains 截 10 原样", main._clean_settings(
         {"eq_gains": [1] * 15}).get("eq_gains") == [1] * 10, "[1]×10",
@@ -747,6 +749,26 @@ def group_K():
         st, r = http(env, "POST", "/api/eq/parse", {"text": 123})
         ok(g, "非文本 400", st == 400 and r.get("ok") is False, "400+ok=False",
            "%s %s" % (st, r))
+        # 413 上限：请求体超限在读 body 之前就拒（伪造大 Content-Length + 小 body）
+        def http_413(path, clen):
+            import http.client
+            conn = http.client.HTTPConnection("127.0.0.1", env["port"], timeout=10)
+            try:
+                conn.putrequest("POST", path)
+                conn.putheader("Content-Type", "application/json")
+                conn.putheader("Content-Length", str(clen))
+                conn.endheaders()
+                conn.send(b"{}")
+                resp = conn.getresponse()
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+            finally:
+                conn.close()
+        st, r = http_413("/api/eq/parse", 1024 * 1024 + 1)
+        ok(g, "/api/eq/parse 超 1MB 413", st == 413 and r.get("ok") is False,
+           "413+ok=False", "%s %s" % (st, r))
+        st, r = http_413("/api/store", 4 * 1024 * 1024 + 1)
+        ok(g, "/api/store 超 4MB 413", st == 413 and r.get("ok") is False,
+           "413+ok=False", "%s %s" % (st, r))
         # 解析 → 设置 → 存预设 → 回读 → 删除 全链路
         st, r = http(env, "POST", "/api/store", {"op": "settings", "payload": {
             "eq_mode": "parametric", "eq_bands": d["bands"],
@@ -775,6 +797,13 @@ def group_K():
             "name": "", "bands": []}})
         ok(g, "空名不写", ((r.get("data") or {}).get("eqpresets") or {}) == {},
            "{}", str((r.get("data") or {}).get("eqpresets")))
+        # eq_headphone 显式清空 round-trip：设置型号 → 传空串 → 落盘值必须真的空
+        st, r = http(env, "POST", "/api/store", {"op": "settings",
+                                                 "payload": {"eq_headphone": ""}})
+        s = (r.get("data") or {}).get("settings") or {}
+        ok(g, "eq_headphone 空串落盘 round-trip",
+           st == 200 and r.get("ok") and s.get("eq_headphone") == "",
+           "落盘后仍为空串", str(s.get("eq_headphone")))
         # 落盘不得出现非法字面量（NaN/inf 硬墙最后一道）
         dpath = os.path.join(home, "Elysium", "data.json")
         with open(dpath, "r", encoding="utf-8") as f:
