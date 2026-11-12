@@ -118,6 +118,18 @@ DEFAULT_STORE = {
         "eq_enabled": False,        # 均衡器总开关
         "eq_preset": "flat",        # flat / bass / vocal / classical / pop / rock / custom
         "eq_gains": [0] * 10,       # 10 段实际生效的 dB 值，eq_preset 只是来源标记
+        # --- 发烧客：参数 EQ（Phase 2，plans/AUDIOPHILE-P2）---
+        # eq_mode 缺省 graphic：老用户走原 10 推子路径，零变化
+        "eq_mode": "graphic",       # graphic（10 推子）/ parametric（频率/Q/增益全可调）
+        "eq_bands": [],             # 参数 EQ 段表 ≤10 段 {type,f,q,db}，空 = 全平直
+        "eq_preamp": 0,             # 前级 dB；自动补偿拉着它防削波
+        "eq_auto_preamp": True,     # 正增益先在前级降下来，EQ 拉满也不过 0dBFS
+        "eq_headphone": "",         # AutoEq 导入的耳机型号名（仅显示用）
+        # --- 发烧客：响度归一化 ---
+        # 扫描结果由前端 Web Audio 算（EBU R128），后端只管存取；mode 开关与
+        # 目标响度先立住契约，前端接 UI 时直接用。
+        "loudness_mode": "off",     # off / track：按曲目扫描结果预置增益
+        "loudness_target": -18,     # 归一化目标 LUFS（ReplayGain 2.0 音乐惯例）
         # 额外曲库目录：默认空 = 仍只扫下载目录，老用户零变化。
         # 只收用户显式添加的目录，不做全盘扫描（这条边界不放开）。
         "local_dirs": [],
@@ -133,6 +145,7 @@ DEFAULT_STORE = {
     "daily": {},                    # 日汇总 {date: {n: 次数, s: 秒}}，统计用，留 400 天
     "hours": {},                    # 24 小时时段分布（累计）{"0"~"23": 次数}
     "feedback": {},                 # 显式反馈 {platform:id: {verdict, at}}
+    "loudness": {},                 # 响度扫描 {platform:id: {lufs, tp, lra, at}}，上限 LOUDNESS_MAX
     "taste_note": "",               # 用户自述口味（旧字段，保留兼容，前端已不再暴露）
     "taste_genres": [],             # 用户手动选中的风格 id 列表
     "playlists": [],                # 用户自建歌单 [{id, name, created_at, updated_at, items:[...]}]
@@ -247,6 +260,8 @@ _SETTING_NUM = {
     "cache_keep_days": (1, 365),
     "lrc_offset_ms": (-10000, 10000),
     "crossfade_ms": (0, 2000),
+    "loudness_target": (-40, -6),   # 归一化目标 LUFS：别让用户把「目标」设成啸叫
+    "eq_preamp": (-12, 12),          # 参数 EQ 前级：越界即丢给 _SETTING_NUM 钳
 }
 
 
@@ -267,6 +282,45 @@ def _clean_settings(payload):
         if k == "eq_gains":
             if isinstance(v, list):
                 out[k] = v[:10]
+            continue
+        if k == "eq_mode":
+            # 白名单外丢弃：graphic 是老 10 推子路径，parametric 是 P2 参数 EQ
+            if v in ("graphic", "parametric"):
+                out[k] = v
+            continue
+        if k == "eq_bands":
+            # 参数 EQ 段表。NaN/inf 硬墙：落进 data.json 后 json.dump 写出非法
+            # 字面量，下次启动整个数据文件报废（与 loudness/pitch 同一条铁律）。
+            # 单段非法只丢那一段，整表不是数组才整表丢弃。
+            if isinstance(v, list):
+                bands = []
+                for b in v[:10]:
+                    if not isinstance(b, dict):
+                        continue
+                    try:
+                        f = float(b.get("f"))
+                        q = float(b.get("q"))
+                        db = float(b.get("db"))
+                    except (TypeError, ValueError):
+                        continue
+                    t = str(b.get("type") or "peaking")
+                    if t not in ("peaking", "lowshelf", "highshelf"):
+                        continue
+                    if not (math.isfinite(f) and 20 <= f <= 20000
+                            and math.isfinite(q) and 0.1 <= q <= 10
+                            and math.isfinite(db) and -12 <= db <= 12):
+                        continue
+                    bands.append({"type": t, "f": round(f, 1),
+                                  "q": round(q, 3), "db": round(db, 1)})
+                out[k] = bands
+            continue
+        if k == "eq_auto_preamp":
+            if isinstance(v, bool):
+                out[k] = v
+            continue
+        if k == "eq_headphone":
+            if isinstance(v, str) and v.strip():
+                out[k] = v.strip()[:80]
             continue
         rule = _SETTING_NUM.get(k)
         if not rule:
@@ -298,8 +352,19 @@ STORE_OPS = frozenset((
     "feedback_set", "feedback_clear", "taste_note", "taste_genres",
     "playlist_create", "playlist_rename", "playlist_delete",
     "playlist_add", "playlist_remove", "playlist_reorder",
-    "work_add", "work_remove",
+    "work_add", "work_remove", "loudness_set",
 ))
+
+# 响度扫描结果条数上限：一首一条，正常人几千首也用不满；
+# 超限按扫描时间淘汰最旧的，data.json 不许无限长。
+LOUDNESS_MAX = 5000
+
+
+def _loudness_prune(d):
+    if len(d) <= LOUDNESS_MAX:
+        return
+    for k in sorted(d, key=lambda k: d[k].get("at", 0))[:len(d) - LOUDNESS_MAX]:
+        d.pop(k, None)
 
 
 class Store:
@@ -487,6 +552,32 @@ class Store:
                 wid = str((payload or {}).get("id") or "")
                 self.data["works"] = [w for w in self.data.setdefault("works", [])
                                       if w.get("id") != wid]
+            elif op == "loudness_set":
+                # 发烧客响度扫描结果（EBU R128 由前端算，这里只存取）。
+                # NaN/inf 是硬墙：落进 data.json 后 json.dump 写出非法字面量，
+                # 下次启动整个数据文件解析报废（与 work_meta 同一条铁律）。
+                it = payload if isinstance(payload, dict) else {}
+                plat = str(it.get("platform") or "").strip()
+                sid = str(it.get("id") or "").strip()
+                try:
+                    lufs = float(it.get("lufs"))
+                except (TypeError, ValueError):
+                    lufs = None
+                # platform 与 id 缺一不写：半个键落盘就是脏数据
+                if plat and sid and lufs is not None and math.isfinite(lufs):
+                    key = "%s:%s" % (plat, sid)
+                    rec = {"lufs": round(max(-70.0, min(0.0, lufs)), 1)}
+                    for f, lo, hi in (("tp", -70.0, 9.0), ("lra", 0.0, 90.0)):
+                        try:
+                            v = float(it.get(f))
+                            if math.isfinite(v):
+                                rec[f] = round(max(lo, min(hi, v)), 1)
+                        except (TypeError, ValueError):
+                            pass
+                    rec["at"] = int(time.time())
+                    loud = self.data.setdefault("loudness", {})
+                    loud[key] = rec
+                    _loudness_prune(loud)
             self.save()
             # 返回快照而不是活引用：序列化在锁外进行，交出活引用会和
             # /api/play 之类的并发写撞「dictionary changed size」；
@@ -2258,6 +2349,75 @@ def sniff_container(head):
     return "bin", "未知"
 
 
+def parse_flac_streaminfo(buf):
+    """从 FLAC 文件头部小段字节解 STREAMINFO：采样率 / 位深 / 声道 / 总样本数。
+
+    buf 是 Range 探测拉回的头部，可能带 ID3v2 前缀。STREAMINFO 恒为第一个
+    metadata block（块头 4B + 内容 34B），内容第 10~17 字节按位打包：
+    采样率 20 / 声道 3（存 -1）/ 位深 5（存 -1）/ 总样本数 36。
+    找不到合法结构返回 None —— 上游标称 flac 的可能是贴了魔数的假文件，
+    Hi-Res 徽标宁可少报不虚报。
+    """
+    if not buf:
+        return None
+    off = 0
+    if buf[:3] == b"ID3":
+        if len(buf) < 10:
+            return None
+        # ID3v2 头尾部 4 字节是 syncsafe 大端长度（每字节只用低 7 位）
+        size = ((buf[6] & 0x7F) << 21) | ((buf[7] & 0x7F) << 14) \
+               | ((buf[8] & 0x7F) << 7) | (buf[9] & 0x7F)
+        off = 10 + size
+    if buf[off:off + 4] != b"fLaC":
+        return None
+    hdr = buf[off + 4:off + 8]          # 块头：1B（bit7=末块标志，低 7 位=类型）+ 3B 内容长度
+    if len(hdr) < 4 or hdr[0] & 0x7F or int.from_bytes(hdr[1:4], "big") < 34:
+        return None
+    b = buf[off + 8:off + 8 + 34]
+    if len(b) < 34:
+        return None
+    # 位打包从 b[10] 起：采样率 20 位（b10~b12 右移 4）、声道 3 位（b12 中段）、
+    # 位深 5 位（b12 末位 + b13 高半）、总样本 36 位（b13 低半 + b14~b17）
+    sample_rate = int.from_bytes(b[10:13], "big") >> 4
+    channels = ((b[12] >> 1) & 0x07) + 1
+    bit_depth = ((b[12] & 0x01) << 4 | (b[13] >> 4)) + 1
+    total = ((b[13] & 0x0F) << 32) | int.from_bytes(b[14:18], "big")
+    # 合理性硬墙：魔数后面跟一段垃圾时给出的是天文数字，别让它流出去
+    if not (8000 <= sample_rate <= 192000) or not (1 <= channels <= 8) \
+            or not (4 <= bit_depth <= 32):
+        return None
+    out = {"sample_rate": sample_rate, "bit_depth": bit_depth,
+           "channels": channels, "total_samples": total}
+    if total and sample_rate:
+        out["duration"] = round(total / sample_rate, 3)
+    return out
+
+
+def _flac_hires(url, head):
+    """对容器判定为 FLAC 的曲目尽力解 Hi-Res 元信息，最多两次几百字节请求。
+
+    ID3v2 标签很大时 256B 探头够不到 fLaC，按标签尺寸补一个定向 Range
+    直接拉 STREAMINFO 所在的那一小段再解一次。
+    """
+    hires = parse_flac_streaminfo(head)
+    if hires or head[:3] != b"ID3" or len(head) < 10:
+        return hires
+    size = ((head[6] & 0x7F) << 21) | ((head[7] & 0x7F) << 14) \
+           | ((head[8] & 0x7F) << 7) | (head[9] & 0x7F)
+    start = 10 + size
+    if start > 16 * 1024 * 1024:        # 荒谬的标签尺寸当垃圾处理，不再追
+        return None
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": UA, "Range": "bytes=%d-%d" % (start, start + 47),
+            "Referer": UPSTREAM, "Accept": "*/*"})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            extra = r.read(48)
+    except Exception:  # noqa: BLE001
+        return None
+    return parse_flac_streaminfo(extra)
+
+
 _PROBE_CACHE = {}
 _PROBE_LOCK = threading.Lock()
 # 探测专用常驻池：每批新建/销毁 8 个线程纯属浪费，线程留着还能白捡 HTTP keep-alive
@@ -2265,9 +2425,10 @@ _PROBE_POOL = _cf.ThreadPoolExecutor(max_workers=8, thread_name_prefix="probe")
 
 
 def probe_one(platform, sid, fmt, br, sign_time=None, sign=None, duration=0, name=None):
-    """探一首歌：只拉 1 字节判真格式 + 读 Content-Range 拿大小算真实码率。
+    """探一首歌：拉 256B 头判真格式 + 读 Content-Range 拿大小算真实码率。
 
-    返回 valid/fmt/label/size/kbps/container，全程只消耗几百字节。
+    返回 valid/fmt/label/size/kbps/container（FLAC 另带 hires 元信息），
+    全程只消耗几百字节。
     """
     key = ("%s|%s|%s|%s" % (platform, sid, fmt, br))
     now = time.time()
@@ -2276,7 +2437,8 @@ def probe_one(platform, sid, fmt, br, sign_time=None, sign=None, duration=0, nam
         if hit and now - hit[0] < 300:
             return hit[1]
     out = {"valid": False, "fmt": "", "label": "", "size": 0, "kbps": 0,
-           "container": "", "declared": str(fmt or "").lower(), "reason": ""}
+           "container": "", "declared": str(fmt or "").lower(), "reason": "",
+           "hires": None}
     try:
         url = resolve_play_url(platform, sid, fmt, br, sign_time, sign, name)
     except Exception as e:  # noqa: BLE001
@@ -2286,10 +2448,10 @@ def probe_one(platform, sid, fmt, br, sign_time=None, sign=None, duration=0, nam
         return out
     try:
         req = urllib.request.Request(url, headers={
-            "User-Agent": UA, "Range": "bytes=0-15", "Referer": UPSTREAM,
+            "User-Agent": UA, "Range": "bytes=0-255", "Referer": UPSTREAM,
             "Accept": "*/*"})
         with urllib.request.urlopen(req, timeout=12) as r:
-            head = r.read(16)
+            head = r.read(256)
             cr = r.headers.get("Content-Range") or ""
             size = 0
             if "/" in cr:
@@ -2314,6 +2476,8 @@ def probe_one(platform, sid, fmt, br, sign_time=None, sign=None, duration=0, nam
                     except Exception:
                         out["kbps"] = 0
                 out["mismatch"] = (out["declared"] == "flac" and fmt2 not in ("flac", ""))
+                if fmt2 == "flac":
+                    out["hires"] = _flac_hires(url, head)
     except Exception as e:  # noqa: BLE001
         out["reason"] = "不可达: %s" % e
     with _PROBE_LOCK:
@@ -2366,13 +2530,13 @@ def probe_batch(items, limit=64, workers=8, deadline=20.0):
                 out["%s:%s" % (plat, sid)] = {
                     "valid": False, "unresolved": True, "reason": "探测超时，可稍后重试",
                     "fmt": "", "label": "", "size": 0, "kbps": 0, "container": "",
-                    "declared": "", "mismatch": False}
+                    "declared": "", "mismatch": False, "hires": None}
     # 没进结果的（请求异常 / 被取消）也补一个待测态，别留空格子
     for t in todo:
         k = "%s:%s" % (t[1], str(t[2]))
         out.setdefault(k, {"valid": False, "unresolved": True, "reason": "探测未返回结果",
                            "fmt": "", "label": "", "size": 0, "kbps": 0, "container": "",
-                           "declared": "", "mismatch": False})
+                           "declared": "", "mismatch": False, "hires": None})
     return out
 
 
