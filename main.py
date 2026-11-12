@@ -3444,6 +3444,102 @@ MIME = {
 }
 
 
+def run_diag():
+    """网络自检：逐跳定位「搜得到歌但放不出来」到底断在哪一跳。
+
+    搜索与取流是两批不同主机 —— 主站（搜索/解析）通、CDN（真正取音频）不通，
+    是真机上最典型的形态；每跳独立计时并捕获异常，当场指认环节。
+    """
+    import socket
+    hops = []
+    song = {}
+
+    def hop(name, fn):
+        t0 = time.time()
+        try:
+            detail = fn()
+            hops.append({"name": name, "ok": True,
+                         "ms": int((time.time() - t0) * 1000), "detail": str(detail)})
+        except Exception as e:  # noqa: BLE001
+            hops.append({"name": name, "ok": False,
+                         "ms": int((time.time() - t0) * 1000),
+                         "detail": "%s: %s" % (type(e).__name__, e)})
+
+    def _cache_write():
+        p = os.path.join(CACHE.today_root, ".diagtest")
+        with open(p, "wb") as f:
+            f.write(b"ok")
+        os.remove(p)
+        return "可写"
+
+    def _clock():
+        # TLS 证书有效期按系统时间校验：时间错的设备 HTTPS 会全挂
+        return "%s 本地 / %s UTC" % (
+            time.strftime("%Y-%m-%d %H:%M:%S"), time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()))
+
+    def _dns():
+        addrs = sorted({i[4][0] for i in socket.getaddrinfo(UPSTREAM_HOST, 443)})
+        return "→ " + ", ".join(addrs)
+
+    def _search():
+        data = upstream("search", {"platform": "kuwo", "keyword": "晴天",
+                                   "page": 1, "size": 5})
+        lst = (data or {}).get("list") or []
+        if not lst:
+            raise RuntimeError("主站正常返回但 0 条结果")
+        song.update(lst[0])
+        return "「%s」等 %d 条" % (lst[0].get("name"), len(lst))
+
+    def _resolve():
+        if not song:
+            raise RuntimeError("上一步失败，跳过")
+        url = resolve_play_url("kuwo", song.get("id"), "mp3", "128",
+                               song.get("time"), song.get("sign"), song.get("name"))
+        song["url"] = url
+        return urllib.parse.urlparse(url).netloc
+
+    def _cdn():
+        if not song.get("url"):
+            raise RuntimeError("上一步失败，跳过")
+        req = urllib.request.Request(song["url"], headers={
+            "User-Agent": UA, "Range": "bytes=0-15", "Referer": UPSTREAM})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            head = r.read(16)
+            return "HTTP %s · %s · 头 %s" % (
+                r.status, r.headers.get("Content-Type"), head[:8].hex())
+
+    hop("1/6 缓存目录可写", _cache_write)
+    hop("2/6 系统时钟", _clock)
+    hop("3/6 主站域名解析", _dns)
+    hop("4/6 主站搜索", _search)
+    hop("5/6 解析播放直链", _resolve)
+    hop("6/6 CDN 取流（播放真正走的链路）", _cdn)
+    return {"hops": hops}
+
+
+_DIAG_TONE = None
+
+
+def diag_tone_wav():
+    """自检测试音：3 秒 440Hz 正弦 WAV。不走网络 —— 测试音能响就说明
+    WebView 解码 / 音频焦点 / 通知服务这条本地链路没坏，问题只在网络链路。"""
+    global _DIAG_TONE
+    if _DIAG_TONE is None:
+        import io
+        import struct
+        import wave
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(22050)
+            w.writeframes(b"".join(
+                struct.pack("<h", int(20000 * math.sin(2 * math.pi * 440 * i / 22050)))
+                for i in range(22050 * 3)))
+        _DIAG_TONE = buf.getvalue()
+    return _DIAG_TONE
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "FlacMusic/" + VERSION
 
@@ -3670,6 +3766,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True, "data": {
                 "tasks": DM.snapshot(),
                 "concurrency": STORE.data["settings"].get("concurrency", 2)}})
+            return
+        if path == "/api/diag":
+            # 网络自检（设置抽屉按钮）：逐跳计时/捕获，真机上当场指认断点
+            self._send(200, {"ok": True, "data": run_diag()})
+            return
+        if path == "/api/diag/tone":
+            # 自检测试音：本地生成 WAV，不经网络与缓存
+            self._send(200, diag_tone_wav(), "audio/wav")
             return
         if path == "/api/media":
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
