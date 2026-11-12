@@ -29,12 +29,15 @@ html[data-theme="dark"]{
   --player:rgba(9,9,14,.9);
   --shadow:0 18px 44px rgba(0,0,0,.55);
   --shadow-s:0 2px 10px rgba(0,0,0,.4);
+  /* h1/radius/seek-h 双主题等值：旧值深 34/10/14/3、浅 42/11/16/4 各搞一套，
+     切主题时标题与圆角全部变尺寸 → 整页重排 + 推荐封面闪白（实测复现）。
+     统一取 38/10/14/3.5，浅色标题向 Apple Music 大标题（34pt）靠拢一步 */
   --radius:10px;
   --radius-lg:14px;
-  --h1:34px;
-  --h1-ls:-.02em;
+  --h1:38px;
+  --h1-ls:-.024em;
   --h1-w:700;
-  --seek-h:3px;
+  --seek-h:3.5px;
   --glow:0 0 0 1px rgba(255,255,255,.06), 0 6px 20px rgba(245,50,91,.22);
   --img-filter:none;
 }
@@ -62,12 +65,12 @@ html[data-theme="light"]{
   --player:rgba(255,255,255,.86);
   --shadow:0 16px 40px rgba(15,15,25,.1);
   --shadow-s:0 1px 4px rgba(15,15,25,.07);
-  --radius:11px;
-  --radius-lg:16px;
-  --h1:42px;
-  --h1-ls:-.028em;
+  --radius:10px;
+  --radius-lg:14px;
+  --h1:38px;
+  --h1-ls:-.024em;
   --h1-w:700;
-  --seek-h:4px;
+  --seek-h:3.5px;
   --glow:0 0 0 1px rgba(0,0,0,.04), 0 6px 18px rgba(245,50,91,.18);
   --img-filter:none;
 }
@@ -96,7 +99,7 @@ a{color:inherit;text-decoration:none}
 }
 .kicker{
   font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
-  font-size:9.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--muted);
+  font-size:10.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--muted);
   margin-bottom:7px;
 }
 .ell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -276,16 +279,20 @@ input::placeholder,textarea::placeholder{color:var(--muted);opacity:1}
 /* 注意：这里只能写 ::-webkit-scrollbar，不要加 scrollbar-width / scrollbar-color。
    Chromium 一旦看到这两个标准属性就会改用系统原生滚动条，
    ::-webkit-scrollbar 全部失效 —— 在 WebView2（Edge 内核）里尤其明显。 */
-.view::-webkit-scrollbar,.side-scroll::-webkit-scrollbar,.drawer-body::-webkit-scrollbar{
+.view::-webkit-scrollbar,.side-scroll::-webkit-scrollbar,.drawer-body::-webkit-scrollbar,
+.np-queue::-webkit-scrollbar{
   width:9px;height:9px;
 }
-.view::-webkit-scrollbar-thumb,.side-scroll::-webkit-scrollbar-thumb,.drawer-body::-webkit-scrollbar-thumb{
+.view::-webkit-scrollbar-thumb,.side-scroll::-webkit-scrollbar-thumb,.drawer-body::-webkit-scrollbar-thumb,
+.np-queue::-webkit-scrollbar-thumb{
   background:var(--hover-2);border-radius:5px;border:2px solid transparent;background-clip:content-box;
 }
-.view::-webkit-scrollbar-track,.side-scroll::-webkit-scrollbar-track,.drawer-body::-webkit-scrollbar-track{
+.view::-webkit-scrollbar-track,.side-scroll::-webkit-scrollbar-track,.drawer-body::-webkit-scrollbar-track,
+.np-queue::-webkit-scrollbar-track{
   background:transparent;
 }
-.view::-webkit-scrollbar-corner,.side-scroll::-webkit-scrollbar-corner,.drawer-body::-webkit-scrollbar-corner{
+.view::-webkit-scrollbar-corner,.side-scroll::-webkit-scrollbar-corner,.drawer-body::-webkit-scrollbar-corner,
+.np-queue::-webkit-scrollbar-corner{
   background:transparent;
 }
 
@@ -1297,9 +1304,11 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
    注意：类名不能用 skel —— 通用块级骨架 .skel 带 height:54px + 渐变，会把 chip 撑成大方块 */
 .chip.probing{
   min-width:62px;padding:1.5px 5px;border-style:dashed;
-  background:var(--hover-2);animation:skelpulse 1.5s ease-in-out infinite;
+  background:var(--hover-2);animation:probepulse 2.2s ease-in-out infinite;
 }
-@keyframes skelpulse{0%,100%{opacity:.6}50%{opacity:1}}
+/* 专用脉冲动画：幅度收窄（旧 skelpulse .6↔1 整列 25 枚同时呼吸，闪烁面过大），
+   行间错开由 JS 内联 animation-delay 负责 → 波浪扫过而非同步闪 */
+@keyframes probepulse{0%,100%{opacity:.72}50%{opacity:1}}
 
 /* 推荐卡操作按钮收进 hover */
 .reco .racts{
@@ -1926,7 +1935,7 @@ html[data-mini="on"] .pl-seek .mono{font-size:9.5px}
   font-size:13.5px;font-weight:400;line-height:1.7;letter-spacing:0;opacity:1;
 }
 
-.np-queue{flex:1 1 auto;min-height:0;overflow-y:auto;width:min(760px,100%);margin:0 auto;padding:20px 0 10px}
+.np-queue{flex:1 1 auto;min-height:0;overflow-y:auto;width:min(860px,100%);margin:0 auto;padding:20px 0 10px}
 .np-main .empty{margin:auto}
 
 /* 底部控制坞：进度整宽 + 三段式栅格（左右等宽，中间组绝对居中） */
@@ -1935,7 +1944,7 @@ html[data-mini="on"] .pl-seek .mono{font-size:9.5px}
 .np-seek-row .mono{font-size:10.5px;color:var(--muted);width:38px;flex:0 0 38px}
 .np-seek-row .mono:last-child{text-align:right}
 .np-seek-row .seek{height:16px}
-.np-seek-row .seek-tr,.np-seek-row .seek-fill,.np-seek-row .seek-buf{height:3px}
+.np-seek-row .seek-tr,.np-seek-row .seek-fill,.np-seek-row .seek-buf{height:3.5px}
 .np-seek-row .seek-fill{background:var(--ink)}
 .np-seek-row .seek-dot{background:var(--ink);box-shadow:none}
 .np-keys{
@@ -2010,4 +2019,16 @@ html[data-chrome="on"]:not([data-platform="android"]) .np-layer{top:var(--wc-tit
   .np-lyric{padding-top:4vh;padding-bottom:18vh;font-size:clamp(19px,2.6vw,26px)}
   .np-dock{padding-bottom:10px}
   .np-head{padding-top:12px}
+}
+
+/* ---------------------------------------------------------------- 动效降级 */
+/* 系统开「减弱动态效果」时停掉全部无限动画与过渡（55 处 transition +
+   eq/spin/sh/probepulse 四组无限动画）：骨架、均衡器静置不消失，主题切换退化为瞬时 */
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{
+    animation-duration:.01ms !important;
+    animation-iteration-count:1 !important;
+    transition-duration:.01ms !important;
+    scroll-behavior:auto !important;
+  }
 }
