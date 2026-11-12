@@ -12,8 +12,6 @@ import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.media.AudioAttributes;
-import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.media.session.MediaSession;
 import android.media.MediaMetadata;
@@ -44,6 +42,12 @@ import java.util.concurrent.Executors;
  * 变成 MediaSession + 通知。用户的控制操作（通知按钮 / 耳机线控 / 锁屏控件）
  * 经 MainActivity.dispatchMedia(cmd) 打回页面，由页面统一改 <audio> 状态 ——
  * 播放事实上的唯一真相源始终是页面，服务不碰音频流。
+ *
+ * 音频焦点：本服务不申请。现代 WebView 的 Chromium 会为 <audio> 自己申请焦点、
+ * 在失焦时暂停、重获时恢复；这里若再 requestAudioFocus，就成了第二个焦点客户端
+ * —— 服务申请把 Chromium 踢停、页面推「暂停」后服务 abandon、系统把焦点栈
+ * 还给 Chromium 又自动续播 —— 暂停瞬间被拉回播放、播放键来回跳（真机 beta2～
+ * beta4 实测）。拔耳机暂停由 ACTION_AUDIO_BECOMING_NOISY 接管，与焦点无关。
  */
 public class PlaybackService extends Service {
 
@@ -61,12 +65,8 @@ public class PlaybackService extends Service {
     private final ExecutorService io = Executors.newSingleThreadExecutor();
 
     private MediaSession session;
-    private AudioManager audioManager;
-    private AudioFocusRequest focusReq;
     private PowerManager.WakeLock wake;
     private BroadcastReceiver noisy;
-    private boolean focusHeld = false;
-    private boolean resumeOnFocus = false;
     private JSONObject meta = new JSONObject();
     private Bitmap coverBmp;
     private String coverLoaded = "";
@@ -101,7 +101,6 @@ public class PlaybackService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
         session = new MediaSession(this, "Elysium");
         session.setActive(true);
         session.setCallback(new MediaSession.Callback() {
@@ -158,57 +157,12 @@ public class PlaybackService extends Service {
     private void applyState(JSONObject j) {
         meta = j;
         boolean playing = j.optBoolean("playing", false);
-        updateFocus(playing);
         updateWake(playing);
         updateSession(playing);
         startForegroundTyped(buildNotification(playing));
         loadCoverAsync(j.optString("cover", ""));
     }
 
-    private void updateFocus(boolean playing) {
-        if (audioManager == null) {
-            return;
-        }
-        if (playing && !focusHeld) {
-            if (focusReq == null) {
-                focusReq = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                        .setAudioAttributes(new AudioAttributes.Builder()
-                                .setUsage(AudioAttributes.USAGE_MEDIA)
-                                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                                .build())
-                        .setOnAudioFocusChangeListener(this::onFocusChange)
-                        .build();
-            }
-            focusHeld = audioManager.requestAudioFocus(focusReq)
-                    == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
-        } else if (!playing && focusHeld) {
-            audioManager.abandonAudioFocusRequest(focusReq);
-            focusHeld = false;
-        }
-    }
-
-    private void onFocusChange(int change) {
-        switch (change) {
-            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
-            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
-                resumeOnFocus = true;
-                MainActivity.dispatchMedia("pause");
-                break;
-            case AudioManager.AUDIOFOCUS_LOSS:
-                resumeOnFocus = false;
-                focusHeld = false;
-                MainActivity.dispatchMedia("pause");
-                break;
-            case AudioManager.AUDIOFOCUS_GAIN:
-                if (resumeOnFocus) {
-                    resumeOnFocus = false;
-                    MainActivity.dispatchMedia("play");
-                }
-                break;
-            default:
-                break;
-        }
-    }
 
     /** 流媒体播放时兜住 CPU，避免熄屏后网络停摆（暂停即还）。 */
     private void updateWake(boolean playing) {
@@ -362,10 +316,6 @@ public class PlaybackService extends Service {
             } catch (Exception ignored) {
             }
             noisy = null;
-        }
-        if (focusReq != null && audioManager != null) {
-            audioManager.abandonAudioFocusRequest(focusReq);
-            focusHeld = false;
         }
         updateWake(false);
         if (session != null) {
