@@ -106,6 +106,15 @@ html[data-platform="android"] .wc-title{display:none}
 .wc-brand img{width:20px;height:20px;border-radius:6px;display:block}
 .wc-drag{flex:1 1 auto;min-width:0;height:100%;cursor:default}
 .wc-path{flex:0 0 auto;font-size:11px;color:var(--muted);max-width:34%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ------------------------------------------------------------ 品牌位分工
+   有自绘顶栏（desktop / web）→ 顶栏是唯一品牌位，侧栏顶部整块收起；
+   Android 宿主隐藏顶栏，侧栏（≤480px 时是左滑抽屉）保留品牌。
+   data-chrome="off" 一键回滚同样没有顶栏，此规则不生效，自动回退到侧栏。
+   必须写在本文件：style.css 的 ≤480px 段会强制 .brand-txt{display:flex}，
+   这里隐藏的是父级 .side-brand，且本文件后加载、选择器优先级更高。 */
+html[data-chrome="on"]:not([data-platform="android"]) .side-brand{display:none}
+
 .wc-ctrls{
   display:none;width:var(--wc-ctrls-w);flex:0 0 var(--wc-ctrls-w);height:100%;
   justify-content:flex-end;margin-left:auto;

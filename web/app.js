@@ -399,6 +399,9 @@ async function fetchUrl(item, q) {
 
 const mediaKey = (item, q) => `${item.platform}_${item.id}_${q.bitrate}_${q.format}`;
 function mediaSrc(item, q) {
+  if (item.platform === 'diag') {          // 网络自检测试音：本地生成，不经网络
+    return '/api/diag/tone';
+  }
   if (item.platform === 'work') {           // K 歌作品：本机 works/ 目录里的 wav
     return '/api/works/file?id=' + encodeURIComponent(item.id);
   }
@@ -1375,6 +1378,7 @@ function bindAudioEl(a) {
     if (!mine()) return;
     engResume();
     $('#playBtn').innerHTML = icon('pause');
+    syncNpDock();
     renderPlaying();
     mediaPushMeta(true);           // SMTC / Android 通知栏状态 → playing（即时，不吃节流）
     postLyricNow();
@@ -1382,6 +1386,7 @@ function bindAudioEl(a) {
   a.addEventListener('pause', () => {
     if (!mine()) return;
     $('#playBtn').innerHTML = icon('play');
+    syncNpDock();
     saveLastTrack(true);
     mediaPushMeta(true);
     postLyricNow();
@@ -1654,6 +1659,7 @@ function paintPlayer(item) {
   fb.classList.toggle('on', fav);
   paintSpec();
   mediaPushMeta(true);            // SMTC 元数据 + Android 通知栏同步换曲
+  if (!$('#npDrawer').hidden) renderNp();   // 换曲时展开层同步刷新头部与歌词
 }
 
 /* 迷你条：窗口缩成 430×138 只留播放条。窗口尺寸由 Python 侧改，
@@ -1679,6 +1685,8 @@ function paintSpec() {
   if (!q) { el.textContent = '—'; return; }
   if (state.playing && state.playing.platform === 'work') { el.textContent = '作品 · WAV'; return; }
   el.textContent = (q.format === 'flac' ? 'FLAC' : 'MP3') + ' · ' + q.bitrate + 'k';
+  const np = $('#npSpec');
+  if (np) np.textContent = el.textContent;   // 展开页曲目信息行的音质 chip 同步
 }
 
 let lastCountedKey = '';
@@ -1841,6 +1849,7 @@ function cycleMode() {
   btn.title = next.label;
   btn.classList.toggle('on', next.key !== 'order');
   post('/api/store', { op: 'settings', payload: { mode: next.key } }).catch(() => {});
+  syncNpDock();                              // 展开页模式键同步
   toast(next.label);
 }
 
@@ -1922,6 +1931,17 @@ function paintSeek() {
     const end = a.buffered.end(a.buffered.length - 1);
     $('#seekBuf').style.width = (d ? Math.min(1, end / d) * 100 : 0).toFixed(2) + '%';
   }
+  /* 全屏展开层的进度条：同一份数据，不再另起一个时钟 */
+  const nc = $('#npCurTime'), na = $('#npAllTime');
+  if (nc) nc.textContent = fmtTime(a.currentTime);
+  if (na) na.textContent = fmtTime(d);
+  const nf = $('#npSeekFill'), nd = $('#npSeekDot'), nb = $('#npSeekBuf');
+  if (nf) nf.style.width = (r * 100).toFixed(2) + '%';
+  if (nd) nd.style.left = (r * 100).toFixed(2) + '%';
+  if (nb && a.buffered.length) {
+    const end = a.buffered.end(a.buffered.length - 1);
+    nb.style.width = (d ? Math.min(1, end / d) * 100 : 0).toFixed(2) + '%';
+  }
 }
 
 /* ------------------------------------------------------------------ 渲染组件 */
@@ -1976,7 +1996,7 @@ function rowHtml(it, i, opt = {}) {
   <div class="tr${on ? ' on' : ''}${pr && !pr.valid && !pr.unresolved ? ' dead' : ''}" data-row="${i}" data-pk="${esc(pk(it))}" data-act="play" data-i="${i}">
     <div class="tr-n">
       ${on ? eqHtml() : `<span>${i + 1}</span>`}
-      <button class="tr-play" data-act="play" data-i="${i}" title="播放">${icon('play')}</button>
+      <button class="tr-play" data-act="play" data-i="${i}" title="播放" aria-label="播放">${icon('play')}</button>
     </div>
     ${coverHtml(it.cover)}
     <div class="tr-main">
@@ -1988,9 +2008,9 @@ function rowHtml(it, i, opt = {}) {
     <div class="tr-spec">${spec}</div>
     <div class="tr-dur mono">${fmtTime(it.duration)}</div>
     <div class="tr-act">
-      <button class="ic tr-kar" data-act="tr-karaoke" data-i="${i}" title="K歌这一首">${icon('mic')}</button>
-      <button class="ic${fav ? ' on' : ''}" data-act="fav" data-kind="song" data-i="${i}" title="收藏">${icon(fav ? 'heart' : 'heart-o')}</button>
-      ${loc ? '' : `<button class="ic" data-act="dl" data-i="${i}" title="下载">${icon('dl')}</button>`}
+      <button class="ic tr-kar" data-act="tr-karaoke" data-i="${i}" title="K歌这一首" aria-label="K歌这一首">${icon('mic')}</button>
+      <button class="ic${fav ? ' on' : ''}" data-act="fav" data-kind="song" data-i="${i}" title="收藏" aria-label="收藏">${icon(fav ? 'heart' : 'heart-o')}</button>
+      ${loc ? '' : `<button class="ic" data-act="dl" data-i="${i}" title="下载" aria-label="下载">${icon('dl')}</button>`}
     </div>
   </div>`;
 }
@@ -2225,10 +2245,10 @@ function recoCardHtml(it, i) {
     <div class="card-art">
       ${it.cover ? `<img src="${esc(it.cover)}" alt="" loading="lazy" onerror="this.remove()">` : phImg('song')}
       <div class="racts">
-        <button data-act="reco-play" data-i="${i}" title="播放">${icon('play')}</button>
-        <button data-act="reco-add" data-i="${i}" title="加入播放队列">${icon('queue')}</button>
-        <button data-act="reco-like" data-i="${i}" title="喜欢，多推这类">${icon('heart-o')}</button>
-        <button data-act="reco-dislike" data-i="${i}" title="不推荐这首">${icon('close')}</button>
+        <button data-act="reco-play" data-i="${i}" title="播放" aria-label="播放">${icon('play')}</button>
+        <button data-act="reco-add" data-i="${i}" title="加入播放队列" aria-label="加入播放队列">${icon('queue')}</button>
+        <button data-act="reco-like" data-i="${i}" title="喜欢，多推这类" aria-label="喜欢，多推这类">${icon('heart-o')}</button>
+        <button data-act="reco-dislike" data-i="${i}" title="不推荐这首" aria-label="不推荐这首">${icon('close')}</button>
       </div>
     </div>
     <div class="card-name">${esc(it.name || '')}</div>
@@ -2386,7 +2406,7 @@ function styleCardHtml(c) {
         <div class="stylecard-en">${esc(c.en)} · ${esc(c.group)}</div>
         <div class="stylecard-sub">${list.length} 首</div>
       </div>
-      <button class="stylecard-play" data-act="style-play" data-g="${esc(c.genre)}" title="播放这一组">${icon('play')}</button>
+      <button class="stylecard-play" data-act="style-play" data-g="${esc(c.genre)}" title="播放这一组" aria-label="播放这一组">${icon('play')}</button>
     </div>
     <div class="stylecard-list">${list.map((it) => `
       <div class="stylecard-row" data-act="style-one" data-g="${esc(c.genre)}" data-i="${list.indexOf(it)}">
@@ -2418,7 +2438,7 @@ function viewStyles() {
   return `<div class="page">
     <div class="vhead taste-head">
       <div class="kicker">ALL STYLES · LOCAL ONLY</div>
-      <h1>全风格歌单</h1>
+      <h1>风格电台</h1>
       <p class="sub">每个卡片是一种风格 · 卡片按你的口味加权、每天轮换</p>
     </div>
     <div class="vhead-acts" style="margin-bottom:14px">
@@ -2546,7 +2566,7 @@ function viewTaste() {
       <section class="taste-card">
         <div class="taste-head"><h2>我喜欢的风格</h2>
           <span class="cnt">${pad(picked)}</span></div>
-        <p class="rule-note">点一下就是选中 · 选中的风格会优先出现在「全风格歌单」</p>
+        <p class="rule-note">点一下就是选中 · 选中的风格会优先出现在「风格电台」</p>
         <div class="gpick-box" id="genrePicker">${genrePickerHtml()}</div>
         ${tasteTags(t.liked, 'good', '喜欢的')}
         ${tasteTags(t.excluded, 'bad', '已排除')}
@@ -2573,12 +2593,13 @@ function viewTaste() {
    不需要再在磁贴里重来一遍。搜索框在顶栏、收藏本和设置都在侧栏，也不用重复。 */
 function shortcutTilesHtml() {
   const feats = [
-    { label: '全风格', ic: 'folder', act: 'tile-styles' },
-    { label: '口味画像', ic: 'mic', act: 'taste' },
+    { label: '风格电台', ic: 'note', act: 'tile-styles' },
+    { label: '口味画像', ic: 'spark', act: 'taste' },          // 不再用麦克风图标，避免和 K 歌入口混淆
     { label: '收藏本', ic: 'lib', act: 'tile-lib' },
+    { label: '本地音乐', ic: 'disc', act: 'nav', view: 'local' },
   ];
   return `<div class="tiles">${feats.map((e) => `
-    <button class="tile fn" data-act="${e.act}">
+    <button class="tile fn" data-act="${e.act}"${e.view ? ` data-view="${e.view}"` : ''}>
       <span class="tile-art">${icon(e.ic)}</span>
       <span class="tile-name ell">${e.label}</span>
       <span class="tile-ic">${icon('fwd')}</span>
@@ -2591,7 +2612,6 @@ function viewHome() {
   const parts = [];
 
   parts.push(`<div class="vhead home-head">
-    <div class="kicker">ELYSIUM</div>
     <h1>${greeting()}</h1>
     <p class="sub">${state.recent.length
       ? `最近听了 <span class="mono">${state.recent.length}</span> 首，收藏 <span class="mono">${state.favs.length}</span> 项`
@@ -2616,7 +2636,7 @@ function viewHome() {
           ? ` · 听到 <span class="mono">${fmtTime(pos)}</span> / <span class="mono">${fmtTime(dur)}</span>` : ''}</div>
         <div class="cont-bar"><i style="width:${pct.toFixed(1)}%"></i></div>
       </div>
-      <button class="cont-play" data-act="resume" title="继续播放">${icon('play')}</button>
+      <button class="cont-play" data-act="resume" title="继续播放" aria-label="继续播放">${icon('play')}</button>
     </div>`);
   }
 
@@ -3081,7 +3101,7 @@ function viewLocal() {
               : rootsN > 1 ? '这些目录里还没有音频文件' : '下载目录里还没有音频文件'}</p>
     </div>
     <div class="vhead-acts">
-      <button class="btn" data-act="local-refresh" title="重新扫描曲库目录">${icon('retry')}重新扫描</button>
+      <button class="btn" data-act="local-refresh" title="重新扫描曲库目录" aria-label="重新扫描曲库目录">${icon('retry')}重新扫描</button>
       ${L.items.length ? `<button class="btn primary" data-act="local-playall">${icon('play')}播放全部</button>` : ''}
     </div>
   </div>`;
@@ -3432,13 +3452,13 @@ function queueRowsHtml() {
   return state.playList.map((it, i) => `
     <button class="qrow${i === state.playIndex ? ' on' : ''}" data-act="qplay" data-i="${i}"
             draggable="true" data-qi="${i}" title="拖动可调整顺序">
-      <span class="qrow-n">${i === state.playIndex ? '▶' : pad(i + 1)}</span>
+      <span class="qrow-n">${i === state.playIndex ? eqHtml() : pad(i + 1)}</span>
       <span class="qr-main">
         <span class="qr-name ell">${esc(it.name || '')}</span>
         <span class="qr-sub ell">${esc(it.artist || '')}</span>
       </span>
-      <span class="ic qr-next" data-act="qnext" data-i="${i}" draggable="false" title="插到下一首">${icon('next')}</span>
-      <span class="ic" data-act="qremove" data-i="${i}" draggable="false" title="移出队列">${icon('close')}</span>
+      <span role="button" tabindex="0" class="ic qr-next" data-act="qnext" data-i="${i}" draggable="false" title="插到下一首" aria-label="插到下一首">${icon('next')}</span>
+      <span role="button" tabindex="0" class="ic" data-act="qremove" data-i="${i}" draggable="false" title="移出队列" aria-label="移出队列">${icon('close')}</span>
     </button>`).join('');
 }
 
@@ -3538,50 +3558,80 @@ function onQueueDragEnd() {
   _dragTo = -1;
 }
 
-/* ------------------------------------------------- Now Playing 右侧面板 */
+/* ------------------------------------------------- Now Playing · SP 式全屏展开层
+   桌面 = SP 桌面端全屏歌词页，手机 = 同骨架竖排；一份 DOM、两套 CSS。
+   歌词容器 id 仍叫 npLyricBody，逐行高亮 / 自动跟随 / 点行 seek 整套复用。 */
 function openNp(tab) {
   state.npTab = tab || state.npTab || 'lyric';
   $('#npDrawer').hidden = false;
-  $('#panelDrawer').hidden = true;
-  $('#settingsDrawer').hidden = true;
+  ['panelDrawer', 'settingsDrawer', 'importDrawer', 'syncDrawer'].forEach(
+    (id) => { const el = document.getElementById(id); if (el) el.hidden = true; });
+  const side = document.querySelector('.side');
+  if (side) side.classList.remove('open');
   closeQualityMenu();
   renderNp();
+}
+
+/* 控制条状态：timeupdate / play / pause / 换曲 / 切音质 / 切模式 都会走到这里 */
+function syncNpDock() {
+  const a = audio();
+  const play = $('#npPlay');
+  if (play) play.innerHTML = icon(a.paused ? 'play' : 'pause');
+  const m = MODES.find((x) => x.key === state.mode) || MODES[0];
+  const mb = $('#npMode');
+  if (mb) { mb.innerHTML = icon(m.icon); mb.title = m.label; mb.classList.toggle('on', m.key !== 'order'); }
+  const fav = state.playing && isFav('song', state.playing.id, state.playing.platform);
+  const fb = $('#npFav');
+  if (fb) { fb.innerHTML = icon(fav ? 'heart' : 'heart-o'); fb.classList.toggle('on', !!fav); }
+  const vb = $('#npMute');
+  if (vb) vb.innerHTML = icon(a.muted ? 'vol-x' : 'vol');
+  const vol = $('#npVol');
+  if (vol) vol.value = Math.round(Number(state.settings.volume ?? 80));
+  const q = state.currentQuality;
+  const sp = $('#npSpec');
+  if (sp) sp.textContent = !q ? '—'
+    : (state.playing && state.playing.platform === 'work') ? '作品 · WAV'
+    : (q.format === 'flac' ? 'FLAC' : 'MP3') + ' · ' + q.bitrate + 'k';
+}
+
+/* 顶部信息 + 队列按钮状态（当前在队列视图时，按钮变成「回到歌词」） */
+function syncNpHead() {
+  const it = state.playing;
+  const art = $('#npArt');
+  if (!art) return;
+  art.innerHTML = it
+    ? (it.cover ? `<img src="${esc(it.cover)}" alt="" onerror="this.remove()">` : phImg('song'))
+    : phImg('song');
+  const t = $('#npTitle'), sub = $('#npSub');
+  if (t) t.textContent = it ? (it.name || '') : '未在播放';
+  if (sub) sub.textContent = it
+    ? [it.artist, it.album_name].filter(Boolean).join(' · ') : '选一首歌开始播放';
+  const qb = $('#npQueueBtn');
+  if (qb) {
+    qb.dataset.tab = state.npTab === 'queue' ? 'lyric' : 'queue';
+    qb.classList.toggle('on', state.npTab === 'queue');
+    qb.title = state.npTab === 'queue' ? '回到歌词' : '查看队列';
+  }
 }
 
 function renderNp() {
   const box = $('#npBody');
   if (!box || $('#npDrawer').hidden) return;
-  const tab = state.npTab || 'lyric';
-  $$('#npDrawer .dtab[data-tab]').forEach(
-    (b) => b.classList.toggle('on', b.dataset.tab === tab));
+  syncNpHead();
+  syncNpDock();
   const it = state.playing;
   if (!it) { box.innerHTML = emptyHtml('note', '未在播放', '选一首歌开始'); return; }
-  if (tab === 'queue') {
-    box.innerHTML = state.playList.length
+  if (state.npTab === 'queue') {
+    box.innerHTML = `<div class="np-queue">${state.playList.length
       ? queueHeadHtml() + queueRowsHtml()
-      : emptyHtml('queue', '队列是空的', '点任意一首歌开始播放');
+      : emptyHtml('queue', '队列是空的', '点任意一首歌开始播放')}</div>`;
     return;
   }
-  const q = state.currentQuality;
-  box.innerHTML = `<div class="np-hero">
-      <div class="np-art">${it.cover
-        ? `<img src="${esc(it.cover)}" alt="" onerror="this.remove()">` : phImg('song')}</div>
-      <div class="np-title">${esc(it.name || '')}</div>
-      <div class="np-sub">${esc(it.artist || '')}${it.album_name ? ' · ' + esc(it.album_name) : ''}</div>
-      <div class="np-badges">${srcBadge(it)}${q
-        ? `<button class="chip pq" data-act="pq">${q.format === 'flac' ? 'FLAC' : 'MP3 ' + q.bitrate + 'k'} · 切换音质</button>` : ''}</div>
-    </div>
-    <div class="np-lyric" id="npLyricBody"><span class="muted">正在取歌词…</span></div>
-    <div class="np-foot lrc-tools">
-      <button class="btn ghost sm" data-act="lrc-off" data-d="-0.5" title="歌词提前半秒（歌词比人声慢时用）">−0.5s</button>
-      <span class="mono" data-off>0ms</span>
-      <button class="btn ghost sm" data-act="lrc-off" data-d="0.5" title="歌词延后半秒（歌词比人声快时用）">+0.5s</button>
-      <button class="btn ghost sm" data-act="lrc-off" data-d="0" data-reset hidden>复位</button>
-      <span class="lrc-gap"></span>
-      <button class="btn ghost sm" data-act="karaoke">${icon('mic')}去K歌</button>
-      <button class="btn ghost sm" data-act="lyric-full">放大歌词</button>
-    </div>`;
+  /* 顶部工具行（时移 / 放大歌词）已按评审删除：时移仍可通过设置持久化生效，
+     独立歌词层保留完整工具行 */
+  box.innerHTML = `<div class="np-lyric" id="npLyricBody"><span class="muted">正在取歌词…</span></div>`;
   syncLrcOffUI();
+  if (window.bindLyricScroll) window.bindLyricScroll($('#npLyricBody'));
   loadNpLyric(it);
 }
 
@@ -3721,7 +3771,8 @@ async function loadNpLyric(it) {
     if (!$('#lyricLayer').hidden) renderLyricLines($('#lyricBody'), true);
   } catch (e) {
     const el = $('#npLyricBody');
-    if (el) el.innerHTML = `<span class="muted">取歌词失败：${esc(e.message)}</span>`;
+    if (el) el.innerHTML = `<span class="muted">歌词没有取到：${esc(e.message)}`
+      + `<button class="btn ghost sm" data-act="lrc-retry" title="重新取歌词">重试</button></span>`;
   }
 }
 
@@ -3760,11 +3811,11 @@ function renderTasks() {
     const pct = t.total ? Math.min(100, (t.got / t.total) * 100) : (t.state === 'done' ? 100 : 0);
     const cls = t.state === 'error' ? ' err' : t.state === 'done' ? ' done' : '';
     const acts = ACTIVE.includes(t.state)
-      ? `<button class="ic" data-act="dl-cancel" data-id="${t.id}" title="取消">${icon('close')}</button>`
+      ? `<button class="ic" data-act="dl-cancel" data-id="${t.id}" title="取消" aria-label="取消">${icon('close')}</button>`
       : t.state === 'error' || t.state === 'cancelled'
-        ? `<button class="ic" data-act="dl-retry" data-id="${t.id}" title="重试">${icon('retry')}</button>
-           <button class="ic" data-act="dl-remove" data-id="${t.id}" title="移除">${icon('trash')}</button>`
-        : `<button class="ic" data-act="dl-remove" data-id="${t.id}" title="移除">${icon('trash')}</button>`;
+        ? `<button class="ic" data-act="dl-retry" data-id="${t.id}" title="重试" aria-label="重试">${icon('retry')}</button>
+           <button class="ic" data-act="dl-remove" data-id="${t.id}" title="移除" aria-label="移除">${icon('trash')}</button>`
+        : `<button class="ic" data-act="dl-remove" data-id="${t.id}" title="移除" aria-label="移除">${icon('trash')}</button>`;
     return `<div class="task${cls}">
       <div class="task-top">
         <div class="task-cover">${t.cover ? `<img src="${esc(t.cover)}" alt="">` : phImg('song')}</div>
@@ -4226,7 +4277,7 @@ function libDirsHtml() {
     html += `<div class="lib-dir">
       <span class="ld-tag alt">曲库 ${i + 1}</span>
       <span class="ld-path mono" title="${esc(d)}">${esc(d)}</span>
-      <button class="ic" data-act="lib-remove" data-i="${i}" title="移除（不会删除文件）">${icon('close')}</button>
+      <button class="ic" data-act="lib-remove" data-i="${i}" title="移除（不会删除文件）" aria-label="移除（不会删除文件）">${icon('close')}</button>
     </div>`;
   });
   if (!extra.length) {
@@ -4521,6 +4572,23 @@ function viewSettings() {
     </div>
   </div>
 
+  <div class="set-sec">
+    <h4>网络自检</h4>
+    <div class="field">
+      <div><label>逐跳体检</label><p class="tip">「搜得到歌但放不出来」时逐跳定位：搜索与取流是两批不同主机，断哪一跳当场指认；不改动任何设置</p></div>
+      <div class="field-acts">
+        <button class="btn sm" id="diagBtn">开始自检</button>
+      </div>
+    </div>
+    <div class="field">
+      <div><label>本地测试音</label><p class="tip">不走网络，走同一条播放链：能响就说明解码 / 音频焦点 / 通知服务都没坏，问题只在网络链路</p></div>
+      <div class="field-acts">
+        <button class="btn sm" id="diagToneBtn">播放测试音</button>
+      </div>
+    </div>
+    <div id="diagOut"></div>
+  </div>
+
   <div class="set-ver">ELYSIUM ${state.version ? 'v' + esc(state.version) : ''} · 本机运行</div>`;
 }
 
@@ -4678,6 +4746,54 @@ function bindSettings() {
     try { api.lyric_window(e.target.checked); } catch (err) { /* 静默 */ }
   });
 
+  /* ---- 网络自检 ---- */
+  on('#diagBtn', 'click', async () => {
+    const btn = $('#diagBtn'), out = $('#diagOut');
+    if (!btn || !out) return;
+    btn.disabled = true;
+    btn.textContent = '检测中…';
+    out.innerHTML = '<p class="tip">正在逐跳探测（最长约 1 分钟）…</p>';
+    try {
+      const d = await getJson('/api/diag');
+      const hops = (d.data && d.data.hops) || [];
+      state.diagHops = hops;
+      out.innerHTML = hops.map((h) => `
+        <div class="diag-row ${h.ok ? '' : 'bad'}">
+          <span class="diag-mark">${h.ok ? '✓' : '✗'}</span>
+          <span class="diag-name">${esc(h.name)}</span>
+          <span class="mono diag-ms">${h.ms}ms</span>
+        </div>
+        <div class="diag-detail ${h.ok ? 'dim' : 'bad'}">${esc(h.detail || '')}</div>`).join('')
+        + '<button class="btn sm ghost" id="diagCopy">复制结果</button>';
+      const cp = $('#diagCopy');
+      if (cp) cp.addEventListener('click', () => {
+        const txt = (state.diagHops || []).map((h) =>
+          `${h.ok ? '✓' : '✗'} ${h.name} ${h.ms}ms ${h.detail || ''}`).join('\n');
+        navigator.clipboard.writeText(txt).then(
+          () => toast('已复制，可粘贴给开发者'),
+          () => toast('复制失败，请截图', 'err'));
+      });
+    } catch (e) {
+      out.innerHTML = `<div class="diag-detail bad">自检请求失败：${esc(e.message || e)}</div>`;
+    }
+    btn.disabled = false;
+    btn.textContent = '开始自检';
+  });
+  on('#diagToneBtn', 'click', () => {
+    /* 走主 <audio>：解码 / 音频焦点 / 通知服务一条链全测。
+       合成曲目占位，播完 ended 会被空队列吞掉，不惊动播放列表；
+       预置 lastCountedKey 防止 3 秒测试音被记进收听统计。 */
+    const it = { id: '__diag_tone', platform: 'diag', name: '自检测试音', artist: '本地', cover: '' };
+    state.playList = [];
+    state.playIndex = -1;
+    state.playing = it;
+    state.currentQuality = { format: 'wav', bitrate: 1411 };
+    lastCountedKey = songKey(it);
+    startTrack(it, [{ format: 'wav', bitrate: 1411 }], 0, 0, { keepCounted: true });
+    paintPlayer(it);
+    toast('正在播放本地测试音 · 有声 = 本地链路完好');
+  });
+
   /* ---- 窗口 ---- */
   on('#setTray', 'change', (e) => {
     save('tray', e.target.checked);
@@ -4753,7 +4869,8 @@ async function showLyric() {
     lyricLines = parseLrc(currentLyric, trans);
     renderLyricLines($('#lyricBody'), true);
   } catch (e) {
-    $('#lyricBody').innerHTML = `<span class="muted">取歌词失败：${esc(e.message)}</span>`;
+    $('#lyricBody').innerHTML = `<span class="muted">歌词没有取到：${esc(e.message)}`
+      + `<button class="btn ghost sm" data-act="lrc-retry" title="重新取歌词">重试</button></span>`;
   }
 }
 
@@ -4844,6 +4961,8 @@ async function doSearch(text, opts = {}) {
   state.q = { keyword: kw, page: 1, total: 0, merged: false, empty: [] };
   state.items = [];
   state.loading = true;
+  // 搜索也进返回栈：否则从首页搜完，顶栏返回键是死的（用户明明从首页来）
+  if (state.route.name !== 'search') state.stack.push(state.route);
   state.route = { name: 'search' };
   render();
 
@@ -4893,6 +5012,7 @@ async function openLink(link) {
     if (!list.length) { toast('没解析到这首歌'); return; }
     state.q = { keyword: list[0].name, page: 1, total: list.length };
     state.items = list;
+    if (state.route.name !== 'search') state.stack.push(state.route);
     state.route = { name: 'search' };
     render();
   } catch (e) {
@@ -5056,8 +5176,11 @@ function bind() {
   });
 
   $('#panelBtn').addEventListener('click', () => openPanel());
-  $('#panelBtn2').addEventListener('click', () => openNp('queue'));
+  $('#panelBtn2').addEventListener('click', () => openPanel('queue'));   // 队列回右侧抽屉：近空的列表不配全屏接管
   $('#plArt').addEventListener('click', () => openNp('lyric'));
+  // 标题/歌手区展开 NP 仅限手机：封面 48px 触区太小；桌面端点标题不该全屏接管
+  document.querySelector('.player .pl-meta')
+    ?.addEventListener('click', () => { if (window.innerWidth <= 480) openNp('lyric'); });
   $('#settingsBtn').addEventListener('click', openSettings);
   /* 抽屉遮罩：任一抽屉打开即压暗主区；点遮罩全部关闭。
      用 MutationObserver 盯 hidden 属性，覆盖所有开关路径（互斥切换 / data-close / Escape），免得逐点插桩。 */
@@ -5067,7 +5190,11 @@ function bind() {
   const sideEl = $('.side');
   const closeSideDrawer = () => { sideEl.classList.remove('open'); };
   const sideOpen = () => sideEl.classList.contains('open');
-  const syncDrawerMask = () => { $('#drawerMask').hidden = !_drawers.some((d) => !d.hidden) && !sideOpen(); };
+  /* 全屏展开层自己铺满视口，不需要遮罩；只有其它抽屉 / 手机侧栏才压暗主区 */
+  const syncDrawerMask = () => {
+    const others = _drawers.filter((d) => d.id !== 'npDrawer');
+    $('#drawerMask').hidden = !others.some((d) => !d.hidden) && !sideOpen();
+  };
   const drawerObs = new MutationObserver(syncDrawerMask);
   _drawers.forEach((d) => drawerObs.observe(d, { attributes: true, attributeFilter: ['hidden'] }));
   $('#drawerMask').addEventListener('click', () => {
@@ -5219,14 +5346,51 @@ function bind() {
     seek.addEventListener('pointerup', up);
   });
 
+  /* 全屏展开层：进度拖拽 / 音量沿用播放条同一套行为 */
+  const npSeek = $('#npSeekBar');
+  const npSeekAt = (e) => {
+    const a = audio();
+    const d = a.duration || 0;
+    if (!d) return;
+    const r = npSeek.getBoundingClientRect();
+    const x = Math.min(Math.max(0, e.clientX - r.left), r.width);
+    a.currentTime = (x / r.width) * d;
+    paintSeek();
+  };
+  npSeek.addEventListener('pointerdown', (e) => {
+    npSeek.setPointerCapture(e.pointerId);
+    npSeekAt(e);
+    const move = (ev) => npSeekAt(ev);
+    const up = () => {
+      npSeek.removeEventListener('pointermove', move);
+      npSeek.removeEventListener('pointerup', up);
+      saveLastTrack(true);
+    };
+    npSeek.addEventListener('pointermove', move);
+    npSeek.addEventListener('pointerup', up);
+  });
+  const npVol = $('#npVol');
+  npVol.addEventListener('input', () => {
+    const v = Number(npVol.value);
+    engVolume(v / 100);
+    state.settings.volume = v;
+    const pv = $('#vol'); if (pv) pv.value = v;
+    const sv = $('#setVol'); if (sv) sv.value = v;
+  });
+  npVol.addEventListener('change', () => {
+    post('/api/store', { op: 'settings', payload: { volume: Number(npVol.value) } }).catch(() => {});
+  });
+
   /* 媒体事件见 bindAudioEl()（引擎要重建元素，绑定跟着元素走） */
 
   /* 歌词容器：用户手动滚动后停止自动跟随，滚回当前行才恢复。
      程序自己触发的 smooth 滚动也会冒出 wheel 事件，所以用 lyricScrolling 排除掉，
      否则每次程序滚动都会被误判成「用户在滚」，随后彻底失去跟随。 */
-  ['npLyricBody', 'lyricBody'].forEach((id) => {
-    const el = document.getElementById(id);
-    if (!el) return;
+  /* npLyricBody 是展开层动态生成的，init 时还不存在 —— 做成可复用绑定，
+     由 renderNp 生成后调用；lyricBody（放大层静态节点）在这里直接绑。 */
+  window.bindLyricScroll = (el) => {
+    if (!el || el.dataset.lyricBound === '1') return;
+    el.dataset.lyricBound = '1';
     const mark = () => {
       if (lyricScrolling) return;
       lyricFollow = false;
@@ -5245,7 +5409,8 @@ function bind() {
         lyricFollow = true;
       }
     }, { passive: true });
-  });
+  };
+  window.bindLyricScroll(document.getElementById('lyricBody'));
 
   /* 键盘 */
   document.addEventListener('keydown', (e) => {
@@ -5254,6 +5419,10 @@ function bind() {
       if (e.key === 'Escape') e.target.blur();
       return;
     }
+    // role=button 卡片（推荐卡/队列操作等）没有原生 Enter/Space 激活；
+    // 不拦住的话，焦点在卡片上按空格会落到下面的全局播放/暂停，认知错位
+    const rb = e.target.closest && e.target.closest('[role="button"][data-act]');
+    if (rb && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); rb.click(); return; }
     if (e.code === 'Space') { e.preventDefault(); $('#playBtn').click(); }
     else if (e.code === 'ArrowRight') { e.preventDefault(); const x = audio(); if (x.duration) x.currentTime = Math.min(x.duration, x.currentTime + 5); }
     else if (e.code === 'ArrowLeft') { e.preventDefault(); const x = audio(); x.currentTime = Math.max(0, x.currentTime - 5); }
@@ -5353,6 +5522,10 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'quick': doSearch(el.dataset.kw); break;
+    case 'lrc-retry':                       // 歌词失败后的就地重试（NP 层 / 桌面歌词共用）
+      if (state.playing) loadNpLyric(state.playing);
+      else toast('当前没有在播的歌');
+      break;
     case 'resume': {
       const lt = pickLastTrack();
       if (!lt || !lt.item) { toast('没有上次播放记录'); break; }
@@ -5467,7 +5640,7 @@ document.addEventListener('click', async (e) => {
       const gid = el.dataset.g;
       const c = ((state.styles && state.styles.cards) || []).find((x) => x.genre === gid);
       if (!c || !c.list.length) break;
-      playAt(c.list, 0, { source: '全风格 · ' + c.name });
+      playAt(c.list, 0, { source: '风格电台 · ' + c.name });
       break;
     }
     case 'style-one': {
@@ -5476,7 +5649,7 @@ document.addEventListener('click', async (e) => {
       if (!c) break;
       const i = Number(el.dataset.i);
       if (!c.list[i]) break;
-      playAt(c.list, i, { source: '全风格 · ' + c.name });
+      playAt(c.list, i, { source: '风格电台 · ' + c.name });
       break;
     }
     case 'taste-save': {
@@ -5541,6 +5714,14 @@ document.addEventListener('click', async (e) => {
     case 'more': loadMore(); break;
 
     /* ------------------------------------------------------ K 歌 / 作品 */
+    /* 全屏展开层控制条：与播放条共用同一套逻辑，不另写一份状态机 */
+    case 'np-play': $('#playBtn').click(); break;
+    case 'np-prev': playNext(-1); break;
+    case 'np-next': playNext(1); break;
+    case 'np-mode': cycleMode(); break;
+    case 'np-fav': $('#plFav').click(); break;
+    case 'np-mute': $('#volBtn').click(); syncNpDock(); break;
+
     case 'karaoke': karaokeStart(state.playing); break;
     // 行内 K 歌按钮（手机主入口：没右键菜单；桌面 .tr-kar 默认隐藏）
     case 'tr-karaoke': {
@@ -6057,11 +6238,15 @@ function karPaintReady() {
       <div class="k-ready-s">${sub}</div>
       <div class="k-ready-s k-analyze" id="kAnalyze">正在取原唱数据…</div>
       <div class="k-ready-s k-analyze" id="kPitchProg"></div>
-      <button class="btn primary lg" id="kBegin" data-act="k-begin">${icon('mic')}${KAR.noMic ? '开始跟唱' : '开始演唱'}</button>
       <div class="k-hint">${KAR.noMic
         ? '想录自己的歌声请用桌面版（K2 阶段手机麦克风会跟上）'
         : '全程录音只保存在本机，唱完由你决定保存或丢弃'}</div>
     </div>`;
+  const kb = $('#kBegin');   // CTA 常驻坞传输行，随态显隐（karPaintCtl）
+  if (kb) { kb.innerHTML = icon('mic') + (KAR.noMic ? '开始跟唱' : '开始演唱'); kb.hidden = false; }
+  karPaintLines(0);          // 有词就预览「当前句」的样子；没词不留空壳（no-preview 退场）
+  const sLayer = $('#singLayer');
+  if (sLayer) sLayer.classList.toggle('no-preview', !KAR.lines.length);
   karPaintCtl(true);
 }
 
@@ -6122,6 +6307,7 @@ function karBindOnce() {
   const pk = $('#kPitch');
   if (pk) {
     pk.value = String(KAR.pitchSemi);
+    karPaintPitchTxt();
     pk.onchange = () => {
       if (KAR.phase !== 'ready') {             // 唱到一半换调会让伴奏跳变，禁
         pk.value = String(KAR.pitchSemi);
@@ -6156,6 +6342,96 @@ function karBindOnce() {
       }
     };
   }
+
+  /* —— 调音台面板 / 模式行（控件 id 不变，交互对齐全民K歌） —— */
+  karPaintMixer();
+  const mixer = $('#kMixer');
+  if (mixer) {
+    mixer.addEventListener('input', (e) => { if (e.target.classList.contains('k-fader')) karPaintFader(e.target); });
+  }
+  const mixerBtn = $('#kMixerBtn');
+  if (mixerBtn) {
+    mixerBtn.addEventListener('click', () => {
+      const p = $('#kMixer');
+      if (!p) return;
+      const on = p.hidden;
+      p.hidden = !on;
+      mixerBtn.classList.toggle('on', on);
+      mixerBtn.setAttribute('aria-expanded', String(on));
+    });
+  }
+  const chips = $('#kReverbChips');
+  if (chips) {
+    chips.addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-v]');
+      if (!b) return;
+      const rv = $('#kReverb');
+      if (!rv || rv.value === b.dataset.v) return;
+      rv.value = b.dataset.v;
+      rv.dispatchEvent(new Event('change'));
+      karPaintReverb();
+    });
+  }
+  const segOn = $('#kVocalOn'), segOff = $('#kVocalOff');
+  if (segOn) segOn.addEventListener('click', () => karSetVocalUI(false));   // 原唱 = 不消人声
+  if (segOff) segOff.addEventListener('click', () => karSetVocalUI(true));  // 伴唱 = 消人声
+  const dn = $('#kPitchDown'), up = $('#kPitchUp');
+  if (dn) dn.addEventListener('click', () => karNudgePitch(-1));
+  if (up) up.addEventListener('click', () => karNudgePitch(1));
+}
+
+/* —— 调音台 / 模式行的绘制与驱动 —— */
+function karSetVocalUI(vocalOff) {           // true=伴唱(消人声) false=原唱；复用 kVocal 的全套判定
+  const cb = $('#kVocal');
+  if (!cb || cb.checked === vocalOff) return;
+  cb.checked = vocalOff;
+  cb.dispatchEvent(new Event('change'));
+}
+function karNudgePitch(d) {
+  const pk = $('#kPitch');
+  if (!pk || pk.disabled) return;
+  const n = Math.max(-6, Math.min(6, (Number(pk.value) || 0) + d));
+  if (Number(pk.value) === n) return;
+  pk.value = String(n);
+  pk.dispatchEvent(new Event('change'));     // 拒绝（非 ready）时 onchange 会回写，读数跟着回
+  karPaintPitchTxt();
+}
+function karPaintPitchTxt() {
+  const el = $('#kPitchTxt');
+  if (!el) return;
+  const v = Number(($('#kPitch') || {}).value || 0);
+  el.textContent = v === 0 ? '原调' : (v > 0 ? '+' + v : '−' + Math.abs(v));
+}
+function karPaintReverb() {
+  const rv = $('#kReverb'), box = $('#kReverbChips');
+  if (!rv || !box) return;
+  [...box.querySelectorAll('button[data-v]')].forEach((b) => b.classList.toggle('on', b.dataset.v === rv.value));
+}
+function karPaintSeg() {                     // 原唱/伴唱高亮跟随 KAR.vocalOff
+  const on = $('#kVocalOn'), off = $('#kVocalOff');
+  if (!on || !off) return;
+  on.classList.toggle('on', !KAR.vocalOff);
+  off.classList.toggle('on', !!KAR.vocalOff);
+}
+function karPaintFader(el) {                 // 推子填充 + 通道读数
+  if (!el || !el.classList.contains('k-fader')) return;
+  const p = Math.round(((Number(el.value) - Number(el.min)) / (Number(el.max) - Number(el.min))) * 100) || 0;
+  el.style.background = `linear-gradient(90deg,var(--accent) ${p}%,var(--hover-2) ${p}%)`;
+  const out = { kAccVol: 'kAccValTxt', kMicVol: 'kMicValTxt', kTone: 'kToneValTxt' }[el.id];
+  const t = out && document.getElementById(out);
+  if (!t) return;
+  if (el.id === 'kTone') {
+    const n = Number(el.value);
+    t.textContent = n === 0 ? '适中' : (n > 0 ? '亮 +' + n : '厚 −' + Math.abs(n));
+  } else {
+    t.textContent = Math.round(Number(el.value)) + '%';
+  }
+}
+function karPaintMixer() {                   // 打开层/换歌后全量刷新一次
+  ['#kAccVol', '#kMicVol', '#kTone'].forEach((s) => karPaintFader($(s)));
+  karPaintReverb();
+  karPaintSeg();
+  karPaintPitchTxt();
 }
 
 function karSetVocal(cancelOn) {
@@ -6672,12 +6948,16 @@ function karClose() {
 function karPaintCtl(ready, singing) {
   const layer = $('#singLayer');
   if (layer) layer.classList.toggle('sing', !!singing);
+  if (layer) layer.classList.toggle('is-ready', !!ready && !singing);
+  const begin = $('#kBegin');
+  if (begin) begin.hidden = !ready;
   const fin = $('#kFinish');
   if (fin) fin.hidden = !singing;
   const back = $('#kBack');
   if (back) back.hidden = !!singing;
   const pk = $('#kPitch');
   if (pk) pk.disabled = !!singing;             // 变调只在 ready 态可选
+  $$('.k-pitch-btn').forEach((b) => { b.disabled = !!singing; });
 }
 
 /* ------------------------------------------------------------------ K 歌音准引擎（P9）
@@ -7123,6 +7403,7 @@ function karPitchTooLong() {
   KAR.decodedBuf = null;
   KAR.pitchBuf = null;
   const pk = $('#kPitch'); if (pk) pk.value = '0';
+  karPaintPitchTxt();
   const pr = $('#kPitchProg'); if (pr) pr.textContent = '';
   toast('这首歌超过 8 分钟，手机端暂不支持变调（内存限制）', 'err');
   return true;
@@ -7226,13 +7507,15 @@ function karApplyAutoVocal() {
   karPaintAutoTag();
 }
 
-/** 控制条上的「自动判定」小标签：让用户知道当前是自动结果还是手动选择 */
+/** 原伴切换的判定来源不占版面：写进切换器 tooltip（行内「手动」小标签已按评审删除） */
 function karPaintAutoTag() {
-  const el = $('#kAutoTag');
-  if (!el) return;
-  const key = songKey(KAR.item || {});
-  const manual = (state.settings.karaoke_vocal_pref || {})[key] !== undefined;
-  el.textContent = manual ? '手动' : (KAR.autoVocal ? '自动' : '…');
+  const seg = $('#kSeg');
+  if (seg) {
+    const key = songKey(KAR.item || {});
+    const manual = (state.settings.karaoke_vocal_pref || {})[key] !== undefined;
+    seg.title = '消原唱为' + (manual ? '手动选择' : (KAR.autoVocal ? '自动判定（人声居中的混音才能消）' : '分析中…'));
+  }
+  karPaintSeg();                             // 原唱/伴唱高亮与消人声状态同步
 }
 
 /** 唱的时候每个歌词行的参考音：行窗内参考旋律的中位数（野点已被中值滤波杀过）。
@@ -7300,13 +7583,13 @@ function viewWorks() {
   if (state.worksLoading && !works.length) body = emptyHtml('mic', '正在读取…', '从本机取作品列表');
   else if (!works.length) {
     body = emptyHtml('mic', '还没有作品',
-      '播放任意一首歌 → 正在播放面板 → 「去K歌」，唱完保存就会出现在这里');
+      '播放任意一首歌 → 展开页控制条的 K 歌键，唱完保存就会出现在这里');
   } else {
     body = `<div class="cards">${works.map((w) => `
       <div class="card wcard">
         <div class="card-art">${w.cover
           ? `<img src="${esc(w.cover)}" alt="" onerror="this.remove()">` : phImg('song')}
-          <button class="card-play" data-act="w-play" data-id="${esc(w.id)}" title="播放">${icon('play')}</button>
+          <button class="card-play" data-act="w-play" data-id="${esc(w.id)}" title="播放" aria-label="播放">${icon('play')}</button>
         </div>
         <div class="card-name ell">${esc(w.name || '未命名作品')}</div>
         <div class="card-sub ell">${esc(w.artist || '原唱未知')}</div>
@@ -7315,8 +7598,8 @@ function viewWorks() {
             .toLocaleDateString()}</span>
           <span class="wcard-acts">
             <a class="ic" href="/api/works/file?id=${esc(w.id)}" download="${esc((w.name || '作品') + '.wav')}"
-               title="导出 WAV">${icon('dl')}</a>
-            <button class="ic" data-act="w-del" data-id="${esc(w.id)}" title="删除">${icon('trash')}</button>
+               title="导出 WAV" aria-label="导出 WAV">${icon('dl')}</a>
+            <button class="ic" data-act="w-del" data-id="${esc(w.id)}" title="删除" aria-label="删除">${icon('trash')}</button>
           </span>
         </div>
       </div>`).join('')}</div>`;

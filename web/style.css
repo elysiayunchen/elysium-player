@@ -20,10 +20,10 @@ html[data-theme="dark"]{
   --line-2:rgba(255,255,255,.13);
   --ink:#f4f4f7;
   --ink-2:#c2c2cf;
-  --muted:#7b7b8a;
-  --accent:#ff5f8d;
-  --accent-2:#ff8fb2;
-  --accent-dim:rgba(255,95,141,.14);
+  --muted:#85859a;   /* 旧 #7b7b8a 在卡片上 4.47:1 踩线，#85859a 全表面 ≥4.9 */
+  --accent:#f5325b;   /* 与浅色同一颗（AM 系红粉）。旧 #ff5f8d 100% 饱和在近黑底上是塑料感来源 */
+  --accent-2:#ff5c7a; /* hover：亮一档但不回荧光 */
+  --accent-dim:rgba(245,50,91,.13);
   --gold:#e6b48a;
   --gold-dim:rgba(230,180,138,.12);
   --player:rgba(9,9,14,.9);
@@ -35,7 +35,7 @@ html[data-theme="dark"]{
   --h1-ls:-.02em;
   --h1-w:700;
   --seek-h:3px;
-  --glow:0 0 0 1px rgba(255,255,255,.06), 0 6px 20px rgba(255,95,141,.25);
+  --glow:0 0 0 1px rgba(255,255,255,.06), 0 6px 20px rgba(245,50,91,.22);
   --img-filter:none;
 }
 
@@ -53,7 +53,7 @@ html[data-theme="light"]{
   --line-2:rgba(0,0,0,.13);
   --ink:#0a0a0f;
   --ink-2:#3b3b45;
-  --muted:#86868f;
+  --muted:#6e6e78;   /* 旧 #86868f 在白卡上 3.61:1 不达 AA；#6e6e78 全表面 ≥4.7 */
   --accent:#f5325b;
   --accent-2:#ff6b8a;
   --accent-dim:rgba(245,50,91,.09);
@@ -82,6 +82,11 @@ body{
   transition:background .3s ease,color .3s ease;
 }
 button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+/* 键盘可达性：Tab 聚焦必须有可见环。用 :focus-visible 只对键盘触发，鼠标点击不打环；
+   输入框有自己的 border-color 聚焦态，不在此列 */
+button:focus-visible,[role="button"]:focus-visible,a:focus-visible{
+  outline:2px solid var(--accent);outline-offset:2px;
+}
 input,select{font:inherit;color:inherit}
 a{color:inherit;text-decoration:none}
 .sprite{display:none}
@@ -196,7 +201,10 @@ a{color:inherit;text-decoration:none}
 }
 
 /* ---------------------------------------------------------------- 主舞台 */
-.stage{grid-column:2;grid-row:1;display:flex;flex-direction:column;min-height:0;min-width:0}
+/* 背景必须自带不透明底色：L3 Acrylic 下 body 是 72% 半透明，
+   若 .stage/.view 透明，主区会直接透出桌面壁纸变成中灰，而 .side/.player
+   各有不透明背景仍保持近黑 —— 同一窗口被劈成灰/黑两套。 */
+.stage{grid-column:2;grid-row:1;display:flex;flex-direction:column;min-height:0;min-width:0;background:var(--bg)}
 
 .bar{
   flex:0 0 auto;height:62px;display:grid;
@@ -208,6 +216,15 @@ a{color:inherit;text-decoration:none}
 }
 .bar-l{justify-self:start;display:flex;align-items:center;gap:10px;min-width:0}
 .bar-r{justify-self:end;display:flex;align-items:center;gap:2px}
+
+/* 顶栏瘦身：返回/电台/队列/设置都有更顺路的入口（返回=手机专用、队列=mini条、
+   设置=侧栏、电台=首页磁贴）——桌面顶栏只留搜索 + 主题切换 */
+@media (min-width:481px){
+  #backBtn,#styleBtn,#panelBtn,#settingsBtn{display:none}
+}
+@media (max-width:480px){
+  #panelBtn{display:none}   /* mini 条右侧就有队列入口 */
+}
 
 .ic{
   width:32px;height:32px;border-radius:7px;display:grid;place-items:center;
@@ -847,7 +864,7 @@ input[type=range]:hover::-webkit-slider-thumb{background:var(--accent)}
 
 .qhead{
   display:flex;align-items:center;justify-content:space-between;gap:10px;
-  padding:4px 8px 10px;font-size:11px;color:var(--muted);
+  padding:4px 0 10px;font-size:11px;color:var(--muted);   /* 与卡片边缘对齐，不再缩进 8px 错位 */
 }
 .qhead .mono{font-size:10px;letter-spacing:.1em;text-transform:uppercase}
 .qrow{
@@ -937,6 +954,16 @@ input[type=range]:hover::-webkit-slider-thumb{background:var(--accent)}
 .switch:checked{background:var(--accent)}
 .switch:checked::after{left:18px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.28)}
 .set-actions{display:flex;flex-wrap:wrap;gap:7px;padding-top:6px}
+/* 网络自检逐跳结果：一跳一行（状态 + 名称 + 耗时），失败行下方给错误原文 */
+.diag-row{display:flex;align-items:center;gap:8px;padding:7px 0 2px;
+  border-top:1px dashed var(--line);font-size:12px}
+.diag-row .diag-mark{flex:0 0 auto;font-size:13px}
+.diag-row .diag-name{flex:1 1 auto;min-width:0}
+.diag-row .diag-ms{flex:0 0 auto;color:var(--muted);font-size:10.5px}
+.diag-detail{font-size:11px;line-height:1.5;color:var(--muted);padding:0 0 6px 21px;
+  word-break:break-all;font-family:ui-monospace,Consolas,monospace}
+.diag-detail.bad{color:var(--accent)}
+.diag-row.bad .diag-name{color:var(--accent)}
 .meter{height:5px;border-radius:3px;background:var(--hover-2);overflow:hidden;margin:8px 0 6px}
 .meter i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--gold));border-radius:3px}
 
@@ -1247,7 +1274,7 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
 /* --------------------------------------------- 首页 SP 化 / 口味画像页 */
 .shelf-acts{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .field-acts{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:2px 0 20px}
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:2px 0 20px}
 .tile{
   display:flex;align-items:center;gap:9px;min-width:0;height:52px;padding:0 10px 0 0;
   border-radius:8px;overflow:hidden;background:var(--card-2);border:1px solid var(--line);
@@ -1407,7 +1434,9 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
 
 @media(max-width:820px){
   .tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .taste-grid{grid-template-columns:1fr}
+  /* minmax(0,·)：裸 1fr 会被卡内某个不可收缩子元素的最小宽度撑爆轨道（实测 382>358） */
+  .taste-grid{grid-template-columns:minmax(0,1fr)}
+  .taste-card{min-width:0}
 }
 
 /* ---- 换批/重取的过渡态 ----
@@ -1490,8 +1519,15 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
 }
 .k-bg{
   position:absolute;inset:-8%;background:center/cover no-repeat;
-  filter:blur(46px) saturate(1.35);opacity:.28;transform:scale(1.12);
+  filter:blur(46px) saturate(1.05);opacity:.2;transform:scale(1.12);
   pointer-events:none;
+}
+/* 封面氛围光之上压一层主题色渐变罩：脏棕感消失，前景文字更稳 */
+.sing-layer::after{
+  content:'';position:absolute;inset:0;z-index:0;pointer-events:none;
+  background:linear-gradient(color-mix(in srgb,var(--bg) 58%,transparent) 0%,
+    color-mix(in srgb,var(--bg) 26%,transparent) 42%,
+    color-mix(in srgb,var(--bg) 52%,transparent) 100%);
 }
 .sing-layer::after{
   content:'';position:absolute;inset:0;pointer-events:none;
@@ -1508,9 +1544,19 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
 .k-prog-fill{height:100%;width:0;background:var(--accent);transition:width .12s linear}
 .k-stage{flex:1 1 auto;min-height:0;display:flex;align-items:center;
   justify-content:center;padding:12px 24px;text-align:center}
-.k-ready,.k-review{display:flex;flex-direction:column;align-items:center;
-  gap:12px;max-width:520px}
-.k-ready-t{font-size:24px;font-weight:700}
+/* ready 态：舞台只留一段居中说明（CTA 已在坞的传输行），
+   歌词预览占住歌词条；音准条是演唱态的东西 ready 隐掉；
+   计时器 ready 无意义——必须 display:none（visibility 会占位把居中 CTA 顶偏）。
+   行高由 .kc-trans 的 min-height 锁住，显隐不跳。没词时 k-lines 整个退场 */
+.sing-layer.is-ready .k-pitch{visibility:hidden}
+.sing-layer.is-ready .kc-trans .k-rec{display:none}
+.sing-layer.no-preview .k-lines{display:none}
+.k-ready{display:flex;flex-direction:column;align-items:center;gap:9px;
+  text-align:center;align-self:center;max-width:560px}
+.k-review{display:flex;flex-direction:column;align-items:center;
+  gap:12px;max-width:520px;align-self:center;text-align:center}
+.k-ready-t{font-size:20px;font-weight:700}
+.k-count{align-self:center}
 .k-ready-s{font-size:12.5px;color:var(--ink-2);line-height:1.7}
 .k-hint{font-size:11px;color:var(--muted)}
 .btn.lg{height:40px;padding:0 22px;font-size:13px}
@@ -1527,10 +1573,65 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
 .k-line.now{color:var(--ink);font-size:19px;font-weight:650}
 .k-trans{display:block;font-size:11px;font-weight:400;color:var(--muted);margin-top:3px}
 .k-nolrc{font-size:12px;color:var(--muted)}
-.k-ctl{flex:0 0 auto;display:flex;align-items:center;justify-content:center;
-  gap:16px;flex-wrap:wrap;padding:14px 24px 22px;
+/* 控制坞两行：传输行永远有重心（ready=开始演唱 / 演唱=计时+唱完了 / 倒数=计时），
+   控制行一个群组排开居中，窄屏自动换行 —— 不再用角落堆凑对称 */
+.k-ctl{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:10px;
+  padding:12px 26px 16px;
   border-top:1px solid var(--line);background:var(--bg-soft)}
-.k-vol{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--muted)}
+.kc-trans{display:flex;align-items:center;gap:14px;min-height:40px}
+.kc-row{display:flex;align-items:center;gap:14px;flex-wrap:wrap;justify-content:center}
+.kc-trans .k-rec{font-size:15px}
+/* —— 调音台面板：全民K歌式「调音」按钮拉起；通道化推子 + 混响预设 + 耳返开关 —— */
+.kc-mixer{
+  width:min(820px,100%);background:var(--card);border:1px solid var(--line);
+  border-radius:var(--radius-lg);padding:14px 18px;box-shadow:var(--shadow-s);
+  animation:fade .16s ease;
+}
+.km-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px 22px}
+.km-ch{display:flex;flex-direction:column;gap:8px;min-width:0}
+.km-ch.km-wide{grid-column:1/-1}
+.km-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.km-name{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--ink-2)}
+.km-name svg{width:13px;height:13px;fill:currentColor}
+.km-val{font-size:11px;color:var(--muted)}
+.km-ch .k-meter{width:100%}
+.km-ends{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);
+  margin-top:-2px;user-select:none}
+.km-echo{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--ink-2);cursor:pointer}
+.km-echo .switch{flex:0 0 auto}
+.km-chips{display:flex;gap:6px;flex-wrap:wrap}
+.km-chips button{
+  height:24px;padding:0 12px;border-radius:12px;font-size:11.5px;color:var(--muted);
+  border:1px solid var(--line);background:transparent;cursor:pointer;transition:.13s;
+}
+.km-chips button:hover{color:var(--ink);border-color:var(--line-2)}
+.km-chips button.on{color:var(--accent);border-color:var(--accent);background:var(--accent-dim)}
+/* 推子：调音台通道推杆，带填充与读数；比裸 range 厚一档 */
+.k-fader{width:100%;height:4px;border-radius:2px}
+.k-fader::-webkit-slider-thumb{
+  width:14px;height:14px;border-radius:50%;background:var(--ink);
+  box-shadow:0 1px 4px rgba(0,0,0,.45);
+}
+.k-fader:hover::-webkit-slider-thumb{background:var(--accent)}
+/* —— 模式行：原唱/伴唱 segmented + 变调步进 + 调音按钮 —— */
+.k-seg{display:flex;background:var(--card-2);border:1px solid var(--line);border-radius:9px;padding:2px;gap:2px}
+.k-seg button{height:26px;padding:0 14px;border-radius:7px;font-size:12px;color:var(--muted);cursor:pointer;transition:.13s}
+.k-seg button:hover{color:var(--ink)}
+.k-seg button.on{background:var(--accent-dim);color:var(--accent)}
+.k-step{display:flex;align-items:center;background:var(--card-2);border:1px solid var(--line);border-radius:9px;padding:2px;gap:1px}
+.k-pitch-btn{width:26px;height:26px;border-radius:7px;font-size:14px;color:var(--ink-2);cursor:pointer;transition:.13s}
+.k-pitch-btn:hover{background:var(--hover-2);color:var(--ink)}
+.k-pitch-btn:disabled{opacity:.35;cursor:default}
+.k-step-val{min-width:46px;text-align:center;font-size:12px;color:var(--ink-2);font-variant-numeric:tabular-nums}
+.k-mixer-btn{
+  display:flex;align-items:center;gap:6px;height:30px;padding:0 13px;border-radius:9px;
+  border:1px solid var(--line);background:var(--card-2);color:var(--ink-2);font-size:12px;cursor:pointer;transition:.13s;
+}
+.k-mixer-btn svg{width:13px;height:13px;fill:currentColor}
+.k-mixer-btn:hover{color:var(--ink);border-color:var(--line-2)}
+.k-mixer-btn.on{color:var(--accent);border-color:var(--accent);background:var(--accent-dim)}
+.k-vol{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--ink-2);
+  text-shadow:0 1px 2px rgba(0,0,0,.45)}   /* 暖棕渐变上 muted 几乎不可见，提一档 + 轻投影 */
 .k-vol svg{width:14px;height:14px;fill:currentColor}
 .k-vol input[type=range]{width:92px}
 .k-meter{width:64px;height:4px;border-radius:4px;background:var(--hover-2);overflow:hidden}
@@ -1652,7 +1753,7 @@ html[data-mini="on"] .pl-seek .mono{font-size:9.5px}
   .nav-btn,.tr-kar{display:grid}
 
   /* 骨架：单列，播放条 66px */
-  .shell{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr) 66px}
+  .shell{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr) 64px}
   /* .stage 基础规则 grid-column:2 是桌面双栏用的；单栏网格下它会掉进 0 宽
      隐式列，真机主内容区整个消失（v1.6.0 内容挤成一细条的根源）。必须拉回。 */
   .stage{grid-column:1;grid-row:1}
@@ -1678,8 +1779,12 @@ html[data-mini="on"] .pl-seek .mono{font-size:9.5px}
   .side-scroll{display:block}
   .side-foot{display:flex}
   .side-brand{justify-content:flex-start}
-  .drawer-mask{z-index:39}              /* 侧栏 40 / 遮罩 39 / 右抽屉 30：层次不变 */
-  .drawer{bottom:66px}                  /* 原值 bottom:92px 是桌面播放条高度，硬编码 */
+  /* 遮罩必须压在右抽屉之下（桌面 29 < 抽屉 30）——beta2 曾抬到 39 想贴近侧栏(40)，
+     结果遮罩 39 > 抽屉 30：真机上设置/面板/正在播放抽屉里每一次真实点击
+     都命中遮罩 → 全部抽屉被关闭（JS .click() 绕过命中测试，桌面模拟测不出）。
+     侧栏 40 仍在遮罩之上，遮罩 29 与桌面同层。 */
+  .drawer-mask{z-index:29}
+  .drawer{bottom:64px}                  /* 原值 bottom:92px 是桌面播放条高度，硬编码 */
   /* ≤820 的 .drawer{max-width:420px} 在 <420px 视口反而放大宽抽屉：
      .drawer.wide 基础宽度 430（优先级 0,2,0）压过媒体规则的 width:100%，
      只剩 max-width:420 兜住 → 420 > 390 视口，右锚定向左溢出 30px，
@@ -1694,18 +1799,19 @@ html[data-mini="on"] .pl-seek .mono{font-size:9.5px}
 
   /* 播放条：单行 flex，进度线悬浮在底边（时间数字进 np 抽屉看）。
      原 grid 三列在 390px 放不下，队列按钮会被挤到第二行。 */
-  .player{display:flex;align-items:center;gap:10px;height:66px;padding:0 12px;
+  .player{display:flex;align-items:center;gap:10px;height:64px;padding:4px 12px 0;
     padding-bottom:env(safe-area-inset-bottom)}
-  .pl-l{flex:1 1 auto}
-  .pl-m{flex:0 0 auto;width:auto;display:flex;flex-direction:row;align-items:center}
-  .pl-r{flex:0 0 auto}
-  #miniBtn,#lyricBtn,#plSub{display:none}
+  /* 三等分：控制键永远居中，左右各自贴边 —— flex:1 1 auto 会把控制键顶到右缘 */
+  .pl-l{flex:1 1 0;min-width:0}
+  .pl-m{flex:1 1 0;width:auto;display:flex;flex-direction:row;align-items:center;justify-content:center}
+  .pl-r{flex:1 1 0;justify-content:flex-end}
+  #miniBtn,#lyricBtn,#plSub,#modeBtn{display:none}   /* 模式键进 NP 坍找（npMode），mini 条三键对称居中 */
   .pl-art{width:42px;height:42px}
   .pl-play{width:34px;height:34px;margin:0 2px}
   .pl-ctrl{gap:2px}
   .pl-ctrl .ic{width:28px;height:28px}
-  .pl-seek{position:absolute;left:12px;right:12px;bottom:1px;width:auto;gap:0;
-    padding-bottom:env(safe-area-inset-bottom)}
+  .pl-seek{position:absolute;left:0;right:0;top:0;width:auto;gap:0}
+  .pl-seek .seek{height:8px}
   .pl-seek .mono{display:none}
 
   /* 曲目表：手机列表只要 封面/曲名/来源/操作；表头整行隐藏（移动端惯例） */
@@ -1725,10 +1831,183 @@ html[data-mini="on"] .pl-seek .mono{font-size:9.5px}
   .ask-card{width:min(360px,88vw)}
   .qmenu,.ctxmenu{max-width:calc(100vw - 16px)}
 
-  /* K 歌层：控件多，允许换行，贴安全区 */
+  /* K 歌层：控制行窄屏换行，调音台两列（高度减半），贴安全区 */
   .k-head{padding:12px 14px 8px;gap:10px}
   .k-stage{padding:4px 12px}
   .k-lines{height:88px}
-  .k-ctl{flex-wrap:wrap;gap:8px;padding:8px 12px calc(10px + env(safe-area-inset-bottom))}
+  .k-ctl{gap:8px;padding:8px 12px calc(10px + env(safe-area-inset-bottom))}
+  .kc-row{gap:10px}
+  .km-grid{grid-template-columns:1fr 1fr;gap:12px 16px}
+
+  /* NP 展开层（手机）：音质 chip 入坞，音量/静音让位（手机用硬件音量键） */
+  .np-kr #npVol,.np-kr #npMute{display:none}
+  .np-kr .np-spec{margin:0 2px 0 0}
   .k-vol input[type=range]{width:84px}
+}
+
+/* ---------------------------------------------------------------- 正在播放 · SP 式全屏展开层
+   桌面 = SP 桌面端全屏歌词页（小封面 / 大字逐行歌词 / 三段式底部控制条）；
+   手机 = 同骨架竖排。歌词容器是页面里唯一的滚动容器，外层不再滚 —— 彻底消掉
+   「手指落在歌词上被内层吃掉、永远够不到底部按钮」的嵌套滚动。
+   z-index 35：压过 drawer(30) / 播放条(12)，又让放大歌词层(40)、qmenu(50)、
+   K 歌层(70) 照常盖上来，不用改动其它浮层层级。 */
+.np-layer{
+  position:fixed;inset:0;z-index:35;
+  display:flex;flex-direction:column;min-height:0;
+  background:var(--bg);color:var(--ink);
+  padding:0 clamp(20px,4vw,56px);
+  animation:fade .18s ease;
+}
+.np-head{flex:0 0 auto;display:flex;align-items:center;gap:16px;padding:26px 0 0}
+.np-id{flex:1 1 auto;display:flex;align-items:center;gap:12px;min-width:0}
+.np-art{
+  width:54px;height:54px;flex:0 0 54px;border-radius:5px;overflow:hidden;
+  background:var(--card-2);display:grid;place-items:center;
+}
+.np-art img{width:100%;height:100%;object-fit:cover;display:block}
+.np-art svg{width:22px;height:22px;opacity:.5}
+.np-id-txt{min-width:0}
+.np-title{font-size:14px;font-weight:650;line-height:1.35;margin-top:0}
+.np-sub{font-size:12.5px;color:var(--muted);margin-top:3px;line-height:1.35}
+.np-spec{
+  margin-left:6px;flex:0 0 auto;font-size:10px;letter-spacing:.06em;
+  color:var(--muted);padding:4px 8px;border:1px solid var(--line);
+  border-radius:5px;background:transparent;cursor:pointer;transition:.13s;
+  min-width:72px;text-align:center;   /* 开局「—」→「MP3·320k」宽度不跳，头部不推挤 */
+}
+.np-spec:hover{color:var(--accent);border-color:var(--accent);background:var(--accent-dim)}
+.np-x{width:34px;height:34px;flex:0 0 34px}
+/* 返回键统一左上角 ←（替代右上角 ✕ 的页内返回语义） */
+.np-back{width:34px;height:34px;flex:0 0 34px;margin-right:8px;color:var(--ink-2)}
+.np-back:hover{color:var(--ink)}
+.np-back svg{width:20px;height:20px;fill:currentColor}
+.np-kr .np-spec{margin:0 2px 0 0}   /* 音质 chip 入坞后不再要头部那 6px 外边距 */
+
+.np-main{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;position:relative}
+.np-tools{
+  flex:0 0 auto;display:flex;align-items:center;justify-content:flex-end;gap:6px;
+  padding:10px 0;opacity:.45;transition:opacity .18s;
+}
+.np-main:hover .np-tools,.np-tools:focus-within{opacity:1}
+.np-tools .btn{height:24px;padding:0 8px;font-size:11px}
+
+/* 歌词：唯一滚动容器。上下 padding 给首尾行留出滚到中部的空间，
+   渐隐只压 5% 边缘，最后一行不会再被吞掉。
+   max-height:none / border:0 必须显式写：旧抽屉时代的
+   max-height:calc(100vh - 420px) 与 border-top 是同优先级规则，
+   不覆盖就会把歌词区压回硬编码高度，flex 拿不到剩余空间。 */
+.np-lyric{
+  flex:1 1 auto;min-height:0;width:100%;overflow-y:auto;overflow-x:hidden;
+  max-height:none;border:0;
+  position:relative;white-space:pre-wrap;
+  /* 左右对称：旧版左 220px/右 90px 的历史遗留把整列歌词推得偏左 */
+  padding:12vh clamp(28px,9vw,170px) 26vh;
+  font-size:clamp(26px,3.1vw,42px);font-weight:700;line-height:1.86;
+  letter-spacing:-.015em;
+  scrollbar-width:none;
+  mask-image:linear-gradient(transparent 0,#000 5%,#000 95%,transparent 100%);
+  -webkit-mask-image:linear-gradient(transparent 0,#000 5%,#000 95%,transparent 100%);
+}
+.np-lyric::-webkit-scrollbar{display:none}
+.np-lyric .lyric-line{
+  display:block;width:100%;text-align:left;background:none;border:0;
+  padding:0;margin:0;font:inherit;letter-spacing:inherit;line-height:inherit;
+  color:var(--ink-2);opacity:.28;cursor:pointer;transition:opacity .2s,color .2s;
+}
+.np-lyric .lyric-line.near{opacity:.55}
+.np-lyric .lyric-line.on{color:var(--accent);opacity:1}
+.np-lyric .lyric-line:hover{opacity:1}
+.np-lyric .lyric-line .lt{display:block;font-size:.42em;font-weight:400;line-height:1.5;color:var(--muted);opacity:.85;margin-top:4px;letter-spacing:0}
+.np-lyric .lyric-plain{font-size:clamp(18px,1.8vw,24px);font-weight:500;line-height:2;opacity:.75}
+/* 加载/失败占位不继承歌词巨字（42px/700）：报错信息不该是一堵墙。
+   重试按钮复用 .btn ghost sm；错误后重试走 data-act="lrc-retry" */
+.np-lyric > .muted,.lyric-body > .muted{
+  display:inline-flex;align-items:center;gap:12px;
+  font-size:13.5px;font-weight:400;line-height:1.7;letter-spacing:0;opacity:1;
+}
+
+.np-queue{flex:1 1 auto;min-height:0;overflow-y:auto;width:min(760px,100%);margin:0 auto;padding:20px 0 10px}
+.np-main .empty{margin:auto}
+
+/* 底部控制坞：进度整宽 + 三段式栅格（左右等宽，中间组绝对居中） */
+.np-dock{flex:0 0 auto;padding:12px 0 clamp(20px,3vh,32px)}
+.np-seek-row{display:flex;align-items:center;gap:12px}
+.np-seek-row .mono{font-size:10.5px;color:var(--muted);width:38px;flex:0 0 38px}
+.np-seek-row .mono:last-child{text-align:right}
+.np-seek-row .seek{height:16px}
+.np-seek-row .seek-tr,.np-seek-row .seek-fill,.np-seek-row .seek-buf{height:3px}
+.np-seek-row .seek-fill{background:var(--ink)}
+.np-seek-row .seek-dot{background:var(--ink);box-shadow:none}
+.np-keys{
+  display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:16px;margin-top:14px;
+}
+.np-kl,.np-kc,.np-kr{display:flex;align-items:center}
+.np-kl{justify-self:start;gap:18px}
+.np-kc{justify-self:center;gap:26px}
+.np-kr{justify-self:end;gap:14px}
+.np-ico{
+  width:26px;height:26px;flex:0 0 26px;display:grid;place-items:center;
+  color:var(--muted);opacity:.78;cursor:pointer;transition:.14s;
+  background:none;border:0;padding:0;
+}
+.np-ico:hover{color:var(--ink);opacity:1;transform:scale(1.08)}
+.np-ico.on{color:var(--accent);opacity:1}
+.np-ico svg{width:18px;height:18px;fill:currentColor}
+.np-play{
+  width:38px;height:38px;flex:0 0 38px;border-radius:50%;display:grid;place-items:center;
+  background:var(--ink);color:var(--bg);border:0;cursor:pointer;transition:.16s;
+}
+.np-play:hover{background:var(--accent);color:#fff;transform:scale(1.06)}
+.np-play svg{width:15px;height:15px;fill:currentColor}
+.np-kr input[type=range]{width:84px;flex:0 0 84px}
+
+/* 桌面有自绘标题栏时避开它（窗口按钮必须始终可点） */
+html[data-chrome="on"]:not([data-platform="android"]) .np-layer{top:var(--wc-title-h)}
+
+/* ---------------------------------------------------------------- 手机：同骨架竖排 */
+@media (max-width:480px){
+  .np-layer{padding:0 16px;
+    padding-top:env(safe-area-inset-top);
+    padding-bottom:env(safe-area-inset-bottom)}
+  .np-head{padding:14px 0 0}
+  .np-art{width:48px;height:48px;flex:0 0 48px}
+  .np-title{font-size:13px}
+  .np-sub{font-size:11.5px}
+  .np-spec{margin-left:2px;font-size:9.5px;padding:3px 6px}
+  .np-x{width:32px;height:32px;flex:0 0 32px}
+
+  .np-tools{justify-content:center;opacity:.7;padding:8px 0;flex-wrap:wrap}
+  .np-tools .btn{height:28px;font-size:11px}
+  .np-lyric{
+    padding:8vh 2px 26vh;
+    font-size:clamp(20px,5.8vw,25px);line-height:1.9;
+    mask-image:linear-gradient(transparent 0,#000 4%,#000 96%,transparent 100%);
+    -webkit-mask-image:linear-gradient(transparent 0,#000 4%,#000 96%,transparent 100%);
+  }
+  .np-lyric .lyric-line .lt{font-size:.46em}
+  .np-queue{padding:12px 0}
+
+  .np-dock{padding:10px 0 calc(14px + env(safe-area-inset-bottom))}
+  .np-seek-row{gap:8px}
+  .np-seek-row .mono{width:32px;flex:0 0 32px;font-size:10px}
+  /* 两行：播放三键独占一行居中放大，次要键在下一行左右均分 —— 触点 ≥32px */
+  .np-keys{
+    grid-template-columns:1fr 1fr;grid-template-areas:"c c" "l r";
+    gap:14px 8px;margin-top:12px;
+  }
+  .np-kc{grid-area:c;justify-self:center;gap:24px}
+  /* 两组各自在半区居中，比贴边更聚拢；中间留白与上排播放键形成呼吸感 */
+  .np-kl{grid-area:l;justify-self:center;gap:20px}
+  .np-kr{grid-area:r;justify-self:center;gap:16px}
+  .np-ico{width:32px;height:32px;flex:0 0 32px}
+  .np-ico svg{width:19px;height:19px}
+  .np-play{width:46px;height:46px;flex:0 0 46px}
+  .np-play svg{width:18px;height:18px}
+  .np-kr input[type=range]{display:none}   /* 手机走系统音量键，只留静音键 */
+}
+/* 矮窗 / 迷你条：收紧首尾留白，别把歌词挤没 */
+@media (max-height:520px){
+  .np-lyric{padding-top:4vh;padding-bottom:18vh;font-size:clamp(19px,2.6vw,26px)}
+  .np-dock{padding-bottom:10px}
+  .np-head{padding-top:12px}
 }
