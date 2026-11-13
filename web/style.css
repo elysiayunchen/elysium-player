@@ -363,6 +363,7 @@ input::placeholder,textarea::placeholder{color:var(--muted);opacity:1}
 .thead .th-src{width:58px;flex:0 0 58px}
 .thead .th-album{flex:0 1 200px;min-width:60px}
 .thead .th-spec{width:132px;flex:0 0 132px;text-align:right}
+.thead .th-size{width:56px;flex:0 0 56px;text-align:right}
 .thead .th-dur{width:52px;flex:0 0 52px;text-align:right}
 .thead .th-act{width:92px;flex:0 0 92px}
 
@@ -409,13 +410,18 @@ input::placeholder,textarea::placeholder{color:var(--muted);opacity:1}
 }
 .tr-album button{transition:.14s;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tr-album button:hover{color:var(--ink)}
-.tr-spec{width:132px;flex:0 0 132px;display:flex;align-items:center;gap:6px;justify-content:flex-end}
+.tr-spec{width:132px;flex:0 0 132px;display:flex;align-items:center;justify-content:flex-end}
+.tr-size{width:56px;flex:0 0 56px;text-align:right;color:var(--muted);
+  font-family:ui-monospace,Consolas,monospace;font-size:10.5px;letter-spacing:.02em;line-height:1}
 .chip{
   font-family:ui-monospace,Consolas,monospace;font-size:9px;letter-spacing:.1em;
   text-transform:uppercase;padding:1.5px 5px;border-radius:3px;
   border:1px solid var(--line-2);color:var(--muted);white-space:nowrap;
 }
 .chip.flac{border-color:rgba(230,180,138,.45);color:var(--gold);background:var(--gold-dim)}
+/* Hi-Res 实测规格徽标：容得下「FLAC 88.2kHz/24bit」（≤112px 的规格列）*/
+.chip.hi-res{border-color:var(--accent-2);color:var(--accent-2);background:var(--accent-dim);
+  letter-spacing:.02em;padding-left:4px;padding-right:4px;text-transform:none}
 .chip.hi{border-color:var(--line-2);color:var(--ink-2)}
 .chip.lo{opacity:.72}
 .chip.wait{opacity:.45;border-style:dashed}
@@ -460,7 +466,7 @@ input::placeholder,textarea::placeholder{color:var(--muted);opacity:1}
 .lnk:hover{opacity:.72}
 .tr.dead{opacity:.42}
 .tr.dead:hover{opacity:.72}
-.tr-spec .mono{color:var(--muted);font-size:10.5px}
+
 .tr-dur{width:52px;flex:0 0 52px;text-align:right;color:var(--muted)}
 .tr-act{
   width:92px;flex:0 0 92px;display:flex;justify-content:flex-end;gap:1px;
@@ -844,7 +850,12 @@ input[type=range]:hover::-webkit-slider-thumb{background:var(--accent)}
   font-style:normal;font-size:10px;color:var(--muted);
   font-family:ui-monospace,Consolas,monospace;
 }
-.drawer-body{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;min-height:0;padding:12px 10px 20px}
+.drawer-body{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;min-height:0;padding:12px 10px 20px;
+  container-type:inline-size;container-name:drawer}
+.loud-tbtn{flex:0 0 auto}
+.loud-target{flex-wrap:wrap}
+.eq-pre-val{flex:0 0 auto}
+.field-acts{flex-wrap:wrap}
 /* 抽屉遮罩：压暗主区、点按即关。z 在 .drawer(30) 之下、内容之上；
    标题栏由 window-chrome.css 提到更高层，窗口按钮不被拦截。 */
 .drawer-mask{
@@ -933,23 +944,31 @@ input[type=range]:hover::-webkit-slider-thumb{background:var(--accent)}
 .task.done .pbar i{background:var(--accent-2);opacity:.6}
 
 /* ---------------------------------------------------------------- 设置 */
-.set-sec{margin-bottom:20px}
-.set-sec > h4{
-  margin:0 0 10px;font-family:ui-monospace,Consolas,monospace;font-size:10px;
-  letter-spacing:.06em;color:var(--muted);font-weight:500;
+/* 分组卡片化：每节一个圆角卡片，15 段结构一眼可分；
+   旧版全段落挤在一条平底上靠 1px 线分割，没有主次、没有成组感 */
+.set-sec{
+  background:var(--card);border:1px solid var(--line);border-radius:13px;
+  padding:2px 13px 9px;margin:0 0 12px;
 }
+.set-sec > h4{
+  display:flex;align-items:center;gap:7px;
+  margin:0 -13px 6px;padding:9px 13px 8px;border-bottom:1px solid var(--line);
+  font-size:12px;font-weight:600;letter-spacing:.02em;color:var(--ink-2);
+}
+.set-sec > h4 svg{width:13px;height:13px;fill:var(--muted);flex:0 0 auto}
+.set-sec.danger > h4 svg{fill:#e5534b}
 .field{
-  display:flex;align-items:center;justify-content:space-between;gap:14px;
+  display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:14px;
   padding:10px 0;border-bottom:1px solid var(--line);
 }
 .field:last-child{border-bottom:0}
 .field > div{min-width:0}
-.field label{font-size:12.5px;display:block}
-.field .tip{font-size:11px;color:var(--muted);margin:2px 0 0;line-height:1.5}
+.field label{font-size:12.5px;font-weight:600;display:block;color:var(--ink);letter-spacing:.01em}
+.field .tip{font-size:11px;color:var(--muted);margin:3px 0 0;line-height:1.55}
 .field .btn{flex:0 0 auto;white-space:nowrap}
 .field select,.field input[type=text],.field input[type=number],.field input[type=password]{
-  height:30px;padding:0 9px;border-radius:7px;background:var(--card);
-  border:1px solid var(--line);outline:0;font-size:12px;max-width:170px;
+  height:31px;padding:0 10px;border-radius:8px;background:var(--card-2);
+  border:1px solid var(--line);outline:0;font-size:12px;min-width:0;max-width:180px;
 }
 .field select:focus,.field input:focus{border-color:var(--line-2)}
 .switch{-webkit-appearance:none;appearance:none;width:36px;height:20px;border-radius:10px;
@@ -960,27 +979,30 @@ input[type=range]:hover::-webkit-slider-thumb{background:var(--accent)}
 }
 .switch:checked{background:var(--accent)}
 .switch:checked::after{left:18px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.28)}
-.set-actions{display:flex;flex-wrap:wrap;gap:7px;padding-top:6px}
-/* 网络自检逐跳结果：一跳一行（状态 + 名称 + 耗时），失败行下方给错误原文 */
-.diag-row{display:flex;align-items:center;gap:8px;padding:7px 0 2px;
-  border-top:1px dashed var(--line);font-size:12px}
-.diag-row .diag-mark{flex:0 0 auto;font-size:13px}
-.diag-row .diag-name{flex:1 1 auto;min-width:0}
-.diag-row .diag-ms{flex:0 0 auto;color:var(--muted);font-size:10.5px}
-.diag-detail{font-size:11px;line-height:1.5;color:var(--muted);padding:0 0 6px 21px;
-  word-break:break-all;font-family:ui-monospace,Consolas,monospace}
-.diag-detail.bad{color:var(--accent)}
-.diag-row.bad .diag-name{color:var(--accent)}
-.meter{height:5px;border-radius:3px;background:var(--hover-2);overflow:hidden;margin:8px 0 6px}
-.meter i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--gold));border-radius:3px}
-
-/* 10 段均衡推子：竖排。竖着用 transform 旋转而不是 slider-vertical ——
-   后者在 Chromium 下会退回原生蓝色皮肤，跟主题打架。 */
+.set-actions{display:flex;flex-wrap:wrap;gap:7px;padding:10px 0 2px}
+/* 均衡器响应曲线（发烧客 D 组）：链路总响应一目了然 */
+.eq-curve{border:1px solid var(--line);border-radius:12px;background:var(--card-2);
+  padding:8px 10px 9px;margin:2px 0 6px}
+.eq-curve-head{display:flex;align-items:center;justify-content:space-between;gap:8px;
+  margin:0 2px 6px;font-family:ui-monospace,Consolas,monospace;font-size:9.5px;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.eq-curve-head .mono{text-transform:none;letter-spacing:.02em;font-size:9.5px;color:var(--ink-2)}
+/* 十段推子（主控面板）：竖排 10 推子，Q=1 峰型，31Hz–16kHz；
+   推子是 eq_bands 的标准位镜像视图 —— 两侧互为镜像，拖零即删段 */
+.eq-graphic{border:1px solid var(--line);border-radius:12px;background:var(--card-2);
+  padding:8px 10px 9px;margin:2px 0 6px}
 .eq-bands{display:flex;align-items:flex-end;justify-content:space-between;gap:2px;
-  padding:12px 2px 4px;border-top:1px solid var(--line);margin-top:4px}
+  padding:10px 2px 2px;margin-top:2px}
 .eq-band{flex:1 1 0;min-width:0;display:flex;flex-direction:column;align-items:center;gap:5px}
-.eq-band em{font-size:9px;font-style:normal;color:var(--muted);font-variant-numeric:tabular-nums;
-  letter-spacing:0}
+.eq-band .eq-db-in{
+  width:36px;height:18px;border:1px solid var(--line);border-radius:4px;background:var(--card);
+  color:var(--muted);font-size:9.5px;font-family:ui-monospace,Consolas,monospace;text-align:center;
+  font-variant-numeric:tabular-nums;letter-spacing:0;outline:0;padding:0;cursor:ns-resize;
+}
+.eq-band .eq-db-in:hover{border-color:var(--line-2);color:var(--ink)}
+.eq-band .eq-db-in:focus{border-color:var(--accent);color:var(--ink);box-shadow:0 0 0 3px var(--accent-dim)}
+.eq-band .eq-db-in::-webkit-outer-spin-button,.eq-band .eq-db-in::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.eq-band .eq-db-in[type=number]{-moz-appearance:textfield;appearance:textfield}
 .eq-band > span:last-child{font-size:9px;color:var(--muted);
   font-family:ui-monospace,Consolas,monospace}
 .eq-slot{position:relative;display:block;width:18px;height:92px}
@@ -998,6 +1020,41 @@ input[type=range]:hover::-webkit-slider-thumb{background:var(--accent)}
   box-shadow:0 0 0 3px var(--accent-dim);
 }
 .eq-slot input[type=range]:hover::-webkit-slider-thumb{background:var(--accent-2)}
+#eqCurve{display:block;width:100%;height:116px}
+/* 档案库：整行靠 block 布局铺满（其他控件行走右栏，这行塞不下 select+删档案钮），
+   select 弹性收缩 + 删档案钮不折行 —— 旧版塞在右栏里最小内容宽 ~158px，
+   420px 抽屉里右侧被 overflow-x:hidden 裁掉下拉箭头，删档案钮被挤换行 */
+#setEqLib{flex:1 1 auto;min-width:0;width:100%}
+.field-acts.eqlib-row{flex-wrap:nowrap}
+@media (max-width:480px){
+  .set-sec{padding:2px 12px 8px;margin:0 0 10px;border-radius:12px}
+  .set-sec > h4{margin:0 -12px 4px;padding:9px 12px 8px}
+  .field{gap:10px;padding:9px 0}
+}
+/* 网络自检逐跳结果：一跳一行（状态 + 名称 + 耗时），失败行下方给错误原文 */
+.diag-row{display:flex;align-items:center;gap:8px;padding:7px 0 2px;
+  border-top:1px dashed var(--line);font-size:12px}
+.diag-row .diag-mark{flex:0 0 auto;font-size:13px}
+.diag-row .diag-name{flex:1 1 auto;min-width:0}
+.diag-row .diag-ms{flex:0 0 auto;color:var(--muted);font-size:10.5px}
+.diag-detail{font-size:11px;line-height:1.5;color:var(--muted);padding:0 0 6px 21px;
+  word-break:break-all;font-family:ui-monospace,Consolas,monospace}
+.diag-detail.bad{color:var(--accent)}
+.diag-row.bad .diag-name{color:var(--accent)}
+.meter{height:5px;border-radius:3px;background:var(--hover-2);overflow:hidden;margin:8px 0 6px}
+.meter i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--gold));border-radius:3px}
+
+
+/* 窄宽自适应：字段行整体堆成一列 —— 标签/说明在上、控件在下，
+   再窄汉字也不会被压成「每行一字」；控件组自己换行，不出现在 row 里被挤压。
+   放在 .field 基础规则之后（同等特异性下后者生效） */
+@container drawer (max-width:430px){
+  .field{grid-template-columns:1fr;gap:6px;padding:10px 0;align-items:start}
+  .field .loud-target,.field .field-acts,.field .k-seg,.field .eq-sel-in{flex-wrap:wrap;justify-content:flex-start}
+  .field .switch{justify-self:start}
+  .field > div{min-width:0}
+}
+
 .set-ver{
   text-align:center;font-family:ui-monospace,Consolas,monospace;font-size:10px;
   color:var(--muted);letter-spacing:.14em;padding:18px 0 4px;
@@ -1141,12 +1198,13 @@ input[type=range]:hover::-webkit-slider-thumb{background:var(--accent)}
 /* ---------------------------------------------------------------- 响应式 */
 @media (max-width:1240px){
   .thead .th-album,.tr-album{flex:0 1 150px;min-width:50px}
-  .thead .th-spec,.tr-spec{width:112px;flex:0 0 112px}
+  .thead .th-spec,.tr-spec{width:120px;flex:0 0 120px}
   .thead .th-act,.tr-act{width:84px;flex:0 0 84px}
 }
 @media (max-width:1100px){
   .thead .th-album,.tr-album{display:none}
   .pl-spec{display:none}
+  .thead .th-size,.tr-size{display:none}
 }
 @media (max-width:1020px){
   .source{display:none}
@@ -1623,12 +1681,11 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
 }
 .k-fader:hover::-webkit-slider-thumb{background:var(--accent)}
 /* —— 模式行：原唱/伴唱 segmented + 变调步进 + 调音按钮 —— */
-/* segmented 两态基类：K 歌坞与设置抽屉均衡器共用一份（.set-seg 是 EQ 区的别名，
-   拆开必漂移） */
-.k-seg,.set-seg{display:flex;background:var(--card-2);border:1px solid var(--line);border-radius:9px;padding:2px;gap:2px}
-.k-seg button,.set-seg button{height:26px;padding:0 13px;border-radius:7px;font-size:12px;color:var(--muted);cursor:pointer;transition:.13s}
-.k-seg button:hover,.set-seg button:hover{color:var(--ink)}
-.k-seg button.on,.set-seg button.on{background:var(--accent-dim);color:var(--accent)}
+/* segmented：K 歌坞语汇（.k-seg） */
+.k-seg{display:flex;background:var(--card-2);border:1px solid var(--line);border-radius:9px;padding:2px;gap:2px}
+.k-seg button{height:26px;padding:0 13px;border-radius:7px;font-size:12px;color:var(--muted);cursor:pointer;transition:.13s}
+.k-seg button:hover{color:var(--ink)}
+.k-seg button.on{background:var(--accent-dim);color:var(--accent)}
 .k-step{display:flex;align-items:center;background:var(--card-2);border:1px solid var(--line);border-radius:9px;padding:2px;gap:1px}
 .k-pitch-btn{width:26px;height:26px;border-radius:7px;font-size:14px;color:var(--ink-2);cursor:pointer;transition:.13s}
 .k-pitch-btn:hover{background:var(--hover-2);color:var(--ink)}
@@ -2037,29 +2094,36 @@ html[data-chrome="on"]:not([data-platform="android"]) .np-layer{top:var(--wc-tit
 
 /* 参数段卡片：一块一段，类型 chips + 三条带读数的横推子（控件带标签读数，
    对齐 K 歌调音台）；增删改即时听感，落盘走 350ms 防抖 */
-.eq-params{display:flex;flex-direction:column;gap:8px;padding:12px 2px 4px;
-  border-top:1px solid var(--line);margin-top:4px}
-.eqb{background:var(--card-2);border:1px solid var(--line);border-radius:9px;padding:9px 10px 7px}
-.eqb-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}
-.eqb-del{width:22px;height:22px;border-radius:6px;border:1px solid transparent;background:transparent;
-  color:var(--muted);font-size:13px;line-height:1;cursor:pointer;transition:.13s;flex:0 0 auto}
+/* 频段选择条：曲线下的精确输入行（拖圆点改形态，这里输精确值） */
+.eq-selbar{border:1px solid var(--line);border-radius:12px;background:var(--card-2);
+  padding:9px 11px 10px;margin-top:10px}
+.eq-sel-row{display:flex;flex-direction:column;gap:8px}
+.eq-sel-head{display:flex;align-items:center;justify-content:space-between}
+.eq-sel-name{font-size:11.5px;color:var(--ink-2);letter-spacing:.04em}
+.eqb-del{width:26px;height:26px;border-radius:7px;border:1px solid transparent;background:transparent;
+  color:var(--muted);font-size:14px;line-height:1;cursor:pointer;transition:.13s;flex:0 0 auto}
 .eqb-del:hover{color:var(--accent);border-color:var(--accent)}
-.eqb-row{display:flex;align-items:center;gap:8px;padding:3px 0}
-.eqb-lab{font-size:11px;color:var(--muted);flex:0 0 30px}
-.eqb-row input[type=range]{flex:1 1 auto;min-width:0}
-.eqb-val{font-size:10.5px;color:var(--ink-2);flex:0 0 52px;text-align:right;
-  font-variant-numeric:tabular-nums}
-.eqb-fader{height:4px;border-radius:2px}
-.eqb-fader::-webkit-slider-thumb{
-  width:12px;height:12px;border-radius:50%;background:var(--ink);
-  box-shadow:0 1px 4px rgba(0,0,0,.45);
-}
-.eqb-fader:hover::-webkit-slider-thumb{background:var(--accent)}
-.eq-empty{font-size:11.5px;color:var(--muted);text-align:center;padding:16px 2px;margin:0}
+/* 段类型 chips：比 K 歌混响 chips 重一点 —— 这是调音台，不是效果器面板 */
+.eqb-type button{height:27px;padding:0 13px;font-size:11.5px;font-weight:600}
+.eqb-type button.on{box-shadow:0 0 0 1px var(--accent-dim),0 2px 12px rgba(245,50,91,.3)}
+.eq-sel-fields{display:flex;gap:8px}
+.eq-sel-field{display:flex;flex-direction:column;gap:3px;flex:1 1 0;min-width:0}
+.eq-sel-field>span:first-child{font-size:9px;color:var(--muted);letter-spacing:.14em}
+.eq-sel-in{display:flex;align-items:center;gap:5px;height:32px;padding:0 9px;
+  border:1px solid var(--line);border-radius:8px;background:var(--card);transition:.13s}
+.eq-sel-in:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
+.eq-sel-in input{flex:1 1 auto;min-width:0;border:0;outline:0;background:transparent;
+  color:var(--ink);font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
+.eq-sel-in input::-webkit-outer-spin-button,.eq-sel-in input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.eq-sel-in input[type=number]{-moz-appearance:textfield;appearance:textfield}
+.eq-sel-in i{font-style:normal;font-size:10px;color:var(--muted)}
+.eq-sel-empty{font-size:11.5px;color:var(--muted);text-align:center;
+  padding:11px 6px;line-height:1.7;margin:0}
+.eq-slot input[type=range]{cursor:ns-resize}
 
 /* 前级读数：内容比响度目标（−18 LUFS）长一截，不吃 .loud-tval 的 76px 定宽，
    两个步进器各自按内容收缩，避免同页两个组件宽度对不上 */
-.eq-pre-val{font-size:12px;color:var(--ink);text-align:center;white-space:nowrap}
+.eq-pre-val{font-size:13.5px;font-weight:600;color:var(--ink);text-align:center;white-space:nowrap}
 
 /* AutoEq 导入盒：型号 + 粘贴框 + 解析按钮，数据来源署名放页脚 */
 .eq-import{border:1px solid var(--line);border-radius:9px;background:var(--card-2);
@@ -2075,16 +2139,13 @@ html[data-chrome="on"]:not([data-platform="android"]) .np-layer{top:var(--wc-tit
 @media (max-width:480px){
   /* 手机段触点抬到 ≥28px（视觉不变，命中区加高 —— np-seek「16px 拇指裹 3px 轨」
      同一范式）：设置抽屉窄，参数段卡片是本次新增控件里触点最密的地方 */
-  .set-seg button{height:30px;padding:0 12px}
   .km-chips.eqb-type button{height:30px}
   .loud-tbtn{width:30px;height:30px}
-  .eqb{padding:7px 8px 5px}
-  .eqb-del{width:28px;height:28px}
-  .eqb-row input[type=range]{height:24px;background:transparent}
-  .eqb-row input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:var(--hover-2)}
-  .eqb-row input[type=range]::-webkit-slider-thumb{width:16px;height:16px;margin-top:-6px}
+  .eqb-del{width:32px;height:32px}
+  .eq-sel-in{height:38px}
+  .eq-sel-in input{font-size:13px}
   /* 主动作（加一段/导入）分掉整行宽度；删档案在档案库行内，不参与 */
-  #eqParamPane .set-actions .btn{flex:1 1 auto}
+  #eqPane .set-actions .btn{flex:1 1 auto}
   /* 徽标尾巴（96kHz/24bit）别把 390px 展开页的标题挤折行 */
   .np-spec{max-width:132px;overflow:hidden;text-overflow:ellipsis}
 }

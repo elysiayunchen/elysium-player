@@ -40,7 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "Elysium"
 APP_TITLE = "Elysium - 在线音乐"
-VERSION = "2.3.0-beta1"
+VERSION = "2.3.0-beta2"
 _BASE_URL = ""            # main() 里落值；桌面歌词小窗据此建页
 _LYRIC_WIN = None         # 桌面歌词小窗句柄（pywebview window 或 None）
 LEGACY_NAME = "FlacMusic"
@@ -2778,18 +2778,22 @@ def _local_dir():
 def _local_make_item(p, size, lid, deep):
     stem = os.path.splitext(os.path.basename(p))[0]
     if deep:
-        title, artist, album, fmt, dur, br = _local_read_tags(p, stem)
+        title, artist, album, fmt, dur, br, sr, bits = _local_read_tags(p, stem)
     else:
         title, artist, album = stem, "", ""
-        fmt, dur, br = os.path.splitext(p)[1].lower().lstrip("."), 0, 0
+        fmt, dur, br, sr, bits = os.path.splitext(p)[1].lower().lstrip("."), 0, 0, 0, 0
     if not fmt:
         fmt = os.path.splitext(p)[1].lower().lstrip(".") or "mp3"
-    return {
+    item = {
         "platform": "local", "id": lid, "name": title, "artist": artist,
         "album_name": album, "duration": dur, "size": size,
         "format": fmt, "bitrate": br,
         "minfo": [{"format": fmt, "bitrate": br or 320}],
     }
+    if sr and bits and (sr > 48000 or bits > 16):
+        # Hi-Res：两项都实测到、且超过 CD 规格才标（宁少报不虚报）
+        item["hires"] = {"sample_rate": sr, "bit_depth": bits}
+    return item
 
 
 def _local_scan_worker(entries, sig):
@@ -2966,7 +2970,7 @@ def _local_read_tags(path, stem):
     hit = _LOCAL_TAGS.get(path)
     if hit and hit[0] == mt:
         return hit[1]
-    title, artist, album, fmt, dur, br = stem, "", "", "", 0, 0
+    title, artist, album, fmt, dur, br, sr, bits = stem, "", "", "", 0, 0, 0, 0
     try:
         from mutagen import File as MFile
         m = MFile(path, easy=True)
@@ -2983,12 +2987,20 @@ def _local_read_tags(path, stem):
             fmt = _local_fmt_of(m)
             dur = int(getattr(m.info, "length", 0) or 0)
             br = int((getattr(m.info, "bitrate", 0) or 0) // 1000)
+            # 采样率/位深（发烧客实测口径：文件本体读出，不是标签声称）。
+            # WAV/AIFF 的 bits_per_sample 某些 mutagen 版本没有 —— 读不到就
+            # 留 0，前端不标（宁少报不虚报）。
+            try:
+                sr = int(getattr(m.info, "sample_rate", 0) or 0)
+                bits = int(getattr(m.info, "bits_per_sample", 0) or 0)
+            except Exception:
+                sr, bits = 0, 0
     except Exception:                                       # noqa: BLE001
         pass                                                # 单文件坏标签不影响整库
     if " - " in title and not artist:                       # 「歌手 - 歌名」文件名兜底
         artist, _, rest = title.partition(" - ")
         title, artist = rest.strip() or title, artist.strip()
-    out = (title, artist, album, fmt, dur, br)
+    out = (title, artist, album, fmt, dur, br, sr, bits)
     if len(_LOCAL_TAGS) > 8000:                             # 防极端目录把内存吃穿
         _LOCAL_TAGS.clear()
     _LOCAL_TAGS[path] = (mt, out)
