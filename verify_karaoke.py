@@ -18,6 +18,7 @@ U 组（Chrome 假麦端到端）
   U7  ★ 保存（raw octet-stream）→ 列表 +1 → 文件非静音 / 双声道 16bit / 时长正确
   U8  作品页渲染                                 U9  作品回放走 /api/works/file
   U10 关闭后 AudioContext / <audio> / 麦克风全释放
+  U12 耳返延迟自检面板（假麦下出结果/明确失败原因，不校数字）
   U11 无未捕获的严重异常
 
 U7 是这套自检存在的理由：保存若误用 post()（固定 JSON.stringify），
@@ -101,8 +102,14 @@ def wav_peak(body):
 def wait_js(driver, expr, timeout=25):
     end = time.time() + timeout
     last = None
+    # 括号包住：多行 IIFE 以换行开头时，`return\n(function...)` 会被 ASI
+    # 当成 `return;`，轮询永远拿不到结果。
+    script = expr if expr.lstrip().startswith("return") else "return (%s)" % expr
     while time.time() < end:
-        last = driver.execute_script("return " + expr)
+        try:
+            last = driver.execute_script(script)
+        except Exception:
+            last = None
         if last:
             return last
         time.sleep(0.2)
@@ -449,6 +456,24 @@ def main():
                   " && document.getElementById('singLayer').hidden"
                   " && KAR.ctx === null && KAR.resume === null;"),
               "层已收起且无孤儿节点")
+
+        # U12 耳返延迟自检面板：假麦下只需证明链路能出结果（结果行或明确失败原因），
+        # 数字本身在桌面假麦上无意义（假麦 beep 与输出脉冲互不相干）——真机数字靠 diag 面板实测。
+        # U9 回放的作品还在主 <audio> 里响；自检入口会正确拒绝「边放边测」，
+        # 用例先暂停，测的是自检链路本身。
+        d.execute_script("const a = audio && audio(); if (a) a.pause();")
+        d.execute_script("document.getElementById('settingsBtn').click();")
+        has_btn = wait_js(d, "!!document.getElementById('diagMicBtn')", timeout=10)
+        check("U12a 耳返延迟自检入口在 diag 面板", bool(has_btn), "diagMicBtn=%s" % has_btn)
+        d.execute_script("document.getElementById('diagMicBtn').click();")
+        # 注意：wait_js 拼 "return " + expr，表达式首行必须与 return 同行
+        # （换行触发 JS 的 ASI，变成空 return，永远拿到 null —— U12b 第一次挂就是它）
+        res = wait_js(d, r"""(function () {
+  const t = document.getElementById('diagOut').textContent;
+  return (t.includes('往返延迟') || t.includes('没测成')) ? t : null;
+})()""", timeout=35)
+        check("U12b 延迟自检出结果或给出明确失败原因",
+              bool(res) and ("往返延迟" in res or "没测成" in res), str(res)[:160])
 
         noise = ("favicon", "/api/local/cover", "/api/probe")
         errs = [e for e in d.get_log("browser")

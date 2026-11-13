@@ -5272,6 +5272,13 @@ function viewSettings() {
         <button class="btn sm" id="diagToneBtn">播放测试音</button>
       </div>
     </div>
+    <div class="field">
+      <div><label>耳返延迟自检</label><p class="tip">拔掉耳机、媒体音量开最大：扬声器放几发短脉冲、机身麦收，量「发出 → 麦里出现」的往返延迟。它和演唱页耳返走同一条采集+输出链，数字大就是平台栈天花板，不是设置能改的</p></div>
+      <div class="field-acts">
+        <button class="btn sm" id="diagMicBtn">测麦克风延迟</button>
+      </div>
+    </div>
+    <div id="diagOut"></div>
   </div>
 
   <div class="set-ver">ELYSIUM ${state.version ? 'v' + esc(state.version) : ''} · 本机运行</div>`;
@@ -5756,6 +5763,136 @@ function bindSettings() {
     startTrack(it, [{ format: 'wav', bitrate: 1411 }], 0, 0, { keepCounted: true });
     paintPlayer(it);
     toast('正在播放本地测试音 · 有声 = 本地链路完好');
+  });
+
+  /* ---- 耳返延迟实测：外放短脉冲 → 机身麦收，量「脉冲排定 → 采集链里出现」的 Δt。
+     这正是演唱页耳返的整条链（输出缓冲 + 采集缓冲之和），也是 JS 图里量不出来的两段；
+     桌面 / 真机同一把尺，数字能直接对比。前提：拔耳机（插着时扬声器会被系统关掉）、
+     媒体音量最大、环境安静 —— AEC/NS/AGC 已关，手机麦电平低，阈值只能靠本底噪声自适应。 */
+  function diagMicRtt() {
+    const mon = KAR_MON();
+    if (!mon) return Promise.reject(new Error('这个窗口没有麦克风接口'));
+    return mon({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } })
+      .then((stream) => {
+        const CE = window.AudioContext || window.webkitAudioContext;
+        if (!CE) {
+          stream.getTracks().forEach((t) => t.stop());
+          throw new Error('窗口没有 WebAudio');
+        }
+        const ctx = new CE();
+        const src = ctx.createMediaStreamSource(stream);
+        const tap = ctx.createScriptProcessor(256, 1, 1);
+        const sink = ctx.createGain(); sink.gain.value = 0;
+        src.connect(tap); tap.connect(sink); sink.connect(ctx.destination);
+        const warm = (ctx.state === 'suspended') ? ctx.resume().catch(() => {}) : Promise.resolve();
+        return new Promise((resolve) => {
+          const sr = ctx.sampleRate;
+          const N = 8;
+          const clicks = [];
+          const hits = [];
+          const gaps = [];
+          let lastCb = 0, noiseP = 0, calib = 0;
+          let thr = 0.03;
+          // 脉冲：60ms 1kHz 正弦 + 5ms 收边，满幅 —— 手机外放对机身麦要有足够信噪比
+          const burst = ctx.createBuffer(1, Math.round(sr * 0.06), sr);
+          const bd = burst.getChannelData(0);
+          for (let i = 0; i < bd.length; i += 1) {
+            const env = Math.min(1, Math.min(i, bd.length - 1 - i) / (sr * 0.005));
+            bd[i] = 0.9 * Math.sin(2 * Math.PI * 1000 * i / sr) * env;
+          }
+          for (let n = 0; n < N; n += 1) {
+            const s = ctx.createBufferSource();
+            s.buffer = burst;
+            s.connect(ctx.destination);
+            clicks.push(ctx.currentTime + 0.9 + n * 0.85);
+            s.start(clicks[n]);
+          }
+          tap.onaudioprocess = (e) => {
+            const now = ctx.currentTime;
+            if (lastCb > 0 && now > lastCb) gaps.push((now - lastCb) * 1000);
+            lastCb = now;
+            const d = e.inputBuffer.getChannelData(0);
+            // 前 0.5s 量本底噪声定阈值：不校准的话安静房间触发不了、嘈杂房间又全是误触发
+            if (calib < 0.5) {
+              for (let i = 0; i < d.length; i += 1) noiseP = Math.max(noiseP, Math.abs(d[i]));
+              calib += d.length / sr;
+              thr = Math.max(noiseP * 4, 0.02);
+              return;
+            }
+            const bufDur = d.length / sr;
+            for (let i = 0; i + 1 < d.length; i += 1) {
+              if (Math.abs(d[i]) < thr || Math.abs(d[i + 1]) < thr) continue;
+              const st = (now - bufDur + i / sr) * 1000;
+              for (let k = 0; k < N; k += 1) {
+                if (clicks[k] < 0) continue;
+                const lat = st - clicks[k] * 1000;
+                if (lat > 5 && lat < 600) {
+                  hits.push(lat);
+                  clicks[k] = -1;
+                  i += Math.round(sr * 0.05) - 1;   // 跳过这发脉冲的其余样本：一发只记一次
+                  break;
+                }
+              }
+            }
+          };
+          setTimeout(() => {
+            stream.getTracks().forEach((t) => t.stop());
+            try { tap.disconnect(); src.disconnect(); } catch (e) { /* 层已收 */ }
+            const r = {
+              sampleRate: sr, base: ctx.baseLatency, out: ctx.outputLatency,
+              hits, gaps, N,
+            };
+            ctx.close().catch(() => {});
+            resolve(r);
+          }, 900 + N * 850 + 1200);
+        });
+      });
+  }
+
+  on('#diagMicBtn', 'click', async () => {
+    const btn = $('#diagMicBtn'), out = $('#diagOut');
+    const a = audio();
+    if (state.playing && a.src && !a.paused) {
+      toast('测量需要安静环境：先暂停播放再跑延迟自检', 'err');
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = '测量中…';
+    out.innerHTML = '<div class="diag-detail dim">正在测：扬声器会放 8 发短脉冲（约 8 秒），保持安静、别遮麦克风…</div>';
+    try {
+      const r = await diagMicRtt();
+      const rate = Math.round(r.sampleRate);
+      const base = Number.isFinite(r.base) ? Math.round(r.base * 1000) : null;
+      const outL = Number.isFinite(r.out) ? Math.round(r.out * 1000) : null;
+      const g = (r.gaps || []).slice().sort((x, y) => x - y);
+      const gp = g.length ? Math.round(g[g.length >> 1]) : null;
+      const hits = (r.hits || []).slice().sort((x, y) => x - y);
+      const med = hits.length ? Math.round(hits[hits.length >> 1]) : null;
+      const lo = hits.length ? Math.round(hits[0]) : null;
+      const hi = hits.length ? Math.round(hits[hits.length - 1]) : null;
+      let verdict;
+      if (med === null) {
+        verdict = ['bad', '没测到脉冲：媒体音量开到最大、离扬声器近一点、别用耳机，再测一次'];
+      } else if (med < 90) {
+        verdict = ['dim', '耳返可用：这个水平耳朵基本感觉不到滞后（桌面 Chrome 通常 30–60ms）'];
+      } else if (med < 150) {
+        verdict = ['dim', '偏大：耳返滞后可感，快歌会拖拍 —— JS 图已是最优，差值在平台栈里'];
+      } else {
+        verdict = ['bad', '平台栈天花板：WebView 采集 + 输出缓冲太大，设置调不动，要原生低延迟直通（AudioRecord→AudioTrack）才能压下来'];
+      }
+      const row = (name, val) => '<div class="diag-row"><span class="diag-mark">✓</span>'
+        + '<span class="diag-name">' + name + '</span>'
+        + '<span class="mono diag-ms">' + val + '</span></div>';
+      out.innerHTML = row('往返延迟（耳返体感）', med === null ? '未测到' : med + 'ms' + (hits.length > 1 ? ' · 区间 ' + lo + '–' + hi : ''))
+        + row('采样率', rate === 48000 ? '48000 Hz（无重采样）' : rate + ' Hz（非 48k，桥接多一层重采样）')
+        + row('平台读数 base / output', (base === null || outL === null) ? '读不到' : base + 'ms / ' + outL + 'ms')
+        + row('采集回调粒度', gp === null ? '未测到' : 'p50 ' + gp + 'ms')
+        + '<div class="diag-detail ' + verdict[0] + '">' + esc(verdict[1]) + '</div>';
+    } catch (e) {
+      out.innerHTML = '<div class="diag-detail bad">' + esc((e && (e.name || e.message)) || String(e)) + ' · 麦克风没测成</div>';
+    }
+    btn.disabled = false;
+    btn.textContent = '测麦克风延迟';
   });
 
   /* ---- 窗口 ---- */
