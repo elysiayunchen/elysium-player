@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- K 歌：WebView getUserMedia 采麦克风；Android 6+ 还需运行时授予（MainActivity 申请） -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- 通知栏媒体控制：API 33+ 运行时申请，拒绝只是没有通知、不影响播放 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 

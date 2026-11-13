@@ -9,6 +9,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.webkit.JavascriptInterface;
+import android.webkit.PermissionRequest;
+import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -33,8 +35,11 @@ import java.lang.ref.WeakReference;
 public class MainActivity extends Activity {
 
     private static final int PORT = 18810;
+    private static final int REQ_RECORD_AUDIO = 7102;
     private static WeakReference<MainActivity> ref = new WeakReference<>(null);
     private WebView web;
+    /** 等系统权限对话框返回的麦克风请求（null = 没有在等）。 */
+    private PermissionRequest pendingMic;
 
     /** 让 PlaybackService / 通知按钮把命令打回页面（任意线程可调）。 */
     static void dispatchMedia(String cmd) {
@@ -130,6 +135,49 @@ public class MainActivity extends Activity {
         // 命中，把旧版 UI 压在盘上（beta1 用户实测）。回环地址没有网络成本，
         // 索性每次都向服务端取最新资源。
         web.getSettings().setCacheMode(android.webkit.WebSettings.LOAD_NO_CACHE);
+        /* K 歌麦克风：WebView 的 getUserMedia 必须先由宿主接管权限请求，再向系统申请
+           RECORD_AUDIO。不接管时默认实现一律拒绝 —— 页面只能退到听唱模式（无耳返）。 */
+        web.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public void onPermissionRequest(final PermissionRequest request) {
+                boolean audio = false;
+                for (String res : request.getResources()) {
+                    if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)) {
+                        audio = true;
+                    }
+                }
+                if (!audio || !isLocalOrigin(request.getOrigin())) {
+                    request.deny();
+                    return;
+                }
+                if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                        == PackageManager.PERMISSION_GRANTED) {
+                    request.grant(new String[]{PermissionRequest.RESOURCE_AUDIO_CAPTURE});
+                    return;
+                }
+                if (pendingMic != null) {
+                    try {
+                        pendingMic.deny();
+                    } catch (Exception ignored) {
+                    }
+                }
+                pendingMic = request;
+                try {
+                    requestPermissions(
+                            new String[]{Manifest.permission.RECORD_AUDIO}, REQ_RECORD_AUDIO);
+                } catch (Exception e) {
+                    pendingMic = null;
+                    request.deny();
+                }
+            }
+
+            @Override
+            public void onPermissionRequestCanceled(PermissionRequest request) {
+                if (pendingMic == request) {
+                    pendingMic = null;
+                }
+            }
+        });
         // 只加载 127.0.0.1 的本地页面（见 shouldOverrideUrlLoading），桥不会暴露给外站
         web.addJavascriptInterface(new AppBridge(), "ElysiumAndroid");
         web.setWebViewClient(new WebViewClient() {
@@ -157,8 +205,51 @@ public class MainActivity extends Activity {
         waitAndLoad();
     }
 
+    /** WebView 只加载 127.0.0.1（见 shouldOverrideUrlLoading）；权限也只给这个源。 */
+    private static boolean isLocalOrigin(Uri u) {
+        if (u == null) {
+            return false;
+        }
+        String scheme = u.getScheme() == null ? "" : u.getScheme();
+        String host = u.getHost() == null ? "" : u.getHost();
+        return ("http".equals(scheme) || "https".equals(scheme))
+                && (host.equals("127.0.0.1") || host.equals("localhost") || host.equals("::1"));
+    }
+
+    /** 系统麦克风权限对话框回来：答应就放行页面里挂起的 getUserMedia，拒绝就明确告知。 */
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions,
+                                           int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQ_RECORD_AUDIO) {
+            return;
+        }
+        PermissionRequest req = pendingMic;
+        pendingMic = null;
+        if (req == null) {
+            return;
+        }
+        boolean ok = grantResults.length > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+        try {
+            if (ok) {
+                req.grant(new String[]{PermissionRequest.RESOURCE_AUDIO_CAPTURE});
+            } else {
+                req.deny();
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
     @Override
     protected void onDestroy() {
+        if (pendingMic != null) {
+            try {
+                pendingMic.deny();
+            } catch (Exception ignored) {
+            }
+            pendingMic = null;
+        }
         // 壳退出：撤掉前台服务与通知，别留一个点不动的控制面板。
         // 旋转等配置变化走 configChanges 不重建；真重建（isFinishing=false）时保留服务。
         if (isFinishing()) {
