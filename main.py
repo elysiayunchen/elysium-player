@@ -40,7 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "Elysium"
 APP_TITLE = "Elysium - 在线音乐"
-VERSION = "2.3.0-beta2"
+VERSION = "2.3.0-beta3"
 _BASE_URL = ""            # main() 里落值；桌面歌词小窗据此建页
 _LYRIC_WIN = None         # 桌面歌词小窗句柄（pywebview window 或 None）
 LEGACY_NAME = "FlacMusic"

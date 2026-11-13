@@ -13,6 +13,7 @@ U 组（Chrome 假麦端到端）
   U2  明暗主题背景与文字色可区分
   U3  打开层 → ready 态                          U4  倒数 → sing 态
   U5  录音中：chunks 累积、麦克风电平、进度、监听总线在跑
+  U5b 开唱后倒数字清场 + 音准轨几何居中（旧版偏右 51px）
   U6  karStop → review 态、WAV blob 生成
   U7  ★ 保存（raw octet-stream）→ 列表 +1 → 文件非静音 / 双声道 16bit / 时长正确
   U8  作品页渲染                                 U9  作品回放走 /api/works/file
@@ -337,6 +338,22 @@ def main():
               "chunks=%d frames=%d busPeak=%.3f micMax=%.3f 电平条峰值=%.1f%% prog=%.1f%% t=%.2f ctx=%s"
               % (u5["chunks"], u5["frames"], u5["busPeak"], mic_max, width_max,
                  u5["prog"], u5["t"], u5["ctxState"]))
+
+        # 演唱态两个回归点：① 倒数的数字必须在开唱时清掉（旧版「1」留在舞台整首歌，
+        # 还占着 flex 把歌词压到底部）；② 音准轨必须几何居中（旧版左侧 88px 音名槽
+        # 把整条轨顶偏 51px，手机 390 宽上肉眼可见）。
+        u5b = d.execute_script(r"""
+        const bar = document.querySelector('.kp-bar').getBoundingClientRect();
+        return {
+          stage: (document.getElementById('kStage').innerHTML || '').trim(),
+          center: bar.left + bar.width / 2,
+          vw: innerWidth,
+        };
+        """)
+        check("U5b 开唱后倒数字清场、音准轨几何居中",
+              u5b["stage"] == "" and abs(u5b["center"] - u5b["vw"] / 2) <= 1.5,
+              "stage=%r railCenter=%.1f vw/2=%.1f"
+              % (u5b["stage"][:20], u5b["center"], u5b["vw"] / 2))
 
         d.execute_script("karStop();")
         u6 = d.execute_script(r"""
