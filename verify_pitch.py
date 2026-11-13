@@ -439,7 +439,7 @@ def main():
               const mv = document.getElementById('kMicVol');
               return { nomi: document.getElementById('singLayer').classList.contains('nomi'),
                 barHidden: bar ? getComputedStyle(bar).display === 'none' : null,
-                micHidden: mv ? getComputedStyle(mv.closest('label')).display === 'none' : null,
+                micHidden: mv ? getComputedStyle(mv.closest('.km-ch')).display === 'none' : null,
                 chunks: KAR.chunks.length };
             """)
             check("P9b 听唱模式进 sing、麦相关控件与音准条退场",

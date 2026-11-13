@@ -7209,6 +7209,7 @@ async function karaokeStart(item) {
   KAR.pitchSemi = Math.max(-6, Math.min(6, Number(state.settings.karaoke_pitch) || 0));
   KAR.pitchBuf = null;                         // 换歌必须重算变调
   $('#singLayer').hidden = false;
+  $('#singLayer').classList.remove('is-review', 'counting');
   karNoMicUI();
   karPaintReady();
   karBindOnce();
@@ -7235,14 +7236,22 @@ function karPaintReady() {
       : '这首歌没找到带时间轴的歌词 · 纯伴奏模式');
   $('#kStage').innerHTML = `
     <div class="k-ready">
+      <div class="k-ready-art" id="kReadyArt"><svg><use href="#i-mic-sing"/></svg></div>
       <div class="k-ready-t">${KAR.noMic ? '跟着一起唱' : '准备好开嗓'}</div>
       <div class="k-ready-s">${sub}</div>
-      <div class="k-ready-s k-analyze" id="kAnalyze">正在取原唱数据…</div>
-      <div class="k-ready-s k-analyze" id="kPitchProg"></div>
+      <div class="k-ready-notes">
+        <div class="k-analyze" id="kAnalyze">正在取原唱数据…</div>
+        <div class="k-analyze" id="kPitchProg"></div>
+      </div>
       <div class="k-hint">${KAR.noMic
         ? '想录自己的歌声请用桌面版（K2 阶段手机麦克风会跟上）'
         : '全程录音只保存在本机，唱完由你决定保存或丢弃'}</div>
     </div>`;
+  const art = $('#kReadyArt');
+  if (art && it.cover) {
+    art.style.backgroundImage = `url("${String(it.cover).replace(/"/g, '')}")`;
+    art.classList.add('has-cover');
+  }
   const kb = $('#kBegin');   // CTA 常驻坞传输行，随态显隐（karPaintCtl）
   if (kb) { kb.innerHTML = icon('mic') + (KAR.noMic ? '开始跟唱' : '开始演唱'); kb.hidden = false; }
   karPaintLines(0);          // 有词就预览「当前句」的样子；没词不留空壳（no-preview 退场）
@@ -7661,13 +7670,18 @@ async function karaokeBegin() {
   }
   karSetVocal(!KAR.vocalOff);
   KAR.phase = 'count';
-  $('#kStage').innerHTML = '<div class="k-count" id="kCount">3</div>';
+  const cap = $('#kClockCap');
+  if (cap) cap.textContent = '准备中';
+  $('#singLayer').classList.add('counting');
+  $('#kStage').innerHTML = '<div class="k-count-wrap"><div class="k-count pop" id="kCount">3</div>'
+    + '<div class="k-count-hint">准备好，马上开始</div></div>';
   karPaintCtl(false);
   try { await KAR.ctx.resume(); } catch (e) { /* ignore */ }
   for (const n of [3, 2, 1]) {
     const c = $('#kCount');
     if (!c) return;                        // 期间关了层
     c.textContent = n;
+    c.classList.remove('pop'); void c.offsetWidth; c.classList.add('pop');
     await new Promise((res) => setTimeout(res, 700));
   }
   karGo();
@@ -7678,6 +7692,12 @@ function karGo() {
   KAR.phase = 'sing';
   KAR.t0 = Date.now();
   KAR.chunks = [];
+  // 清掉倒数：旧版把「1」留在舞台整首歌，还占着 flex 把歌词压到底部
+  const stage = $('#kStage');
+  if (stage) stage.innerHTML = '';
+  $('#singLayer').classList.remove('counting');
+  const cap = $('#kClockCap');
+  if (cap) cap.textContent = '演唱中';
   if (KAR.bufSrc) {
     KAR.bufT0 = KAR.ctx.currentTime;
     KAR.bufSrc.start();                        // BufferSource 无自动播放策略问题
@@ -7721,6 +7741,20 @@ function karLoop() {
   }
   if (idx >= 0 && rms > KAR_SING_THR) KAR.sung[idx] = true;
   karPaintPitch(t, idx);
+  karPaintNowProgress(t, idx);
+}
+
+/** 当前句的跟唱进度（0~1）：按本句到下一句起点线性推进，写进 CSS 变量 --kp。
+   进度变化不足 1.2% 时跳过，避免每帧重算文字渐变。 */
+function karPaintNowProgress(t, idx) {
+  const el = $('#kNowLine');
+  if (!el || idx < 0 || !KAR.lines[idx]) return;
+  const a = KAR.lines[idx].t || 0;
+  const b = KAR.lines[idx + 1] ? KAR.lines[idx + 1].t : a + 4;
+  const p = Math.max(0, Math.min(1, (t - a) / Math.max(0.4, b - a)));
+  if (Math.abs(p - (KAR.nowP || 0)) < 0.012 && p < 1) return;
+  KAR.nowP = p;
+  el.style.setProperty('--kp', p.toFixed(3));
 }
 
 /** 音准上屏：大字音名 + 音分偏差 + 音阶刻度条。
@@ -7736,7 +7770,12 @@ function karPaintPitch(t, idx) {
     noteEl.classList.remove('ok', 'near', 'off');
     if (centsEl) centsEl.textContent = ref ? '等你开口' : '自由唱';
     if (needle) needle.style.left = '-10%';
-    if (target) target.style.left = '-10%';
+    if (target) {
+      // 还没开口也先把「该唱到的音」立在中轴：空轨道只剩一根线，看不出这句往哪唱
+      target.hidden = ref === null;
+      target.style.left = '50%';
+    }
+    if (ref !== null) karPaintScale(ref);
     return;
   }
   const cent = ref ? Math.round((um - ref) * 100) : null;
@@ -7778,8 +7817,9 @@ function karPaintScale(center) {
     const m = center + i;
     const pc = ((m % 12) + 12) % 12;
     const black = KAR_NOTE_NAMES[pc].includes('#');
+    // 刻度只画线，不再塞字母：26px 高的轨里字母会挤在一起，两端还会被圆角裁掉
     html += `<span class="kp-tick${black ? ' blk' : ''}${i === 0 ? ' c0' : ''}"
-      style="left:${((i + 7) / 14) * 100}%">${black ? '' : KAR_NOTE_NAMES[pc]}</span>`;
+      style="left:${((i + 7) / 14) * 100}%" aria-hidden="true"></span>`;
   }
   ticks.innerHTML = html;
 }
@@ -7798,16 +7838,27 @@ function karPaintLines(idx) {
   if (!box) return;
   const ls = KAR.lines;
   if (!ls.length) { box.innerHTML = '<div class="k-nolrc">纯伴奏模式 · 尽情唱</div>'; return; }
-  const row = (l, cls) => `<div class="k-line ${cls}">${esc((l && l.text) || '')}`
-    + ((l && l.trans) ? `<span class="k-trans">${esc(l.trans)}</span>` : '') + '</div>';
-  box.innerHTML = (ls[idx - 1] ? row(ls[idx - 1], 'dim') : '<div class="k-line dim"></div>')
-    + (ls[idx] ? row(ls[idx], 'now') : '<div class="k-line now">&nbsp;</div>')
-    + (ls[idx + 1] ? row(ls[idx + 1], 'dim') : '<div class="k-line dim"></div>');
+  // 当前句包一层 span：跟唱进度要在「文字本身」上做渐变，整行背景会被拉成通栏
+  const row = (l, cls, now) => {
+    const txt = esc((l && l.text) || '') || '&nbsp;';
+    return `<div class="k-line ${cls}">`
+      + (now ? `<span class="k-line-txt" id="kNowLine">${txt}</span>` : txt)
+      + ((l && l.trans) ? `<span class="k-trans">${esc(l.trans)}</span>` : '') + '</div>';
+  };
+  // 七句一屏（三句已唱 / 当前 / 三句将唱）：歌词铺满主区，不再只缩在中间一条
+  const near = (i, cls) => (ls[i] ? row(ls[i], cls) : '');
+  box.innerHTML = near(idx - 3, 'far') + near(idx - 2, 'far') + near(idx - 1, 'dim')
+    + (ls[idx] ? row(ls[idx], 'now', true)
+      : '<div class="k-line now"><span class="k-line-txt" id="kNowLine">&nbsp;</span></div>')
+    + near(idx + 1, 'dim') + near(idx + 2, 'far') + near(idx + 3, 'far');
+  KAR.nowP = -1;                       // 换行后进度从 0 重新推
 }
 
 function karStop() {
   if (KAR.phase !== 'sing') return;
   KAR.phase = 'review';
+  $('#singLayer').classList.remove('counting');
+  $('#singLayer').classList.add('is-review');
   if (KAR.bufSrc) {
     try { KAR.bufSrc.stop(); } catch (e) { /* 已结束 */ }
   } else {
@@ -7936,6 +7987,7 @@ function karClose() {
     decodedBuf: null, pitchBuf: null, bufSrc: null, pitchCtx: null });
   karScaleCenter = null;
   karNoMicUI();
+  $('#singLayer').classList.remove('is-review', 'counting');
   $('#singLayer').hidden = true;
   // 还位：播放器回到进入前的位置（保持暂停，用户自己决定续不续）
   if (KAR.resume) {
