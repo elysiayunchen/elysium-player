@@ -71,6 +71,21 @@ public class MainActivity extends Activity {
             }
         }
 
+        /** 前端「去系统设置」：麦克风被拒后直接打开本应用的权限页。 */
+        @JavascriptInterface
+        public boolean openAppSettings() {
+            try {
+                Intent it = new Intent(
+                        android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:" + getPackageName()));
+                it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(it);
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
         /** 前端「安装更新」：把下载好的 APK 经 FileProvider 交给系统安装器。 */
         @JavascriptInterface
         public boolean installUpdate(String path) {

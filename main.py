@@ -40,7 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "Elysium"
 APP_TITLE = "Elysium - 在线音乐"
-VERSION = "2.3.0-beta4"
+VERSION = "2.3.0-beta5"
 _BASE_URL = ""            # main() 里落值；桌面歌词小窗据此建页
 _LYRIC_WIN = None         # 桌面歌词小窗句柄（pywebview window 或 None）
 LEGACY_NAME = "FlacMusic"
@@ -161,7 +161,13 @@ DEFAULT_STORE = {
 # 本地存储
 # --------------------------------------------------------------------------
 def fav_key(f):
-    """收藏唯一键：类型 + id + 平台。旧数据没有 kind，按 song 处理。"""
+    """收藏唯一键：类型 + id + 平台。旧数据没有 kind，按 song 处理。
+
+    非对象项（手改 / 同步盘截断后混进来的数字、字符串）没有唯一键，
+    返回一个永远不会与合法收藏相等的哨兵，调用方负责清理。
+    """
+    if not isinstance(f, dict):
+        return (None, None, None)
     return ((f.get("kind") or "song"), str(f.get("id")), f.get("platform"))
 
 
@@ -214,8 +220,61 @@ def work_new_id():
 def _clamp_int(v, lo, hi, default=0):
     try:
         return max(lo, min(hi, int(v)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
+
+
+def _safe_int(v, default=0):
+    """任意输入转 int：脏数据（null / "abc" / NaN / inf）一律回默认值。
+
+    int(float("inf")) 抛的是 OverflowError，不是 ValueError —— 只写
+    (TypeError, ValueError) 会让一条畸形记录把整个聚合接口带崩。
+    """
+    try:
+        return int(v)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            return int(float(v))
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+
+def _as_dict(v):
+    return v if isinstance(v, dict) else {}
+
+
+# json.dumps 默认把 NaN / Infinity 写成同名非法字面量：Python 自己读得回来，
+# 浏览器的 JSON.parse 直接 SyntaxError。data.json 里只要混进一个，
+# /api/store 的响应就让前端 boot 失败 —— 整页数据全空。
+# 所有从 HTTP 进来的 payload 与落盘数据都先过这一层：非有限浮点丢弃、
+# 超深/超大结构截断，保证发给前端的永远是合法 JSON。
+_JSON_DROP = object()
+
+
+def _json_safe(v, depth=0):
+    if v is None or isinstance(v, (bool, int, str)):
+        return v
+    if isinstance(v, float):
+        return v if math.isfinite(v) else _JSON_DROP
+    if depth >= 24:
+        return _JSON_DROP
+    if isinstance(v, list):
+        out = []
+        for x in v:
+            y = _json_safe(x, depth + 1)
+            if y is not _JSON_DROP:
+                out.append(y)
+        return out
+    if isinstance(v, dict):
+        out = {}
+        for k, x in v.items():
+            if not isinstance(k, str):
+                continue
+            y = _json_safe(x, depth + 1)
+            if y is not _JSON_DROP:
+                out[k] = y
+        return out
+    return _JSON_DROP
 
 
 def work_meta(qs, size):
@@ -249,6 +308,34 @@ def work_meta(qs, size):
     except ValueError:
         pass
     return meta
+
+
+def _clean_work(item):
+    """store 的 work_add 是公开 op：只收与 work_meta 同口径的字段。
+
+    /api/works/upload 走 work_meta，但直接调 /api/store 可以绕过它 ——
+    不在这里再收一次口，任意对象/NaN/超长字符串都能进 data.json。
+    """
+    item = _as_dict(item)
+    wid = str(item.get("id") or "")
+    if not WORK_ID_RE.match(wid):
+        return None
+    out = {"id": wid}
+    for k, cap in (("name", 120), ("artist", 120), ("platform", 20),
+                   ("sid", 64), ("cover", 600)):
+        out[k] = str(item.get(k) or "")[:cap]
+    out["name"] = out["name"] or "未命名作品"
+    for k, lo, hi in (("duration", 0, 7200), ("created", 0, 2 ** 31),
+                      ("size", 0, WORK_MAX_BYTES), ("pitch_hit", 0, 9999)):
+        if k in item:
+            out[k] = max(lo, min(hi, _safe_int(item.get(k))))
+    try:
+        v = float(item.get("pitch_avg"))
+        if math.isfinite(v):
+            out["pitch_avg"] = round(max(0.0, min(200.0, v)), 1)
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return out
 
 
 # settings 里必须保持数值语义的键：写入前转 int 并钳制范围。
@@ -322,8 +409,31 @@ def _clean_settings(payload):
                 out[k] = [str(x).strip() for x in v if str(x or "").strip()][:20]
             continue
         if k == "eq_gains":
+            # 图形 EQ 推子值：只收有限数值。NaN/inf 落盘会写出非法 JSON，
+            # 字符串 / 对象也会让前端的曲线计算得到 NaN。
             if isinstance(v, list):
-                out[k] = v[:10]
+                gains = []
+                for x in v[:10]:
+                    if isinstance(x, (int, float)) and not isinstance(x, bool) \
+                            and math.isfinite(float(x)):
+                        gains.append(x)
+                out[k] = gains
+            continue
+        if k == "download_dir":
+            # 必须是字符串：写进对象 / 数字后，下载与歌词保存会在 os.path
+            # 拼接处抛 TypeError，设置页却显示「已保存」。
+            if isinstance(v, str):
+                out[k] = v.strip()
+            continue
+        if k == "name_template":
+            if isinstance(v, str):
+                out[k] = v[:200]
+            continue
+        if k == "webdav":
+            # 同步配置由 /api/sync/config 维护；这里只做类型兜底，
+            # 防止一个数组/字符串让 /api/sync/status 的 .get 直接抛错。
+            if isinstance(v, dict):
+                out[k] = v
             continue
         if k == "eq_mode":
             # 白名单外丢弃：graphic 是老 10 推子路径，parametric 是 P2 参数 EQ
@@ -358,12 +468,14 @@ def _clean_settings(payload):
             continue
         rule = _SETTING_NUM.get(k)
         if not rule:
-            out[k] = v
+            vv = _json_safe(v)
+            if vv is not _JSON_DROP:
+                out[k] = vv
             continue
         lo, hi = rule
         try:
             n = int(float(v))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue                        # 非法值不落盘，保留原值
         out[k] = max(lo, min(hi, n))
     return out
@@ -546,7 +658,8 @@ class Store:
                 # 收听计数和反馈全被清空 —— 口味画像的数字因此永远对不上。
                 merged[k] = v
         self._fix_paths(merged)
-        return merged
+        merged = _json_safe(merged)
+        return merged if isinstance(merged, dict) else json.loads(json.dumps(DEFAULT_STORE))
 
     def _fix_paths(self, data):
         """修正从别处带来的失效路径。
@@ -554,9 +667,11 @@ class Store:
         data.json 里存着下载目录的绝对路径。别人分享数据文件、
         或用户换了机器 / 换了用户名，这份路径就指到不存在的目录了 ——
         下载会静默失败。这里在加载时校验并回落到本机默认目录。
+        类型不对（被手改成对象 / 数字）同样回落：os.path.isdir 对非路径
+        会抛 TypeError，不拦的话进程启动即死，连设置页都打不开。
         """
         want = data["settings"].get("download_dir")
-        if want and not os.path.isdir(want):
+        if want and (not isinstance(want, str) or not os.path.isdir(want)):
             fallback = default_download_dir()
             try:
                 os.makedirs(fallback, exist_ok=True)
@@ -567,9 +682,19 @@ class Store:
     def save(self):
         with self.lock:
             tmp = self.path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, self.path)
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    # allow_nan=False：宁可这次写入失败（HTTP 层回 ok:false），
+                    # 也不把 NaN/Infinity 写进 data.json 让下次启动解析报废。
+                    json.dump(self.data, f, ensure_ascii=False, indent=2,
+                              allow_nan=False)
+                os.replace(tmp, self.path)
+            except Exception:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise
 
     @staticmethod
     def _snapshot(v):
@@ -581,6 +706,12 @@ class Store:
             # 未知 op 早就不该被当成「什么都不做但保存一次」——那会把页面发来的
             # 拼写错误吞掉，还白写一遍磁盘。
             raise ValueError("未知操作 %r" % (op,))
+        # 统一净化入口：NaN/inf、非字符串键、超深结构一律在写模型之前丢掉。
+        # 各类 op 内部再按自己的语义做长度/范围校验。
+        if op != "load":
+            payload = _json_safe(payload)
+            if payload is _JSON_DROP:
+                payload = None
         with self.lock:
             if op == "load":
                 return self._snapshot(self.data)
@@ -598,9 +729,16 @@ class Store:
                 self.data["history"] = []
             elif op == "fav_toggle":
                 item = dict(payload or {})
+                # id 是收藏的唯一键。没有 id 的「收藏」只会在列表里留一条
+                # 永远点不开、也删不干净的幽灵条目。
+                if not str(item.get("id") or "").strip():
+                    raise ValueError("收藏缺少 id")
                 item["kind"] = item.get("kind") or "song"
                 key = fav_key(item)
-                favs = self.data["favorites"]
+                # 顺手清掉旧数据里混进来的非对象项：留着既渲染不出东西，
+                # 又会让后面的遍历在 .get 上抛错。
+                favs = [f for f in self.data["favorites"] if isinstance(f, dict)]
+                self.data["favorites"] = favs
                 idx = next((i for i, f in enumerate(favs) if fav_key(f) == key), -1)
                 if idx >= 0:
                     favs.pop(idx)
@@ -614,7 +752,7 @@ class Store:
             elif op == "fav_remove":
                 key = fav_key(payload or {})
                 self.data["favorites"] = [f for f in self.data["favorites"]
-                                          if fav_key(f) != key]
+                                          if isinstance(f, dict) and fav_key(f) != key]
             elif op == "download_add":
                 self.data["downloads"].insert(0, payload or {})
                 self.data["downloads"] = self.data["downloads"][:300]
@@ -624,7 +762,8 @@ class Store:
                 kind = (payload or {}).get("kind")
                 self.data["favorites"] = ([] if not kind
                                           else [f for f in self.data["favorites"]
-                                                if (f.get("kind") or "song") != kind])
+                                                if isinstance(f, dict)
+                                                and (f.get("kind") or "song") != kind])
             elif op == "recent_add":
                 item = dict(payload or {})
                 if not item.get("id"):
@@ -673,8 +812,8 @@ class Store:
             elif op == "playlist_reorder":
                 self._pl_reorder(payload or {})
             elif op == "work_add":
-                item = dict(payload or {})
-                if item.get("id") and WORK_ID_RE.match(str(item["id"])):
+                item = _clean_work(payload)
+                if item:
                     works = self.data.setdefault("works", [])
                     works[:] = [w for w in works
                                 if w.get("id") != item["id"]]
@@ -828,8 +967,15 @@ class Store:
             return
         items = pl.get("items", [])
         order = payload.get("order") or []
-        idx = [i for i in order if isinstance(i, int) and 0 <= i < len(items)]
-        seen = set(idx)
+        # 去重且保留首次出现的顺序：order=[1,1,0] 曾经让同一首被复制一份、
+        # 另一首被挤掉 —— 前端拖拽不会发重复索引，但接口不能靠调用方自觉。
+        idx, seen = [], set()
+        for i in order:
+            if isinstance(i, bool) or not isinstance(i, int):
+                continue
+            if 0 <= i < len(items) and i not in seen:
+                seen.add(i)
+                idx.append(i)
         idx += [i for i in range(len(items)) if i not in seen]
         pl["items"] = [items[i] for i in idx]
         pl["updated_at"] = int(time.time())
@@ -848,8 +994,8 @@ def upstream_keepalive(act, params):
     （实测 6.5s/页 → 复用后 1.4s/页）。线程本地各持一条连接：服务端是多线程的，
     跨线程共用 socket 会串包。
 
-    其余请求（搜索 / 探测 / 取直链）仍走一次性的 urllib：那些是零散请求，
-    长连接留着只会在上游那边堆一堆空闲连接，反而拖慢后面的探测。
+    零散请求走下面 upstream() 的进程级连接池（不再每次新开）：桌面实测
+    握手 0.95s/次 → 复用后 0.22s/次，手机网络差距更大。
     """
     body = urllib.parse.urlencode(
         {k: "" if v is None else v for k, v in (params or {}).items()}).encode()
@@ -890,20 +1036,70 @@ def upstream_keepalive(act, params):
     raise RuntimeError("上游无响应")
 
 
+# 上游连接池：urllib 每次请求都重开 TLS，移动网络上一首歌能连带付好几次
+# 握手钱（搜索 / 探测 / 取直链 / 歌词各一次）。HTTP/1.1 连接一次只借给一个
+# 线程用，用完归还；被对端静默关掉的旧连接靠首次 retry 自愈。
+_UP_IDLE = queue.LifoQueue(maxsize=8)
+_UP_HEADERS = {
+    "User-Agent": UA,
+    "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+    "Referer": UPSTREAM,
+    "Origin": UPSTREAM.rstrip("/"),
+    "Accept": "application/json, text/plain, */*",
+}
+
+
+def _up_checkout():
+    try:
+        return _UP_IDLE.get_nowait()
+    except queue.Empty:
+        return None
+
+
+def _up_checkin(conn):
+    if conn is None:
+        return
+    try:
+        _UP_IDLE.put_nowait(conn)
+    except queue.Full:
+        try:
+            conn.close()
+        except Exception:                    # noqa: BLE001
+            pass
+
+
 def upstream(act, params):
     body = urllib.parse.urlencode(
         {k: "" if v is None else v for k, v in (params or {}).items()}).encode()
-    req = urllib.request.Request(API_URL + act, data=body, method="POST", headers={
-        "User-Agent": UA,
-        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-        "Referer": UPSTREAM,
-        "Origin": UPSTREAM.rstrip("/"),
-    })
-    with urllib.request.urlopen(req, timeout=30) as r:
-        payload = json.loads(r.read().decode("utf-8", "replace"))
-    if payload.get("code") != 0:
-        raise RuntimeError(payload.get("msg") or f"接口错误 {payload.get('code')}")
-    return payload.get("data")
+    path = "/ajax.php?act=" + act
+    for attempt in (0, 1):                   # 池里的旧连接可能已被对端关掉：换新重试一次
+        conn = _up_checkout()
+        if conn is None:
+            conn = http.client.HTTPSConnection(UPSTREAM_HOST, timeout=30)
+        try:
+            conn.request("POST", path, body=body, headers=_UP_HEADERS)
+            r = conn.getresponse()
+            raw, status = r.read(), r.status
+        except (http.client.HTTPException, OSError, ValueError):
+            try:
+                conn.close()
+            except Exception:                # noqa: BLE001
+                pass
+            if attempt:
+                raise RuntimeError("上游连接失败")
+            continue
+        # HTTP 层已完整收包：即使业务报错，连接本身还能接着用
+        _up_checkin(conn)
+        if status != 200:
+            raise RuntimeError(f"上游 HTTP {status}")
+        try:
+            payload = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            raise RuntimeError("上游返回不是 JSON")
+        if payload.get("code") != 0:
+            raise RuntimeError(payload.get("msg") or f"接口错误 {payload.get('code')}")
+        return payload.get("data")
+    raise RuntimeError("上游无响应")
 
 
 # --------------------------------------------------------------------------
@@ -1342,6 +1538,102 @@ def artist_page(params):
 
 
 
+# --------------------------------------------------------------------------
+# 歌词：K 歌 / 滚动歌词共用
+# --------------------------------------------------------------------------
+# 歌词不随播放变化，取过一次就够整场会话反复进出 K 歌用；不占 45 秒的搜索缓存。
+_LYRIC_CACHE = {}                 # key -> (at, text)
+_LYRIC_LOCK = threading.Lock()
+LYRIC_TTL = 6 * 3600
+
+
+def _lyric_cache_get(key):
+    now = time.time()
+    with _LYRIC_LOCK:
+        hit = _LYRIC_CACHE.get(key)
+        if hit and now - hit[0] < LYRIC_TTL:
+            return hit[1]
+    return None
+
+
+def _lyric_cache_put(key, text):
+    if not text:
+        return                    # 空结果不缓存：歌名后来补了 / 上游抖一下还能再取
+    with _LYRIC_LOCK:
+        if len(_LYRIC_CACHE) > 300:
+            for k in sorted(_LYRIC_CACHE, key=lambda k: _LYRIC_CACHE[k][0])[:100]:
+                _LYRIC_CACHE.pop(k, None)
+        _LYRIC_CACHE[key] = (time.time(), text)
+
+
+def _lyric_candidate(plat, name, artist, sid=""):
+    """按歌名 + 歌手找一个可签名条目。本地文件、老歌单条目都没有 time/sign，
+    直接问 getLyric 会被上游回「接口错误 -3」——先找到同一首拿新签名。"""
+    kw = " ".join(x for x in (name, artist) if x).strip()
+    if not kw:
+        return None
+    data = upstream("search", {"platform": plat, "keyword": kw, "page": 1, "size": 10})
+    cands = (data or {}).get("list") or []
+    if sid:
+        for c in cands:
+            if str(c.get("id")) == sid:
+                return c
+    want = _fold_text(_core_title(name))
+    if not want:
+        return None
+    for c in cands:
+        if _fold_text(_core_title(c.get("name"))) != want:
+            continue
+        if artist:
+            a = _fold_text(_main_artist(artist))
+            ca = _fold_text(_main_artist(c.get("artist")))
+            if a and ca and a != ca and a not in ca and ca not in a:
+                continue
+        return c
+    return None
+
+
+def lyric_lookup(params):
+    """getLyric 的完整取法：签名齐全直取；缺签名（本地 / 旧条目）回源按歌名找。"""
+    plat = params.get("platform") or "kuwo"
+    if plat not in PLATFORMS:
+        plat = "kuwo"
+    sid = str(params.get("id") or "")
+    st, sg = params.get("time"), params.get("sign")
+    name = str(params.get("name") or "")
+    artist = str(params.get("artist") or "")
+    if sid and st and sg:
+        key = ("lyric", plat, sid)
+    else:
+        key = ("lyric", plat, _fold_text(_core_title(name)),
+               _fold_text(_main_artist(artist)))
+    req_key = key                     # 本地条目按歌名缓存，避免每次都重搜一次
+    hit = _lyric_cache_get(key)
+    if hit is not None:
+        return hit
+    if not (sid and st and sg):
+        cand = _lyric_candidate(plat, name, artist, sid)
+        if not cand:
+            return ""
+        sid = str(cand.get("id") or sid)
+        st, sg = cand.get("time"), cand.get("sign")
+        key = ("lyric", plat, sid)
+        hit = _lyric_cache_get(key)   # 同一首可能刚被另一个条目取过
+        if hit is not None:
+            _lyric_cache_put(req_key, hit)
+            return hit
+    if not (sid and st and sg):
+        return ""
+    text = upstream("getLyric", {"platform": plat, "songid": sid, "time": st, "sign": sg})
+    if isinstance(text, dict):        # 个别源回 {"lrc": ...}：只认真正的文本
+        text = text.get("lyric") or text.get("lrc") or ""
+    text = text if isinstance(text, str) else ""
+    _lyric_cache_put(key, text)
+    if req_key != key:                # 歌名键也存一份：下次同一条目/同名片直接命中
+        _lyric_cache_put(req_key, text)
+    return text
+
+
 RPC_TABLE = {
     "search": lambda p: cached(
         ("search", p.get("keyword", ""), p.get("page", 1), p.get("size", 20)), 45,
@@ -1352,9 +1644,12 @@ RPC_TABLE = {
                lambda: search_any(p.get("platform", "kuwo"), p.get("keyword", ""),
                                   p.get("page", 1), p.get("size", 20))),
         p.get("platform", "kuwo")),
-    "song": lambda p: normalize_list(
-        upstream("song", {"platform": p.get("platform", "kuwo"), "id": p.get("id")}),
-        p.get("platform", "kuwo")),
+    "song": lambda p: cached(
+        ("song", p.get("platform", "kuwo"), str(p.get("id") or "")), 600,
+        lambda: normalize_list(
+            upstream("song", {"platform": p.get("platform", "kuwo"),
+                              "id": p.get("id")}),
+            p.get("platform", "kuwo"))),
     "album": lambda p: normalize_list(
         cached(("album", p.get("platform", "kuwo"), p.get("id")), 300,
                lambda: upstream("album", {"platform": p.get("platform", "kuwo"),
@@ -1372,10 +1667,7 @@ RPC_TABLE = {
                                             "bitrate": p.get("bitrate"),
                                             "time": p.get("time"),
                                             "sign": p.get("sign")}),
-    "getlyric": lambda p: upstream("getLyric", {"platform": p.get("platform", "kuwo"),
-                                                "songid": p.get("id"),
-                                                "time": p.get("time"),
-                                                "sign": p.get("sign")}),
+    "getlyric": lambda p: lyric_lookup(p),
 }
 
 
@@ -1388,7 +1680,9 @@ FEEDBACK_NEGATIVE = ("dislike", "exclude", "hide")
 
 
 def _artist_of(obj):
-    return re.sub(r"\s+", " ", str((obj or {}).get("artist") or "")).strip()
+    if not isinstance(obj, dict):
+        return ""
+    return re.sub(r"\s+", " ", str(obj.get("artist") or "")).strip()
 
 
 def _billed_as(obj, name):
@@ -1412,15 +1706,21 @@ def _play_counts_by_artist():
     数 plays 里每天的收听次数 —— 换音质不重复计，只在听完时计。
     """
     plays = STORE.data.get("plays") or {}
+    if not isinstance(plays, dict):
+        plays = {}
     cnt, cover = {}, {}
     for rec in plays.values():
         if not isinstance(rec, dict):
             continue
-        days = rec.get("days") or {}
-        n = sum(int(v or 0) for v in days.values())
+        days = rec.get("days")
+        if not isinstance(days, dict):
+            continue
+        n = sum(max(0, _safe_int(v)) for v in days.values())
         if n <= 0:
             continue
-        meta = rec.get("meta") or {}
+        meta = rec.get("meta")
+        if not isinstance(meta, dict):
+            continue
         name = _artist_of(meta)
         if not name:
             continue
@@ -1439,9 +1739,9 @@ def taste_profile():
     页面上给用户看的必须是 plays，score 只用来排顺序。
     """
     data = STORE.data
-    favs = data.get("favorites") or []
-    recent = data.get("recent") or []
-    fb = data.get("feedback") or {}
+    favs = [x for x in (data.get("favorites") or []) if isinstance(x, dict)]
+    recent = [x for x in (data.get("recent") or []) if isinstance(x, dict)]
+    fb = data.get("feedback") if isinstance(data.get("feedback"), dict) else {}
     score, sample = {}, {}
 
     def bump(name, w, it=None):
@@ -1458,6 +1758,8 @@ def taste_profile():
     for i, r in enumerate(recent[:30]):
         bump(_artist_of(r), 1 if i > 8 else 2, r)
     for v in fb.values():
+        if not isinstance(v, dict):
+            continue
         name = str(v.get("artist") or "").strip()
         if not name:
             continue
@@ -1486,13 +1788,20 @@ def taste_profile():
     artists.sort(key=lambda a: (-a["plays"], -a["score"], a["name"]))
 
     total_plays = sum(plays_by_artist.values())
-    distinct_songs = len({k for k, v in (STORE.data.get("plays") or {}).items()
-                          if isinstance(v, dict) and sum(int(x or 0) for x in (v.get("days") or {}).values()) > 0})
+    distinct_songs = 0
+    for v in (STORE.data.get("plays") or {}).values():
+        if not isinstance(v, dict):
+            continue
+        days = v.get("days")
+        if isinstance(days, dict) and sum(_safe_int(x) for x in days.values()) > 0:
+            distinct_songs += 1
 
     return {
         "artists": artists,
-        "excluded": [k for k, v in fb.items() if v.get("verdict") in FEEDBACK_NEGATIVE],
-        "liked": [k for k, v in fb.items() if v.get("verdict") in ("like", "approve")],
+        "excluded": [k for k, v in fb.items()
+                     if isinstance(v, dict) and v.get("verdict") in FEEDBACK_NEGATIVE],
+        "liked": [k for k, v in fb.items()
+                  if isinstance(v, dict) and v.get("verdict") in ("like", "approve")],
         "listened": total_plays,            # 真实收听总次数
         "songs": distinct_songs,            # 听过的不同曲目数
         "favorites": len(favs),
@@ -1955,7 +2264,7 @@ def recommend_candidates(limit=12, fresh=False):
     for r in (STORE.data.get("recent") or [])[:40]:
         seen.add("%s:%s" % (r.get("platform"), r.get("id")))
     for f in (STORE.data.get("favorites") or []):
-        if (f.get("kind") or "song") == "song":
+        if isinstance(f, dict) and (f.get("kind") or "song") == "song":
             seen.add("%s:%s" % (f.get("platform"), f.get("id")))
 
     fam_pool, exp_pool, seen_titles = [], [], set()
@@ -2441,7 +2750,18 @@ CACHE = MediaCache(os.path.join(data_dir(), "cache"))
 
 
 def resolve_play_url(platform, sid, fmt, br, sign_time=None, sign=None, name=None):
-    """拿到可播放直链。主站签名过期就重搜换签；主站整条挂掉时网易云转备用站。"""
+    """拿到可播放直链。主站签名过期就重搜换签；主站整条挂掉时网易云转备用站。
+
+    同一条链接 3 分钟内复用：探测 / 起播 / K 歌分析会对同一首歌各要一次直链，
+    每次重走一遍上游只会把首播拖慢（签名链接本身有二十来分钟寿命，3 分钟安全）。
+    """
+    key = ("url", platform, str(sid), str(fmt), str(br),
+           str(sign_time or ""), str(sign or ""), str(name or ""))
+    return cached(key, 180, lambda: _resolve_play_url(
+        platform, sid, fmt, br, sign_time, sign, name))
+
+
+def _resolve_play_url(platform, sid, fmt, br, sign_time=None, sign=None, name=None):
     def call(t, s):
         data = upstream("getUrl", {"platform": platform, "songid": sid, "format": fmt,
                                    "bitrate": br, "time": t, "sign": s})
@@ -2719,14 +3039,16 @@ def merge_legacy_plays(plays, key, plat, sid, day):
     """
     prefix = "%s_%s_" % (plat, sid)
     merged = None
-    for old in [k for k in list(plays) if k.startswith(prefix) and k != key]:
+    for old in [k for k in list(plays) if isinstance(k, str)
+                and k.startswith(prefix) and k != key]:
         r = _migrate_play_record(plays.pop(old), day)
         if merged is None:
             merged = r
             continue
         for d, n in (r.get("days") or {}).items():
-            merged["days"][d] = int(merged["days"].get(d) or 0) + int(n)
-        merged["last_at"] = max(int(merged.get("last_at") or 0), int(r.get("last_at") or 0))
+            merged["days"][d] = _safe_int(merged["days"].get(d)) + _safe_int(n)
+        merged["last_at"] = max(_safe_int(merged.get("last_at")),
+                                _safe_int(r.get("last_at")))
         merged["cached_today"] = bool(merged.get("cached_today") or r.get("cached_today"))
         merged["cached_long"] = bool(merged.get("cached_long") or r.get("cached_long"))
     return merged
@@ -3082,11 +3404,16 @@ def lyric_now_get():
 
 
 def _clean_daily(daily, keep=400):
-    """日汇总只留最近 keep 天，防止无限膨胀。"""
-    if not daily:
-        return daily
+    """日汇总只留最近 keep 天，防止无限膨胀。
+
+    返回的每个值保证是 dict：旧数据 / 手改后的 {"日期": 5} 这种形状
+    会让统计页的 .get 直接抛 AttributeError。
+    """
+    if not isinstance(daily, dict) or not daily:
+        return {}
     cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - keep * 86400))
-    return {d: v for d, v in daily.items() if d >= cutoff}
+    return {d: v for d, v in daily.items()
+            if isinstance(d, str) and d >= cutoff and isinstance(v, dict)}
 
 
 def stats_summary():
@@ -3096,9 +3423,9 @@ def stats_summary():
     老数据没有 daily 时，累计口径回落到 7 天窗口的实测值 —— 宁可少报，不虚报。
     """
     data = STORE.data
-    plays = data.get("plays") or {}
+    plays = data.get("plays") if isinstance(data.get("plays"), dict) else {}
     daily = _clean_daily(data.get("daily") or {})
-    hours = data.get("hours") or {}
+    hours = data.get("hours") if isinstance(data.get("hours"), dict) else {}
 
     day = time.strftime("%Y-%m-%d")
     plays_7d = 0
@@ -3106,11 +3433,16 @@ def stats_summary():
     for key, rec in plays.items():
         if not isinstance(rec, dict):
             continue
-        n = sum(int(v or 0) for v in (rec.get("days") or {}).values())
+        days = rec.get("days")
+        if not isinstance(days, dict):
+            continue
+        n = sum(max(0, _safe_int(v)) for v in days.values())
         if n <= 0:
             continue
         plays_7d += n
-        song_counts[key] = (n, rec.get("meta") or {})
+        meta = rec.get("meta")
+        if isinstance(meta, dict):
+            song_counts[key] = (n, meta)
 
     top_songs = []
     for _k, (n, meta) in sorted(song_counts.items(), key=lambda kv: -kv[1][0])[:10]:
@@ -3124,24 +3456,25 @@ def stats_summary():
     top_artists = [{"name": n, "plays": c, "cover": artist_cover.get(n) or ""}
                    for n, c in sorted(artist_cnt.items(), key=lambda kv: -kv[1])[:10]]
 
-    total_plays = sum(int((v or {}).get("n") or 0) for v in daily.values()) or plays_7d
-    total_seconds = sum(int((v or {}).get("s") or 0) for v in daily.values())
+    total_plays = sum(max(0, _safe_int(v.get("n"))) for v in daily.values()) or plays_7d
+    total_seconds = sum(max(0, _safe_int(v.get("s"))) for v in daily.values())
 
     days_seq = []
     for i in range(29, -1, -1):
         d = time.strftime("%Y-%m-%d", time.localtime(time.time() - i * 86400))
         v = daily.get(d) or {}
-        days_seq.append({"date": d, "n": int(v.get("n") or 0), "s": int(v.get("s") or 0)})
+        days_seq.append({"date": d, "n": _safe_int(v.get("n")),
+                         "s": _safe_int(v.get("s"))})
 
     return {
-        "today": int((daily.get(day) or {}).get("n") or 0),
+        "today": _safe_int((daily.get(day) or {}).get("n")),
         "plays_7d": plays_7d,           # 7 天收听次数
         "songs_7d": len(song_counts),   # 7 天不同曲目
         "total_plays": total_plays,     # 累计次数（daily 全量）
         "total_seconds": total_seconds, # 累计时长（秒）
         "listening_days": len(daily),   # 累计天数
         "by_day": days_seq,             # 近 30 天趋势（缺天补零）
-        "hours": [int(hours.get(str(h)) or 0) for h in range(24)],
+        "hours": [_safe_int(hours.get(str(h))) for h in range(24)],
         "top_songs": top_songs,
         "top_artists": top_artists,
         "favorites": len(data.get("favorites") or []),
@@ -3156,14 +3489,17 @@ def _migrate_play_record(rec, day):
     if not isinstance(rec, dict):
         return {"days": {}, "last_at": 0, "cached_today": False, "cached_long": False}
     if "days" in rec:
-        rec.setdefault("days", {})
+        days = rec.get("days")
+        if not isinstance(days, dict):
+            days = {}
+        rec["days"] = {str(d): max(0, _safe_int(n)) for d, n in days.items()}
         rec.setdefault("cached_today", rec.get("cached", False))
         rec.setdefault("cached_long", False)
-        rec.setdefault("last_at", 0)
+        rec.setdefault("last_at", _safe_int(rec.get("last_at")))
         return rec
     days = {}
     if rec.get("day") == day and rec.get("count"):
-        days[day] = int(rec["count"])
+        days[day] = max(0, _safe_int(rec["count"]))
     return {"days": days, "last_at": int(time.time()) if days else 0,
             "cached_today": bool(rec.get("cached")), "cached_long": False}
 
@@ -3174,9 +3510,12 @@ def record_play(payload):
     当天听完 N 次  → 进当天缓存（跨天清空）
     7 天内听完 >M 次 → 进长期缓存（3 天没听就清）
     """
-    item = (payload or {}).get("item") or {}
-    quality = (payload or {}).get("quality") or {}
-    completed = bool((payload or {}).get("completed"))
+    payload = _as_dict(payload)
+    item = _json_safe(_as_dict(payload.get("item")))
+    quality = _json_safe(_as_dict(payload.get("quality")))
+    item = item if isinstance(item, dict) else {}
+    quality = quality if isinstance(quality, dict) else {}
+    completed = bool(payload.get("completed"))
     plat, sid = item.get("platform"), item.get("id")
     if not plat or not sid:
         return {"ok": False, "error": "缺少曲目信息"}
@@ -3186,12 +3525,16 @@ def record_play(payload):
     cache_key = play_key(item, quality)   # 缓存文件仍按音质分开
     day = time.strftime("%Y-%m-%d")
     st = STORE.data["settings"]
-    need_today = max(1, int(st.get("cache_min_plays") or 2))
-    need_week = max(1, int(st.get("cache_week_plays") or 5))
+    # _int_setting：data.json 被手改/旧版写进 "abc" 时不让一条记录整单失败
+    need_today = max(1, _int_setting(st, "cache_min_plays", 2))
+    need_week = max(1, _int_setting(st, "cache_week_plays", 5))
     auto = st.get("auto_cache", True) is not False
 
     with STORE.lock:
         plays = STORE.data.setdefault("plays", {})
+        if not isinstance(plays, dict):
+            plays = {}
+            STORE.data["plays"] = plays
         if key not in plays:
             legacy = merge_legacy_plays(plays, key, plat, sid, day)
             if legacy:
@@ -3203,11 +3546,11 @@ def record_play(payload):
         if rec.get("cached_today") and not days.get(day):
             rec["cached_today"] = False
         if completed:
-            days[day] = int(days.get(day) or 0) + 1
+            days[day] = _safe_int(days.get(day)) + 1
             rec["last_at"] = int(time.time())
             # meta 每次收听覆盖，但空字段保留旧值 —— 换个没带封面的来源续播时，
             # 不能把之前记下的封面抹掉（统计 top 榜会丢图）
-            old_meta = rec.get("meta") or {}
+            old_meta = _as_dict(rec.get("meta"))
             rec["meta"] = {
                 "id": item.get("id"), "name": item.get("name") or old_meta.get("name"),
                 "artist": item.get("artist") or old_meta.get("artist"),
@@ -3216,19 +3559,28 @@ def record_play(payload):
             }
             # 日汇总 + 时段分布：统计专用，与缓存判定（plays.days）无关
             daily = STORE.data.setdefault("daily", {})
-            dv = daily.setdefault(day, {"n": 0, "s": 0})
-            dv["n"] = int(dv.get("n") or 0) + 1
-            try:
-                dv["s"] = int(dv.get("s") or 0) + int(float(item.get("duration") or 0))
-            except (TypeError, ValueError):
-                pass
+            if not isinstance(daily, dict):
+                daily = {}
+                STORE.data["daily"] = daily
+            dv = daily.get(day)
+            if not isinstance(dv, dict):
+                dv = {"n": 0, "s": 0}
+            dv["n"] = max(0, _safe_int(dv.get("n"))) + 1
+            dv["s"] = max(0, _safe_int(dv.get("s"))) + max(0, _safe_int(item.get("duration")))
+            daily[day] = dv
             STORE.data["daily"] = _clean_daily(daily)
             hrs = STORE.data.setdefault("hours", {})
+            if not isinstance(hrs, dict):
+                hrs = {}
+                STORE.data["hours"] = hrs
             hh = str(time.localtime().tm_hour)
-            hrs[hh] = int(hrs.get(hh) or 0) + 1
+            hrs[hh] = max(0, _safe_int(hrs.get(hh))) + 1
             recent = STORE.data.setdefault("recent", [])
-            recent[:] = [r for r in recent
-                         if not (r.get("platform") == plat and str(r.get("id")) == str(sid))]
+            if not isinstance(recent, list):
+                recent = []
+                STORE.data["recent"] = recent
+            recent[:] = [r for r in recent if isinstance(r, dict) and
+                         not (r.get("platform") == plat and str(r.get("id")) == str(sid))]
             entry = dict(item)
             entry["platform"] = plat
             entry["played_at"] = int(time.time())
@@ -3237,12 +3589,13 @@ def record_play(payload):
             rec["quality"] = {"format": quality.get("format"), "bitrate": quality.get("bitrate")}
         # 只保留最近 7 天
         cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - 7 * 86400))
-        rec["days"] = {d: n for d, n in days.items() if d >= cutoff}
+        rec["days"] = {d: n for d, n in days.items()
+                       if isinstance(d, str) and d >= cutoff}
         plays[key] = rec
         STORE.save()
 
-    today_count = int(rec["days"].get(day) or 0)
-    week_count = sum(int(n) for n in rec["days"].values())
+    today_count = _safe_int(rec["days"].get(day))
+    week_count = sum(_safe_int(n) for n in rec["days"].values())
 
     triggered = None
     if completed and auto and not local:
@@ -3261,7 +3614,7 @@ def record_play(payload):
     elif not local and rec.get("cached_long"):
         CACHE.touch_long(cache_key)           # 长期缓存续命（按音质文件）
 
-    CACHE.evict_long(int(st.get("cache_keep_days") or 3))
+    CACHE.evict_long(max(1, _int_setting(st, "cache_keep_days", 3)))
 
     return {"ok": True, "data": {
         "key": key, "day": day,
@@ -3560,6 +3913,12 @@ class DownloadManager:
             pass
 
     def add(self, item, want=None, dir_=None):
+        # 没有平台 / id 的条目解析直链必然失败：放进队列只会在几秒后
+        # 留一条红色失败任务，还白占一个 worker。
+        if not isinstance(item, dict) or not item.get("platform") or not item.get("id"):
+            return None
+        if dir_ is not None and not isinstance(dir_, str):
+            dir_ = None
         self._ensure_workers()
         tid = uuid.uuid4().hex[:12]
         task = {
@@ -3581,7 +3940,9 @@ class DownloadManager:
         return tid
 
     def add_many(self, items, want=None, dir_=None):
-        return [self.add(it, want, dir_) for it in items]
+        if not isinstance(items, list):
+            return []
+        return [tid for tid in (self.add(it, want, dir_) for it in items) if tid]
 
     def cancel(self, tid):
         with self._can_run:
@@ -3610,10 +3971,12 @@ class DownloadManager:
     def remove(self, tid):
         with self._can_run:
             task = self.tasks.get(tid)
-            if task and task["state"] == "running":
+            if not task:
+                return False
+            if task["state"] == "running":
                 task["cancel"] = True
                 return False
-            if task and task["state"] == "queued":
+            if task["state"] == "queued":
                 # 排队中的直接置终态：原来只挂 cancel 标志，worker 照样会解析
                 # 直链、建 .part，然后才在下载循环里取消 —— 白付一次解析。
                 task.update(state="cancelled", error="已取消")
@@ -3825,10 +4188,15 @@ def _download_update(url, sha256):
         if not url.startswith(("http://", "https://")):
             raise ValueError("只支持 http(s) 直链")
         latest = UPDATE_STATE.get("latest") or "new"
+        # 版本号来自远端 update.json / GitHub tag：只留文件名安全字符。
+        # 不洗的话 "../.." 之类会把更新包写到下载目录之外。
+        latest = re.sub(r"[^0-9A-Za-z._-]", "_", str(latest))[:32].strip("._") or "new"
         ext = os.path.splitext(urllib.parse.urlparse(url).path)[1].lower()
         if ext not in (".exe", ".apk", ".zip", ".7z"):
             ext = ".exe"
         ddir = STORE.data.get("settings", {}).get("download_dir") or default_download_dir()
+        if not isinstance(ddir, str):
+            ddir = default_download_dir()
         os.makedirs(ddir, exist_ok=True)
         path = os.path.join(ddir, "Elysium-%s%s" % (latest, ext))
         tmp = path + ".part"
@@ -4389,7 +4757,28 @@ class Handler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     clen = 0
                 if clen > 4 * 1024 * 1024:
-                    # 用户数据的单次写入不该有 MB 级；放进来只会把 data.json 撑爆
+                    # 用户数据的单次写入不该有 MB 级；放进来只会把 data.json 撑爆。
+                    # 先把已声明的 body 读掉再回 413：直接关连接会让还在发大
+                    # body 的客户端收到 RST，拿不到「请求体过大」这句人话。
+                    # 但 Content-Length 可能是谎报的（客户端根本不发 body），
+                    # 所以设 0.6s 读超时，骗人的长度不能把服务线程挂死。
+                    left = min(clen, 8 * 1024 * 1024)
+                    sock = self.connection
+                    old_to = sock.gettimeout()
+                    try:
+                        sock.settimeout(0.6)
+                        while left > 0:
+                            chunk = self.rfile.read(min(65536, left))
+                            if not chunk:
+                                break
+                            left -= len(chunk)
+                    except OSError:
+                        pass
+                    finally:
+                        try:
+                            sock.settimeout(old_to)
+                        except OSError:
+                            pass
                     self._send(413, {"ok": False, "error": "请求体过大"})
                     return
                 body = self._json_body()
@@ -4612,6 +5001,9 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, {"ok": False, "error": "缺少歌曲信息"})
                     return
                 ids = DM.add_many(items, body.get("quality"), body.get("dir"))
+                if not ids:
+                    self._send(200, {"ok": False, "error": "缺少歌曲信息"})
+                    return
                 self._send(200, {"ok": True, "data": {"ids": ids}})
                 return
 
@@ -4665,7 +5057,25 @@ def port_busy(port):
 def serve(port=0):
     if port and port_busy(port):
         raise OSError("端口 %d 已被占用（Elysium 可能已经在运行）" % int(port))
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    # 默认 listen backlog 只有 5：页面一次带几十张封面 / K 歌分析并发起流时，
+    # 多出来的连接会被系统直接 RST（客户端看到的是「连不上」而不是排队）。
+    # 128 对单机应用足够，且不需要额外线程。
+    class _Server(ThreadingHTTPServer):
+        daemon_threads = True
+        request_queue_size = 128
+
+        def handle_error(self, request, client_address):
+            # 页面刷新 / 切歌 / 关窗会先把连接掐掉，读请求行时报
+            # ConnectionReset 是常态。socketserver 默认把整段 traceback
+            # 打到 stderr —— 正常使用下的日志会被这类噪音淹没。
+            import sys as _sys
+            etype = _sys.exc_info()[0]
+            if etype and issubclass(etype, (ConnectionResetError, ConnectionAbortedError,
+                                            BrokenPipeError, TimeoutError)):
+                return
+            super().handle_error(request, client_address)
+
+    httpd = _Server(("127.0.0.1", port), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     threading.Thread(target=update_tracker, name="update-tracker", daemon=True).start()
     return httpd, httpd.server_address[1]

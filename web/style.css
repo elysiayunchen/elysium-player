@@ -1851,7 +1851,8 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
 .sing-layer.is-ready .kc-trans .k-clock{display:none}
 .sing-layer.is-review .k-lines{display:none}
 .sing-layer.is-review .k-ctl{display:none}
-.sing-layer.no-preview .k-lines{display:none}
+/* 没歌词：ready 不留空壳；演唱中要留一句「纯伴奏模式」，否则主区全黑像坏了 */
+.sing-layer.is-ready.no-preview .k-lines{display:none}
 /* 听唱模式（.nomi）：拿不到麦克风（Android WebView 常态）时，
    人声链路控件与实时音准条整体退场，只留伴奏音量 / 变调 / 消原唱 */
 .sing-layer.nomi .k-mic-only,

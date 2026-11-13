@@ -45,7 +45,8 @@ def _settings():
 
 
 def _conf():
-    wd = _settings().get("webdav") or {}
+    wd = _settings().get("webdav")
+    wd = wd if isinstance(wd, dict) else {}
     d = str(wd.get("dir") or "Elysium").strip().strip("/") or "Elysium"
     return {
         "url": str(wd.get("url") or "").strip(),
@@ -66,7 +67,8 @@ def _device():
 
 def status():
     c = _conf()
-    st = _settings().get("webdav") or {}
+    st = _settings().get("webdav")
+    st = st if isinstance(st, dict) else {}
     return {
         "configured": bool(c["url"] and c["user"]),
         "url": c["url"],
@@ -85,9 +87,10 @@ def status():
 
 def configure(payload):
     """存凭据。密码传空串时保留原值 —— 前端拿不到明文密码，不能因此被清掉。"""
-    payload = payload or {}
+    payload = payload if isinstance(payload, dict) else {}
     with _BOUND["store"].lock:
-        wd = dict(_settings().get("webdav") or {})
+        cur = _settings().get("webdav")
+        wd = dict(cur) if isinstance(cur, dict) else {}
         if "url" in payload:
             wd["url"] = str(payload.get("url") or "").strip()
         if "user" in payload:
@@ -224,10 +227,12 @@ ITEM_FIELDS = ("id", "platform", "name", "artist", "album_name", "album_id",
 
 
 def _is_local(x):
-    return (x or {}).get("platform") == "local"
+    return isinstance(x, dict) and x.get("platform") == "local"
 
 
 def _wash(src, fields):
+    if not isinstance(src, dict):
+        return {}
     out = {k: src[k] for k in fields if src.get(k) not in (None, "")}
     if src.get("minfo"):
         out["minfo"] = [{k: m[k] for k in ("format", "bitrate", "size") if m.get(k) not in (None, "")}
@@ -236,7 +241,7 @@ def _wash(src, fields):
 
 
 def _clean_fav(f):
-    if _is_local(f):
+    if not isinstance(f, dict) or _is_local(f):
         return None
     out = _wash(f, FAV_FIELDS)
     out["kind"] = out.get("kind") or "song"
@@ -244,27 +249,41 @@ def _clean_fav(f):
 
 
 def _clean_playlist(p):
-    items = [x for x in (_clean_item(i) for i in (p.get("items") or [])) if x]
+    if not isinstance(p, dict):
+        return None
+    items = [x for x in (_clean_item(i) for i in (p.get("items") or [])) if x] \
+        if isinstance(p.get("items"), list) else []
     out = _wash(p, PL_FIELDS)
     out["items"] = items
     return out if out.get("id") and out.get("name") else None
 
 
 def _clean_item(i):
-    if _is_local(i) or not i.get("id"):
+    if not isinstance(i, dict) or _is_local(i) or not i.get("id"):
         return None
     return _wash(i, ITEM_FIELDS)
 
 
+def _int_or(v, default=0):
+    try:
+        return int(v)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def _clean_last_track(lt):
-    if not isinstance(lt, dict) or not lt.get("item") or _is_local(lt.get("item")):
+    if not isinstance(lt, dict) or not isinstance(lt.get("item"), dict) \
+            or _is_local(lt.get("item")):
+        return None
+    item = _clean_item(lt.get("item"))
+    if not item:
         return None
     return {
-        "item": _clean_item(lt.get("item")),
-        "quality": lt.get("quality"),
-        "position": int(lt.get("position") or 0),
-        "duration": int(lt.get("duration") or 0),
-        "at": int(lt.get("at") or 0),
+        "item": item,
+        "quality": lt.get("quality") if isinstance(lt.get("quality"), dict) else None,
+        "position": max(0, _int_or(lt.get("position"))),
+        "duration": max(0, _int_or(lt.get("duration"))),
+        "at": max(0, _int_or(lt.get("at"))),
     }
 
 
@@ -423,7 +442,8 @@ def push():
         dav.put(_remote_path(c), body)
         now = int(time.time())
         with _BOUND["store"].lock:
-            wd = dict(_settings().get("webdav") or {})
+            cur_wd = _settings().get("webdav")
+            wd = dict(cur_wd) if isinstance(cur_wd, dict) else {}
             wd["last_push"] = now
             wd["remote"] = {"device": data["device"], "pushed_at": now,
                             "counts": {"favorites": len(data["favorites"]),
@@ -453,7 +473,8 @@ def pull():
         _REMOTE_CACHE["path"] = _remote_path(c)
         out = diff(remote)
         with _BOUND["store"].lock:
-            wd = dict(_settings().get("webdav") or {})
+            cur_wd = _settings().get("webdav")
+            wd = dict(cur_wd) if isinstance(cur_wd, dict) else {}
             wd["last_pull"] = int(time.time())
             _BOUND["store"].data["settings"]["webdav"] = wd
             _BOUND["store"].save()
@@ -462,10 +483,16 @@ def pull():
 
 def commit(payload):
     """把用户勾上的部分落盘。没勾的一律不动 —— 与导入歌单同一套规矩。"""
-    payload = payload or {}
+    payload = payload if isinstance(payload, dict) else {}
     remote = _REMOTE_CACHE.get("data")
     if not remote:
         raise DavError("预览已过期，重新拉取一次")
+    # 远端包可能被同步盘截断 / 被手改：落盘前必须走与打包同一套清洗，
+    # 否则一个数字或字符串会作为「收藏」进 data.json，之后 pack()/taste 全崩。
+    raw_favs = remote.get("favorites")
+    raw_pls = remote.get("playlists")
+    rfavs = [x for x in (_clean_fav(f) for f in (raw_favs if isinstance(raw_favs, list) else [])) if x]
+    rpls = [x for x in (_clean_playlist(p) for p in (raw_pls if isinstance(raw_pls, list) else [])) if x]
     changes = {"favorites": 0, "playlists_new": 0, "playlist_items": 0,
                "conflicts": 0, "last_track": False}
 
@@ -474,28 +501,32 @@ def commit(payload):
 
         # 收藏：并集，按 key 去重
         if payload.get("favorites"):
-            have = {_fav_key(f) for f in (data.get("favorites") or [])}
-            add = [f for f in (remote.get("favorites") or []) if _fav_key(f) not in have]
+            loc = [f for f in (data.get("favorites") or []) if isinstance(f, dict)]
+            have = {_fav_key(f) for f in loc}
+            add = [f for f in rfavs if _fav_key(f) not in have]
             if add:
-                data["favorites"] = add + list(data.get("favorites") or [])
+                data["favorites"] = add + loc
                 changes["favorites"] = len(add)
 
         # 歌单
-        want_new = set(payload.get("playlist_new") or [])
-        want_fill = set(payload.get("playlist_fill") or [])
-        picks = payload.get("conflicts") or {}
-        pls = data.setdefault("playlists", [])
+        raw_new = payload.get("playlist_new")
+        raw_fill = payload.get("playlist_fill")
+        want_new = {x for x in (raw_new if isinstance(raw_new, list) else []) if isinstance(x, str)}
+        want_fill = {x for x in (raw_fill if isinstance(raw_fill, list) else []) if isinstance(x, str)}
+        picks = payload.get("conflicts") if isinstance(payload.get("conflicts"), dict) else {}
+        pls = [p for p in (data.get("playlists") or []) if isinstance(p, dict)]
+        data["playlists"] = pls
         by_id = {p.get("id"): p for p in pls}
 
-        for rp in (remote.get("playlists") or []):
+        for rp in rpls:
             rid = rp.get("id")
             if rid in want_new and rid not in by_id:
                 now = int(time.time())
                 pls.append({
                     "id": rid,
                     "name": str(rp.get("name") or "未命名")[:60],
-                    "created_at": int(rp.get("created_at") or now),
-                    "updated_at": int(rp.get("updated_at") or now),
+                    "created_at": _int_or(rp.get("created_at"), now),
+                    "updated_at": _int_or(rp.get("updated_at"), now),
                     "items": [i for i in (rp.get("items") or []) if not _is_local(i)],
                     "source": {"mode": "sync"},
                 })
@@ -511,7 +542,7 @@ def commit(payload):
                     changes["playlist_items"] += len(add)
 
         # 同名不同 id：三选一（local / remote / both）
-        for rp in (remote.get("playlists") or []):
+        for rp in rpls:
             name = str(rp.get("name") or "")
             choice = picks.get(name)
             if choice not in ("remote", "both"):
@@ -528,7 +559,7 @@ def commit(payload):
                 pls.append({
                     "id": rp.get("id") or ("pl_%d_%s" % (now, os.urandom(3).hex())),
                     "name": (name + "（远端）")[:60],
-                    "created_at": int(rp.get("created_at") or now),
+                    "created_at": _int_or(rp.get("created_at"), now),
                     "updated_at": now,
                     "items": items,
                     "source": {"mode": "sync"},
@@ -538,8 +569,9 @@ def commit(payload):
         # 进度：只在用户勾了、且远端确实更新时切
         if payload.get("last_track") and isinstance(remote.get("last_track"), dict):
             rlt = _clean_last_track(remote.get("last_track"))
-            cur = (data.get("settings") or {}).get("last_track") or {}
-            if rlt and int(rlt.get("at") or 0) >= int(cur.get("at") or 0):
+            cur = (data.get("settings") or {}).get("last_track")
+            cur = cur if isinstance(cur, dict) else {}
+            if rlt and _int_or(rlt.get("at")) >= _int_or(cur.get("at")):
                 data["settings"]["last_track"] = rlt
                 changes["last_track"] = True
 
@@ -551,7 +583,8 @@ def commit(payload):
 
 def auto_push_guard():
     """自动模式的最小间隔：5 分钟内不重复推，避免频繁改动打爆远端。"""
-    st = _settings().get("webdav") or {}
+    st = _settings().get("webdav")
+    st = st if isinstance(st, dict) else {}
     if not st.get("auto"):
         return False
     return (time.time() - int(st.get("last_push") or 0)) >= 300

@@ -377,12 +377,14 @@ function playCandidates(item) {
 
 const songKey = (it) => `${it.platform}_${it.id}`;
 
-/* 歌单条目落盘时只存了展示字段（无 minfo/time/sign），直接播/下会报
-   「没有可用音质」。回源取一次完整条目补全，再写回原数组，下次不必重取。 */
+/* 歌单条目落盘时只存了展示字段（无 minfo/time/sign），直接播/下/K歌会报
+   「没有可用音质」或拿不到歌词。回源取一次完整条目补全，再写回原数组，
+   下次不必重取。本地文件 / K 歌作品没有在线元数据，原样返回。 */
 async function ensureMinfo(item) {
   if (!item || !item.platform || !item.id) return item;
-  if (item.platform === 'work') return item;   // 作品没有在线音质可补
-  if ((item.minfo || []).length) return item;
+  if (item.platform === 'work' || item.platform === 'local') return item;
+  const hasMeta = (item.minfo || []).length && item.time && item.sign;
+  if (hasMeta) return item;
   try {
     const d = await rpc('song', { platform: item.platform, id: item.id });
     const full = ((d && d.list) || [])[0];
@@ -440,17 +442,26 @@ const isFav = (kind, id, platform) => state.favs.some(
     && (!platform || f.platform === platform));
 const favsOf = (kind) => state.favs.filter((f) => fKind(f) === kind);
 
-async function toggleFav(kind, payload) {
-  try {
-    const data = await post('/api/store', { op: 'fav_toggle', payload: { kind, ...payload } });
-    state.favs = (data.data && data.data.favorites) || [];
-    renderSide();
-    render();
-    return data.data ? data.data.active : false;
-  } catch (e) {
-    toast(e.message || '收藏失败', 'err');
-    return false;
-  }
+// 收藏写入串行化：每次响应都带「服务端此刻的完整收藏列表」，并发点击时
+// 后到的旧快照会覆盖新快照 —— 连点 30 个心，侧栏计数可能少一截。
+// 排队后每个请求都在前一个落盘后再发，响应顺序与点击顺序一致。
+let _favChain = Promise.resolve();
+function toggleFav(kind, payload) {
+  const run = async () => {
+    try {
+      const data = await post('/api/store', { op: 'fav_toggle', payload: { kind, ...payload } });
+      state.favs = (data.data && data.data.favorites) || [];
+      renderSide();
+      render();
+      return data.data ? data.data.active : false;
+    } catch (e) {
+      toast(e.message || '收藏失败', 'err');
+      return false;
+    }
+  };
+  const p = _favChain.then(run, run);
+  _favChain = p.then(() => {}, () => {});
+  return p;
 }
 
 /* ------------------------------------------------------------------ 歌单 */
@@ -4265,6 +4276,7 @@ async function loadNpLyric(it) {
   try {
     const d = await rpc('getlyric', {
       platform: it.platform, id: it.id, time: it.time, sign: it.sign,
+      name: it.name, artist: it.artist,
     });
     const raw = (d && (d.lyric || d.lrc || d.text || (typeof d === 'string' ? d : ''))) || '';
     const trans = (d && typeof d === 'object' && (d.tlyric || d.tLyric || d.trans)) || '';
@@ -5260,7 +5272,6 @@ function viewSettings() {
         <button class="btn sm" id="diagToneBtn">播放测试音</button>
       </div>
     </div>
-    <div id="diagOut"></div>
   </div>
 
   <div class="set-ver">ELYSIUM ${state.version ? 'v' + esc(state.version) : ''} · 本机运行</div>`;
@@ -5848,6 +5859,7 @@ async function showLyric() {
   try {
     const d = await rpc('getlyric', {
       platform: item.platform, id: item.id, time: item.time, sign: item.sign,
+      name: item.name, artist: item.artist,
     });
     currentLyric = (d && (d.lyric || d.lrc || (typeof d === 'string' ? d : ''))) || '';
     if (!currentLyric && typeof d === 'object') {
@@ -6432,7 +6444,24 @@ function bind() {
     }
     else if (e.code === 'Slash') { e.preventDefault(); $('#kw').focus(); $('#kw').select(); }
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); $('#kw').focus(); $('#kw').select(); }
-    else if (e.key === 'Escape') { $('#npDrawer').hidden = true; closeQualityMenu(); closeCtxMenu(); }
+    else if (e.key === 'Escape') {
+      // Esc = 退出当前浮层。以前只关 NP，设置 / 队列 / 导入抽屉
+      // 打开时按 Esc 没反应，用户只能去点右上角或遮罩。
+      if ($('#askLayer') && !$('#askLayer').hidden) _askDone(null);
+      ['npDrawer', 'panelDrawer', 'settingsDrawer', 'importDrawer', 'syncDrawer']
+        .forEach((id) => {
+          const el = document.getElementById(id);
+          if (el) el.hidden = true;
+        });
+      const side = document.querySelector('.side');
+      if (side) side.classList.remove('open');
+      // 遮罩显隐由 MutationObserver 跟着抽屉 hidden 同步；但「移除 side.open」
+      // 不是属性变更，这里直接归位，别让 Esc 关掉侧栏后还留一层压暗。
+      const mask = $('#drawerMask');
+      if (mask) mask.hidden = true;
+      closeQualityMenu();
+      closeCtxMenu();
+    }
   });
 
   window.addEventListener('pagehide', () => saveLastTrack(true));
@@ -6743,6 +6772,17 @@ document.addEventListener('click', async (e) => {
       if (KAR.phase === 'sing') karStop();
       else karClose();
       break;
+    case 'k-mic-settings': {
+      // 用户被拒过一次后系统不再弹窗：直接带去应用权限页，回来自动重试
+      const b = window.ElysiumAndroid;
+      let ok = false;
+      if (b && typeof b.openAppSettings === 'function') {
+        try { ok = !!b.openAppSettings(); } catch (e) { ok = false; }
+      }
+      if (ok) KAR.micRetry = true;
+      else toast('打不开系统设置：请在系统设置 → 应用 → Elysium → 权限里允许麦克风', 'err');
+      break;
+    }
     case 'w-play': {
       const i = (state.works || []).findIndex((w) => w.id === el.dataset.id);
       if (i >= 0) playAt(state.works.map(workAsTrack), i, { source: '我的作品' });
@@ -7148,6 +7188,15 @@ const KAR = {
   pitchRows: [],                                   // 结算 [{ok, avg}]
   echo: true, reverb: 'studio',
   noMic: false,                                    // 听唱模式：麦克风权限未授予 / 设备无麦克风
+  noMicReason: '',                                 // 具体原因（NotAllowedError / NotFoundError…）
+  pendingStream: null,                             // 进层先申请的麦：开唱时直接接上，不二次弹窗
+  micReq: null,                                    // 在途的 getUserMedia 请求（同一时刻只留一个）
+  micRetry: false,                                 // 用户去系统设置开权限：回到前台自动重试
+  prep: null,                                      // 元数据 + 歌词的后台准备 Promise
+  beginBusy: false,                                // 「开始演唱」正在等准备/权限时防重复点
+  lyricPending: false,                             // 歌词还在路上（ready 页如实显示）
+  analyzeText: '',                                 // 原唱解析状态（重绘 ready 时不丢）
+  gen: 0,                                          // 每次进场自增：迟到回调按它作废
   bound: false,                                    // 调音台监听只装一次（层是复用的）
   // --- P10 升降调（WSOLA 离线变调）---
   pitchSemi: 0,                                    // 目标半音数 −6..+6（0 = 原调）
@@ -7175,12 +7224,14 @@ async function karaokeStart(item) {
   if (!item || !item.id) return;
   if (KAR.open) { toast('已经在 K 歌了'); return; }
   KAR.noMic = false;
+  KAR.noMicReason = '';
   if (!KAR_MON()) {
     if (!IS_ANDROID) {
       toast('这个窗口拿不到麦克风。用系统浏览器打开 ' + location.origin + ' 就能 K 歌', 'err');
       return;
     }
     KAR.noMic = true;    // 拿不到 getUserMedia（旧 WebView / 非安全来源）：听唱模式
+    KAR.noMicReason = '窗口没有麦克风接口';
   }
   // 播放器让位：暂停并记下位置，退出 K 歌回到原位（不自动续播，避免惊喜）
   const a = audio();
@@ -7193,16 +7244,13 @@ async function karaokeStart(item) {
   KAR.chunks = [];
   KAR.lastLine = -1;
   KAR.saving = false;
-  // 歌词尽力取：拿不到（本地文件多数没有）就纯伴奏唱，不阻塞开唱
-  try {
-    const d = await rpc('getlyric', {
-      platform: item.platform, id: item.id, time: item.time, sign: item.sign,
-    });
-    const raw = (d && (d.lyric || d.lrc)) || (typeof d === 'string' ? d : '');
-    const trans = (d && (d.tlyric || d.tLyric || d.trans)) || '';
-    KAR.lines = parseLrc(raw, trans);
-  } catch (e) { KAR.lines = []; }
-  KAR.sung = KAR.lines.map(() => false);
+  KAR.lines = [];
+  KAR.sung = [];
+  KAR.lyricPending = true;   // 层先开，歌词/元数据后台补（上游慢时不再卡住入口）
+  KAR.pitchRows = [];
+  KAR.analyzeText = '';
+  KAR.gen = (KAR.gen || 0) + 1;
+  const gen = KAR.gen;
   KAR.open = true;
   // 音准偏好（全局记忆）：上次用过的混响 / 耳返 / 变调接着用
   KAR.reverb = state.settings.karaoke_reverb || 'studio';
@@ -7214,13 +7262,104 @@ async function karaokeStart(item) {
   karNoMicUI();
   karPaintReady();
   karBindOnce();
-  karpAnalyze(item);                     // 后台解析原唱旋律 / Key / 原伴判定，不等它
+  // 歌单/收藏条目只有展示字段：K 歌同样要回源补 minfo + time/sign。
+  // 不阻塞开层；karaokeBegin / 旋律解析都会等这同一份准备结果。
+  KAR.prep = karPrepare(item, gen);
+  karRequestMic(gen);                    // 进层即申请麦克风：权限弹窗先走，调音台不缺项
+  karpAnalyze(item, gen);                // 后台解析原唱旋律 / Key / 原伴判定，不等它
+}
+
+/** 后台补齐 K 歌原料：条目元数据 + 带时间轴歌词。失败不阻塞开唱。 */
+async function karPrepare(item, gen) {
+  let full = item;
+  try { full = await ensureMinfo(item); } catch (e) { /* 原样继续 */ }
+  if (!KAR.open || KAR.gen !== gen) return full;
+  KAR.item = full;
+  // 歌词：上游抖一下很常见，空回/报错再试一次（K 歌才有的额外请求，代价可接受）
+  let raw = '';
+  let trans = '';
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const d = await rpc('getlyric', {
+        platform: full.platform, id: full.id, time: full.time, sign: full.sign,
+        name: full.name, artist: full.artist,
+      });
+      raw = (d && (d.lyric || d.lrc)) || (typeof d === 'string' ? d : '');
+      trans = (d && (d.tlyric || d.tLyric || d.trans)) || '';
+      if (raw) break;
+    } catch (e) { /* 网络失败：下一轮再试 */ }
+    if (attempt === 0 && KAR.open && KAR.gen === gen) {
+      await new Promise((r) => setTimeout(r, 900));
+    }
+  }
+  if (!KAR.open || KAR.gen !== gen) return full;
+  KAR.lines = parseLrc(raw, trans);
+  if (!KAR.open || KAR.gen !== gen) return full;
+  KAR.lyricPending = false;
+  KAR.sung = KAR.lines.map(() => false);
+  const layer = $('#singLayer');
+  if (layer) layer.classList.toggle('no-preview', !KAR.lines.length);
+  if (KAR.phase === 'ready') {
+    karPaintReady();                     // 说明文字从「正在取歌词」换成真实行数
+  } else if (KAR.phase === 'sing' || KAR.phase === 'count') {
+    // 歌词迟到（上游慢）：唱到一半也要补上，不留白屏
+    const a2 = KAR.el;
+    const pos = KAR.bufSrc ? Math.max(0, KAR.ctx.currentTime - KAR.bufT0)
+      : (a2 ? (a2.currentTime || 0) : 0);
+    karPaintLines(KAR.lines.length ? karLineAt(pos + LRC_OFF) : 0);
+  }
+  return full;
+}
+
+/** 进层就申请麦克风：WebView 的权限弹窗要等系统回话，放到开唱时才问会让
+    调音台缺人声 / 音色 / 混响一大块。拿不到就转听唱模式，并留下具体原因。
+    只保留一个在途请求：开唱按得早时会等它，避免同时开两路采集。 */
+function karRequestMic(gen) {
+  if (KAR.noMic || KAR.pendingStream) return Promise.resolve();
+  if (KAR.micReq) return KAR.micReq;
+  KAR.micReq = (async () => {
+    const mon = KAR_MON();
+    if (!mon) {
+      KAR.noMic = true;
+      KAR.noMicReason = '窗口没有麦克风接口';
+      karNoMicUI();
+      return;
+    }
+    try {
+      const stream = await mon({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      });
+      if (!KAR.open || KAR.gen !== gen) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      KAR.pendingStream = stream;
+    } catch (e) {
+      if (!KAR.open || KAR.gen !== gen) return;
+      KAR.noMic = true;
+      KAR.noMicReason = (e && (e.name || e.message)) || '权限未授予';
+      karNoMicUI();
+      if (IS_ANDROID) {
+        toast('麦克风没打开（' + KAR.noMicReason + '）· 已转听唱模式；在系统设置里允许 Elysium 使用麦克风后重进');
+      }
+    }
+    if (KAR.phase === 'ready') karPaintReady();   // 拿到麦 / 失败：听唱提示刷新
+  })().finally(() => { KAR.micReq = null; });
+  return KAR.micReq;
 }
 
 /** 听唱模式显隐：拿不到麦克风时，麦相关控件与实时音准条整体退场（CSS .nomi） */
 function karNoMicUI() {
   const layer = $('#singLayer');
   if (layer) layer.classList.toggle('nomi', !!KAR.noMic);
+}
+
+/** 原唱解析状态：既写屏也记在 KAR 上 —— ready 页因麦克风/歌词回包重绘时，
+    不能把已经解析完的结果又退回「正在取原唱数据…」。 */
+function karSetAnalyze(text) {
+  KAR.analyzeText = text || '';
+  const el = $('#kAnalyze');
+  if (el) el.textContent = KAR.analyzeText;
 }
 
 function karPaintReady() {
@@ -7232,21 +7371,27 @@ function karPaintReady() {
   else bg.style.backgroundImage = 'none';
   const sub = KAR.noMic
     ? '听唱模式 · 麦克风不可用：伴奏 / 歌词 / 变调 / 消原唱都在，不录音'
-    : (KAR.lines.length
-      ? `已就位 ${KAR.lines.length} 行歌词 · 建议戴耳机（避免伴奏串进麦克风）`
-      : '这首歌没找到带时间轴的歌词 · 纯伴奏模式');
+    : (KAR.lyricPending
+      ? '正在取歌词… 伴奏已经可以开唱'
+      : (KAR.lines.length
+        ? `已就位 ${KAR.lines.length} 行歌词 · 建议戴耳机（避免伴奏串进麦克风）`
+        : '这首歌没找到带时间轴的歌词 · 纯伴奏模式'));
   $('#kStage').innerHTML = `
     <div class="k-ready">
       <div class="k-ready-art" id="kReadyArt"><svg><use href="#i-mic-sing"/></svg></div>
       <div class="k-ready-t">${KAR.noMic ? '跟着一起唱' : '准备好开嗓'}</div>
       <div class="k-ready-s">${sub}</div>
       <div class="k-ready-notes">
-        <div class="k-analyze" id="kAnalyze">正在取原唱数据…</div>
+        <div class="k-analyze" id="kAnalyze">${esc(KAR.analyzeText || '正在取原唱数据…')}</div>
         <div class="k-analyze" id="kPitchProg"></div>
       </div>
       <div class="k-hint">${KAR.noMic
-        ? '想录自己的歌声：到系统设置里允许 Elysium 使用麦克风，再重新进入 K 歌'
+        ? (`麦克风没打开${KAR.noMicReason ? '（' + esc(KAR.noMicReason) + '）' : ''}：`
+          + '到系统设置里允许 Elysium 使用麦克风，再重新进入 K 歌')
         : '全程录音只保存在本机，唱完由你决定保存或丢弃'}</div>
+      ${KAR.noMic && IS_ANDROID
+        ? '<button class="btn ghost sm" data-act="k-mic-settings">去系统设置允许麦克风</button>'
+        : ''}
     </div>`;
   const art = $('#kReadyArt');
   if (art && it.cover) {
@@ -7652,44 +7797,67 @@ function karBuild(stream) {
 
 async function karaokeBegin() {
   if (!KAR.open || KAR.phase === 'sing' || KAR.phase === 'count') return;
-  let stream = null;
-  if (!KAR.noMic) {
-    try {
-      stream = await KAR_MON()({
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-      });
-    } catch (e) {
-      if (!IS_ANDROID) {
-        toast('拿不到麦克风：' + (e && (e.name || e.message) || '权限被拒绝'), 'err');
-        return;
-      }
-      KAR.noMic = true;               // 权限被拒 / 无设备：不白来一趟，转听唱模式
-      karNoMicUI();
-      toast('麦克风权限未授予，已转为听唱模式（伴奏 + 歌词 + 变调，不录音）');
+  if (KAR.beginBusy) return;             // 准备/权限对话框期间重复点：只走一次
+  KAR.beginBusy = true;
+  try {
+    if (KAR.prep) {                      // 条目元数据没回来就开唱会缺伴奏：等它（通常在毫秒级）
+      try { await KAR.prep; } catch (e) { /* 下面按可用性报错 */ }
     }
+    if (!KAR.open || KAR.phase === 'sing' || KAR.phase === 'count') return;
+    const cands = playCandidates(KAR.item || {});
+    if (!cands.length) {
+      toast('这首歌没有可用音质，取不到伴奏 · 换一首再试', 'err');
+      return;
+    }
+    let stream = KAR.pendingStream;
+    KAR.pendingStream = null;
+    if (!stream && !KAR.noMic && KAR.micReq) {
+      // 进层时那次申请还在弹窗：等它，别同时再开一路采集
+      try { await KAR.micReq; } catch (e) { /* ignore */ }
+      stream = KAR.pendingStream;
+      KAR.pendingStream = null;
+    }
+    if (!stream && !KAR.noMic) {
+      try {
+        stream = await KAR_MON()({
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        });
+      } catch (e) {
+        if (!IS_ANDROID) {
+          toast('拿不到麦克风：' + (e && (e.name || e.message) || '权限被拒绝'), 'err');
+          return;
+        }
+        KAR.noMic = true;               // 权限被拒 / 无设备：不白来一趟，转听唱模式
+        KAR.noMicReason = (e && (e.name || e.message)) || '权限未授予';
+        karNoMicUI();
+        toast('麦克风没打开（' + KAR.noMicReason + '），已转为听唱模式（伴奏 + 歌词 + 变调，不录音）');
+      }
+    }
+    if (!karBuild(stream)) {
+      toast('K 歌音频初始化失败', 'err');
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    karSetVocal(!KAR.vocalOff);
+    KAR.phase = 'count';
+    const cap = $('#kClockCap');
+    if (cap) cap.textContent = '准备中';
+    $('#singLayer').classList.add('counting');
+    $('#kStage').innerHTML = '<div class="k-count-wrap"><div class="k-count pop" id="kCount">3</div>'
+      + '<div class="k-count-hint">准备好，马上开始</div></div>';
+    karPaintCtl(false);
+    try { await KAR.ctx.resume(); } catch (e) { /* ignore */ }
+    for (const n of [3, 2, 1]) {
+      const c = $('#kCount');
+      if (!c) { KAR.phase = 'ready'; return; }   // 期间关了层
+      c.textContent = n;
+      c.classList.remove('pop'); void c.offsetWidth; c.classList.add('pop');
+      await new Promise((res) => setTimeout(res, 700));
+    }
+    karGo();
+  } finally {
+    KAR.beginBusy = false;
   }
-  if (!karBuild(stream)) {
-    toast('K 歌音频初始化失败', 'err');
-    if (stream) stream.getTracks().forEach((t) => t.stop());
-    return;
-  }
-  karSetVocal(!KAR.vocalOff);
-  KAR.phase = 'count';
-  const cap = $('#kClockCap');
-  if (cap) cap.textContent = '准备中';
-  $('#singLayer').classList.add('counting');
-  $('#kStage').innerHTML = '<div class="k-count-wrap"><div class="k-count pop" id="kCount">3</div>'
-    + '<div class="k-count-hint">准备好，马上开始</div></div>';
-  karPaintCtl(false);
-  try { await KAR.ctx.resume(); } catch (e) { /* ignore */ }
-  for (const n of [3, 2, 1]) {
-    const c = $('#kCount');
-    if (!c) return;                        // 期间关了层
-    c.textContent = n;
-    c.classList.remove('pop'); void c.offsetWidth; c.classList.add('pop');
-    await new Promise((res) => setTimeout(res, 700));
-  }
-  karGo();
 }
 
 function karGo() {
@@ -7972,10 +8140,16 @@ async function karSave() {
 
 function karClose() {
   cancelAnimationFrame(KAR.raf);
+  KAR.gen = (KAR.gen || 0) + 1;          // 让所有在途的歌词 / 解析回调过期
   if (KAR.worker) { KAR.worker.terminate(); KAR.worker = null; }
   if (KAR.pitchWorker) { KAR.pitchWorker.terminate(); KAR.pitchWorker = null; }
   KAR.pitchBusy = false;
   if (KAR.micStream) KAR.micStream.getTracks().forEach((t) => t.stop());
+  if (KAR.pendingStream) {
+    KAR.pendingStream.getTracks().forEach((t) => t.stop());
+    KAR.pendingStream = null;
+  }
+  KAR.micReq = null;
   if (KAR.el) {
     try { KAR.el.pause(); KAR.el.removeAttribute('src'); KAR.el.load(); } catch (e) { /* ignore */ }
     KAR.el.remove();
@@ -7988,8 +8162,10 @@ function karClose() {
     convolver: null, echoGate: null, toneFilter: null,
     melody: null, keyInfo: null, melodyRange: null, autoVocal: null, userMidi: null,
     ringBuf: null, ringN: 0, userHist: [], pitchAcc: null, pitchRows: [],
-    pitchHit: 0, pitchTotal: 0, pitchAvg: null, noMic: false,
-    decodedBuf: null, pitchBuf: null, bufSrc: null, pitchCtx: null });
+    pitchHit: 0, pitchTotal: 0, pitchAvg: null, noMic: false, noMicReason: '',
+    decodedBuf: null, pitchBuf: null, bufSrc: null, pitchCtx: null,
+    prep: null, beginBusy: false, lyricPending: false, analyzeText: '',
+    micRetry: false });
   karScaleCenter = null;
   karNoMicUI();
   $('#singLayer').classList.remove('is-review', 'counting');
@@ -8372,14 +8548,25 @@ function karWorkerURL() {
 
 /** 进 K 歌即后台解析原唱：fetch → decode → 8kHz 重采样 → Worker。
    全程不 await（K 歌不等于解析），结果回来填 KAR.melody / keyInfo / autoVocal。
-   回调一律校验 KAR.item —— 关层重开另一首后，旧歌的迟到回调绝不污染新层。 */
-async function karpAnalyze(item) {
+   回调一律校验 KAR.gen —— 关层重开另一首后，旧歌的迟到回调绝不污染新层。 */
+async function karpAnalyze(item, gen) {
   KAR.worker = null;
   KAR.melody = null;
   KAR.keyInfo = null;
   KAR.autoVocal = null;
   KAR.decodedBuf = null;
-  const url = mediaSrc(item, playCandidates(item)[0]);
+  // 先等条目元数据补齐：歌单里落盘的条目没有 minfo，直接取流会拼不出 URL
+  if (KAR.prep) {
+    try { await KAR.prep; } catch (e) { /* ignore */ }
+  }
+  if (!KAR.open || KAR.gen !== gen) return;
+  item = KAR.item;                       // 补全后的条目（确保有 minfo/time/sign）
+  const cands = playCandidates(item);
+  if (!cands.length) {
+    karSetAnalyze('这首缺音质信息，原唱解析不可用 · 纯伴奏模式');
+    return;
+  }
+  const url = mediaSrc(item, cands[0]);
   try {
     const ab = await fetch(url).then((r) => {
       if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -8388,7 +8575,7 @@ async function karpAnalyze(item) {
     // decode 用一次性 OfflineAudioContext：KAR.ctx 可能还没建（开唱前就要判定原伴）
     const oc = new OfflineAudioContext(1, 1, 48000);
     const buf = await oc.decodeAudioData(ab);
-    if (KAR.item !== item) return;             // 层已经换歌 / 关了：这批原料作废
+    if (KAR.gen !== gen || !KAR.open) return;  // 层已经换歌 / 关了：这批原料作废
     if (KAR.open && KAR.pitchSemi) {           // 选了变调：留着原采样率解码当 WSOLA 原料
       KAR.decodedBuf = buf;
       karpPitch(KAR.pitchSemi);
@@ -8419,13 +8606,12 @@ async function karpAnalyze(item) {
     KAR.worker = w;
     w.onmessage = (e) => {
       const m = e.data;
-      if (KAR.item !== item || !KAR.open) {    // 换歌 / 关层：迟到回调全部丢弃
+      if (KAR.gen !== gen || !KAR.open) {       // 换歌 / 关层：迟到回调全部丢弃
         w.terminate();
         return;
       }
       if (m.type === 'progress') {
-        const el = $('#kAnalyze');
-        if (el) el.textContent = `正在解析原唱旋律 ${Math.round(m.done / m.total * 100)}%`;
+        karSetAnalyze(`正在解析原唱旋律 ${Math.round(m.done / m.total * 100)}%`);
         return;
       }
       if (m.type === 'melody') {
@@ -8435,10 +8621,9 @@ async function karpAnalyze(item) {
         KAR.autoVocal = m.vocalCancel;
         karApplyAutoVocal();
         karPaintKeyBadge();
-        const an = $('#kAnalyze');
-        if (an) an.textContent = m.melody.length
+        karSetAnalyze(m.melody.length
           ? `已解析 ${m.melody.length} 个参考音 · ${m.key ? m.key.label : ''}`
-          : '这首没提取到可信人声旋律 · 音准参考不可用';
+          : '这首没提取到可信人声旋律 · 音准参考不可用');
         w.terminate();
         KAR.worker = null;
       }
@@ -8446,8 +8631,7 @@ async function karpAnalyze(item) {
     w.postMessage({ type: 'analyze', l: L.buffer, r: R.buffer, rate: 8000, windows: wins },
       [L.buffer, R.buffer]);
   } catch (e) {
-    const an = $('#kAnalyze');
-    if (an) an.textContent = '原唱解析失败（' + (e.message || e) + '）· 纯伴奏模式';
+    karSetAnalyze('原唱解析失败（' + (e.message || e) + '）· 纯伴奏模式');
   }
 }
 
@@ -8708,6 +8892,18 @@ async function boot() {
   loadUpdateStatus();                        // 更新追踪：读后端缓存 + 每 30 分钟轮询一次
   setInterval(() => loadUpdateStatus(), 30 * 60 * 1000);
   pollUpdateDl();                            // 若有进行中的版本下载（如刷新页面），恢复进度条
+  /* 从系统设置回来后自动重试麦克风：Android 拒绝过一次权限后系统不再弹窗，
+     用户去权限页打开开关，回到 K 歌应直接恢复完整调音台，不用重进。 */
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden || !KAR.open || !KAR.micRetry) return;
+    KAR.micRetry = false;
+    if (!KAR.noMic || KAR.phase !== 'ready') return;   // 唱起来了就不再中途换麦
+    KAR.noMic = false;
+    KAR.noMicReason = '';
+    karNoMicUI();
+    karPaintReady();
+    karRequestMic(KAR.gen);
+  });
   $('#kw').focus();
 }
 
