@@ -10,6 +10,10 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- K 歌：WebView getUserMedia 采麦克风；Android 6+ 还需运行时授予（MainActivity 申请） -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Chromium 采集链打开设备时要切通信模式/音频参数（AudioManager.setMode 等），
+         宿主缺这个权限会直接 NotReadableError（RECORD_AUDIO 已给也不弹框）——
+         Chrome 自带它所以浏览器能录而 WebView 不能。普通权限，装包即生效。 -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <!-- 通知栏媒体控制：API 33+ 运行时申请，拒绝只是没有通知、不影响播放 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 

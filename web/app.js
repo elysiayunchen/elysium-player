@@ -5889,7 +5889,18 @@ function bindSettings() {
         + row('采集回调粒度', gp === null ? '未测到' : 'p50 ' + gp + 'ms')
         + '<div class="diag-detail ' + verdict[0] + '">' + esc(verdict[1]) + '</div>';
     } catch (e) {
-      out.innerHTML = '<div class="diag-detail bad">' + esc((e && (e.name || e.message)) || String(e)) + ' · 麦克风没测成</div>';
+      /* 失败不只吐错误名：完整 message（NotReadableError 带具体原因）+
+         audioinput 枚举计数，把「枚举层就没设备」和「设备打开失败」分开。 */
+      let probe;
+      try {
+        const devs = await navigator.mediaDevices.enumerateDevices();
+        probe = ' · 麦克风枚举 ' + devs.filter((d) => d.kind === 'audioinput').length + ' 个';
+      } catch (e2) {
+        probe = ' · 设备枚举也失败';
+      }
+      const name = (e && e.name) || 'Error';
+      const msg = (e && e.message) || String(e);
+      out.innerHTML = '<div class="diag-detail bad">' + esc(name + ' · ' + msg + probe) + ' · 麦克风没测成</div>';
     }
     btn.disabled = false;
     btn.textContent = '测麦克风延迟';
