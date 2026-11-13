@@ -86,6 +86,7 @@ const state = {
   quality: 'best',
   route: { name: 'home' },
   stack: [],
+  eqSel: -1,                          // 曲线里选中的参数段（瞬时态，不落盘）
   items: [],                       // 搜索结果（已跨源折叠，重复项在 alts 里）
   reco: null,                      // 本地推荐候选
   stats: null,                     // 我的统计（/api/stats/summary）
@@ -218,6 +219,11 @@ function srcBadge(it, idx) {
 }
 
 const qKey = (m) => (m.format === 'flac' ? 'flac' : String(m.bitrate));
+/* 采样率 kHz 文案：96k → '96'，96.5k → '96.5' */
+const srKHz = (sr) => {
+  const n = Number(sr) || 0;
+  return n % 1000 === 0 ? String(n / 1000) : (n / 1000).toFixed(1);
+};
 const qName = (m) => (m.format === 'flac' ? 'FLAC' : m.bitrate + 'K');
 const qChip = (m) => {
   const cls = m.format === 'flac' ? 'flac' : Number(m.bitrate) >= 320 ? 'hi' : 'lo';
@@ -237,9 +243,12 @@ function qualityChip(it, idx, noSwap) {
   if (it.platform === 'local') {            // 本地文件：mutagen 读出的就是真实值
     const fmt = (it.format === 'flac' ? 'FLAC' : String(it.format || '').toUpperCase());
     const br = it.bitrate ? ' ' + it.bitrate + 'k' : '';
-    const size = it.size ? `<span class="mono">${fmtSize(it.size)}</span>` : '';
-    return `<span class="chip ${it.format === 'flac' ? 'flac' : (it.bitrate || 0) >= 192 ? 'hi' : 'lo'}"
-      title="本地文件 · ${esc(it.id)}">${esc(fmt || '音轨')}${br}</span>${size}`;
+    const h = it.hires || null;
+    const isHi = h && (Number(h.sample_rate) > 48000 || Number(h.bit_depth) > 16);
+    const spec = isHi ? `${srKHz(h.sample_rate)}kHz/${Number(h.bit_depth)}bit` : '';
+    const tip = isHi ? `本地文件 · Hi-Res ${spec} · ${esc(it.id)}` : `本地文件 · ${esc(it.id)}`;
+    return `<span class="chip ${it.format === 'flac' ? 'flac' : (it.bitrate || 0) >= 192 ? 'hi' : 'lo'}${isHi ? ' hi-res' : ''}"
+      title="${esc(tip)}">${esc(fmt || '音轨')}${spec ? ' ' + spec : br}</span>`;
   }
   const p = PROBE.get(pk(it));
   if (!p) {
@@ -266,8 +275,7 @@ function qualityChip(it, idx, noSwap) {
   const br = p.kbps ? ' ' + p.kbps + 'k' : '';
   const flag = p.mismatch ? ' flag' : '';
   const tip = p.mismatch ? '上游标称无损，实测并非 FLAC' : '';
-  const size = p.size ? `<span class="mono">${fmtSize(p.size)}</span>` : '';
-  return `<span class="chip ${cls}${flag}"${tip ? ` title="${esc(tip)}"` : ''}>${label}${br}</span>${size}`;
+  return `<span class="chip ${cls}${flag}"${tip ? ` title="${esc(tip)}"` : ''}>${label}${br}</span>`;
 }
 
 let _probeSeq = 0;
@@ -289,6 +297,9 @@ function paintProbeCells(items) {
     const cell = row.querySelector('.tr-spec, .rspec');
     const idxAttr = row.getAttribute('data-row');
     if (it && cell) cell.innerHTML = qualityChip(it, idxAttr == null ? null : Number(idxAttr));
+    /* 大小格子跟着实测一起回填（大小只有探测回来才知道） */
+    const szCell = row.querySelector('.tr-size');
+    if (szCell) szCell.textContent = p.size ? fmtSize(p.size) : (it && it.size ? fmtSize(it.size) : '');
     row.classList.toggle('dead', !p.valid && !p.unresolved);
   });
 }
@@ -1157,14 +1168,29 @@ function engBuild(elA, elB) {
   }
 }
 
-/** 实际生效的 10 段曲线（eq_gains 才是唯一真相，预设只是往里填数） */
-function engCurve() {
-  const g = (state.settings && state.settings.eq_gains) || [];
-  return EQ_FREQS.map((_, i) => Math.max(-12, Math.min(12, Number(g[i]) || 0)));
+/** 实际生效的段表（eq_bands 唯一真相，≤10 段）。后端写入时已校验过，
+    这里再做一层防御性钳制 —— data.json 手改坏值不该有路径摸到音频图。 */
+/** 图形推子（老数据）→ 参数段迁移：
+    把 eq_gains 里非零的段映射为同频率 peaking（Q=1）——与图形推子的
+    BiquadFilter(peaking, Q=1) 逐双二次等价，迁移前后听感完全一致。
+    只迁移一次：已有参数段（或 eq_bands 里已有内容）直接跳过；全 0 也不迁移。 */
+function migrateEqToBands() {
+  const s = state.settings || {};
+  if (Array.isArray(s.eq_bands) && s.eq_bands.length) return;
+  const gains = Array.isArray(s.eq_gains) ? s.eq_gains : [];
+  const bands = [];
+  for (let i = 0; i < EQ_FREQS.length; i++) {
+    const db = Math.max(-12, Math.min(12, Number(gains[i]) || 0));
+    if (Math.abs(db) > 0.001) bands.push({ type: 'peaking', f: EQ_FREQS[i], q: 1, db });
+  }
+  if (!bands.length) return;
+  s.eq_bands = bands;
+  s.eq_preset = 'custom';
+  postSettings({ eq_bands: bands, eq_preset: 'custom' })
+    .then(() => toast('图形推子调音已迁移为参数段，可逐段精修'))
+    .catch(() => {});
 }
 
-/** 参数模式实际生效的段表（eq_bands 唯一真相，≤10 段）。后端写入时已校验过，
-    这里再做一层防御性钳制 —— data.json 手改坏值不该有路径摸到音频图。 */
 function engBands() {
   const v = (state.settings && state.settings.eq_bands) || [];
   const out = [];
@@ -1194,23 +1220,22 @@ function engAutoPreampDb(dbs) {
 }
 
 function engApplyEq(immediate) {
+  /* 曲线每次 EQ 改动都重画：画布只在设置抽屉打开时存在（getElementById 空过，零成本） */
+  paintEqCurve();
   if (!ENG.on) return;
   const on = state.settings.eq_enabled === true;
   const now = ENG.ctx.currentTime;
-  const parametric = on && (state.settings.eq_mode || 'graphic') === 'parametric';
-  const bands = parametric ? engBands() : null;
-  const curve = parametric ? null : engCurve();
-  /* 10 个 BiquadFilter 节点两模式复用（B-2/B-4）：参数模式按 eq_bands 重配
-     type/frequency/Q/gain，不足 10 段的余下节点落 identity；图形模式照旧
-     EQ_FREQS + Q=1。图不重建、不做节点动态增删 —— 加减段只是重配。
-     只有 gain 走平滑，type/frequency/Q 是瞬跳：切模式瞬间可能有一声轻「咔」，
+  const bands = on ? engBands() : null;   // null = 全 identity（EQ 关闭 = 直通）
+  /* 10 个 BiquadFilter 节点复用（B-2/B-4）：段表重配 type/frequency/Q/gain，
+     不足 10 段的余下节点落 identity；图不重建、不做节点动态增删 —— 加减段只是重配。
+     只有 gain 走平滑，type/frequency/Q 是瞬跳：切预设瞬间可能有一声轻「咔」，
      10 节点复用的固有代价，实测可感度低。 */
   ENG.eq.forEach((b, i) => {
     const bd = bands ? bands[i] : null;
     const type = bd ? bd.type : 'peaking';
     const f = bd ? bd.f : EQ_FREQS[i];
     const q = bd ? bd.q : 1.0;
-    const db = parametric ? (bd ? bd.db : 0) : (on ? curve[i] : 0);
+    const db = bd ? bd.db : 0;
     try {
       b.type = type;
       b.frequency.value = f;
@@ -1222,13 +1247,12 @@ function engApplyEq(immediate) {
       try { b.gain.value = db; } catch (e2) { /* ignore */ }
     }
   });
-  // 前级只在参数模式生效：图形模式是老十推子路径，升级前后听感必须一字不差
-  // （前级读数/补偿开关也只存在于参数面板，图形模式给了补偿却没处看 = 无感掉音量）
-  engApplyPreamp(parametric ? bands.map((x) => x.db) : null, on && parametric, immediate);
+  /* 前级：自动补偿（抵掉最高拉升的正增益）+ 手动前级；EQ 关闭时恒 0dB */
+  engApplyPreamp(bands ? bands.map((x) => x.db) : null, on, immediate);
 }
 
 /** 前级增益：自动补偿 + 手动前级，setTargetAtTime 平滑防爆音（B-3）。
-    active 仅参数模式为真 —— 图形模式恒 0dB，老用户零变化。
+    active = EQ 启用（关闭时恒 0dB）。
     自动补偿抵掉段表里拉得最高的正增益，EQ 推再高叠加起来也过不了 0dBFS。
     响度增益挂在各槽 louds 节点上（跟曲走、钳 ±15dB），与本节点分层；
     极端叠加（补偿关闭 + 段表全负 + 手动 +12 + 响度 +15）Web Audio 全程
@@ -1418,25 +1442,22 @@ async function loudMeasure(item) {
   }
 }
 
+/** 预设（快速起手）：把图形预设等价为参数段——与图形推子逐双二次等价（同频/同增益/峰/Q=1） */
 function engSetPreset(name) {
-  const curve = (EQ_PRESETS[name] || EQ_PRESETS.flat).slice();
+  const spec = EQ_PRESETS[name] || EQ_PRESETS.flat;
+  const bands = [];
+  EQ_FREQS.forEach((f, i) => {
+    const db = spec[i];
+    if (Math.abs(db) > 0.001) bands.push({ type: 'peaking', f, q: 1, db });
+  });
+  state.settings.eq_bands = bands;
   state.settings.eq_preset = name;
-  state.settings.eq_gains = curve;
-  postSettings({ eq_preset: name, eq_gains: curve });
+  state.eqSel = bands.length ? 0 : -1;
+  postSettings({ eq_bands: bands, eq_preset: name });
   engApplyEq();
-}
-
-/** 推子拖动：先落内存 + 立刻听感，落盘防抖 */
-function engSetBand(i, db) {
-  const cur = engCurve();
-  cur[i] = Math.max(-12, Math.min(12, Number(db) || 0));
-  state.settings.eq_gains = cur;
-  state.settings.eq_preset = 'custom';
-  engApplyEq();
-  if (ENG.eqTimer) clearTimeout(ENG.eqTimer);
-  ENG.eqTimer = setTimeout(() => {
-    postSettings({ eq_gains: engCurve(), eq_preset: 'custom' });
-  }, 350);
+  paintEqParam();
+  paintEqPreamp();
+  paintEqCurve();
 }
 
 /* ------------------------------------------------ 发烧客·参数 EQ 与 AutoEq（B/C-3/D 组） */
@@ -1447,16 +1468,23 @@ function engSetBand(i, db) {
     定时器到点现读内存、不闭包捕获当时的数组：拖完推子 350ms 内又做了删段/
     导入这类即时落盘的结构操作时，旧定时器会把改动前的段表再写回去。 */
 function engParamChanged() {
+  state.settings.eq_preset = 'custom';
   engApplyEq();
+  paintEqGraphic();
+  paintEqPreamp();               // 段增益变了，补偿量/实际读数跟着变
   if (ENG.pbTimer) clearTimeout(ENG.pbTimer);
-  ENG.pbTimer = setTimeout(() => postSettings({ eq_bands: state.settings.eq_bands }), 350);
+  ENG.pbTimer = setTimeout(() => postSettings({ eq_bands: state.settings.eq_bands, eq_preset: 'custom' }), 350);
 }
 
 /** 结构改动：撤掉挂着的防抖写盘（它带的是旧表），自己即时落盘 */
 function engParamStructural() {
   if (ENG.pbTimer) { clearTimeout(ENG.pbTimer); ENG.pbTimer = null; }
+  state.settings.eq_preset = 'custom';
   engApplyEq();
-  postSettings({ eq_bands: state.settings.eq_bands });
+  paintEqGraphic();
+  paintEqSelBar();
+  paintEqPreamp();
+  postSettings({ eq_bands: state.settings.eq_bands, eq_preset: 'custom' });
 }
 
 function engSetParamBand(i, patch) {
@@ -1492,15 +1520,6 @@ function engSetBandType(i, type) {
   engParamStructural();
 }
 
-function engSetEqMode(mode) {
-  const m = mode === 'parametric' ? 'parametric' : 'graphic';
-  if ((state.settings.eq_mode || 'graphic') === m) return;
-  state.settings.eq_mode = m;
-  postSettings({ eq_mode: m });
-  engApplyEq();               // 平滑过渡，切换不当场爆音
-  paintEqMode();
-}
-
 function engNudgePreamp(d) {
   const v = Math.max(-12, Math.min(12,
     Math.round(((Number(state.settings.eq_preamp) || 0) + d) * 10) / 10));
@@ -1534,7 +1553,7 @@ function engApplyEqPresetLib(name) {
     eq_preamp: state.settings.eq_preamp, eq_headphone: name,
   });
   engApplyEq();
-  paintEqMode();
+  state.eqSel = 0;
   paintEqParam();
   paintEqPreamp();
   paintEqLib();
@@ -1570,7 +1589,7 @@ async function eqImportSubmit() {
       eq_headphone: model, eq_preset: 'autoeq',
     });
     engApplyEq();
-    paintEqMode();
+    state.eqSel = 0;
     paintEqParam();
     paintEqPreamp();
     const name = model || 'AutoEq 导入';
@@ -2096,18 +2115,23 @@ function setMini(on) {
   try { api.mini_mode(!!on); } catch (e) { /* 窗口改不动就保持布局，至少不崩 */ }
 }
 
-/** Hi-Res 徽标文案：只认实测 —— probe 探头解出的 FLAC STREAMINFO（位深/采样率
-    来自文件本体，上游声称不算数）。超过 CD 规格（48kHz/16bit）才标，
-    44.1k/16 的 FLAC 不是 Hi-Res；没数据不显示（不给假情报）。
+/** Hi-Res 徽标文案：只认实测 —— 本地文件读 STREAMINFO/mutagen（位深/采样率
+    来自文件本体，上游声称不算数），线上走 probe 探头；超过 CD 规格
+    （48kHz/16bit）才标，44.1k/16 的 FLAC 不是 Hi-Res；没数据不显示（不给假情报）。
     单位写全 kHz：音质 chip 里「900k」的 k 是码率，徽标里再缩写就撞量纲了。 */
 function hiresTag(item) {
   if (!item) return '';
-  const p = PROBE.get(pk(item));
-  if (!p || !p.valid || !p.hires) return '';
-  const sr = Number(p.hires.sample_rate) || 0;
-  const bits = Number(p.hires.bit_depth) || 0;
+  let h = null;
+  if (item.platform === 'local') h = item.hires || null;          // 本地：扫描期即实测落库
+  else {
+    const p = PROBE.get(pk(item));
+    h = (p && p.valid && p.hires) ? p.hires : null;
+  }
+  if (!h) return '';
+  const sr = Number(h.sample_rate) || 0;
+  const bits = Number(h.bit_depth) || 0;
   if (!sr || !bits || (sr <= 48000 && bits <= 16)) return '';
-  const k = sr % 1000 === 0 ? String(sr / 1000) : (sr / 1000).toFixed(1);
+  const k = srKHz(sr);
   return `${k}kHz/${bits}bit`;
 }
 
@@ -2480,6 +2504,7 @@ function rowHtml(it, i, opt = {}) {
     <div class="tr-src">${srcBadge(it, i)}</div>
     ${albumCell}
     <div class="tr-spec">${spec}</div>
+    <div class="tr-size">${pr && pr.size ? fmtSize(pr.size) : (it.size ? fmtSize(it.size) : '')}</div>
     <div class="tr-dur mono">${fmtTime(it.duration)}</div>
     <div class="tr-act">
       <button class="ic tr-kar" data-act="tr-karaoke" data-i="${i}" title="K歌这一首" aria-label="K歌这一首">${icon('mic')}</button>
@@ -2495,6 +2520,7 @@ function theadHtml(opt = {}) {
     <span class="th-src">来源</span>
     ${opt.hideAlbum ? '' : '<span class="th-album">专辑</span>'}
     <span class="th-spec">实测规格</span>
+    <span class="th-size">大小</span>
     <span class="th-dur">时长</span><span class="th-act"></span>
   </div>`;
 }
@@ -4248,8 +4274,9 @@ async function loadNpLyric(it) {
     renderLyricLines($('#npLyricBody'), false);
     if (!$('#lyricLayer').hidden) renderLyricLines($('#lyricBody'), true);
   } catch (e) {
+    console.warn('[lyric] 取词失败：', e);
     const el = $('#npLyricBody');
-    if (el) el.innerHTML = `<span class="muted">歌词没有取到：${esc(e.message)}`
+    if (el) el.innerHTML = `<span class="muted">歌词没取到——可能是网络波动或上游限制，点重试再试一次`
       + `<button class="btn ghost sm" data-act="lrc-retry" title="重新取歌词">重试</button></span>`;
   }
 }
@@ -4773,35 +4800,9 @@ function afterLibChange() {
   loadLocal(true);
 }
 
-function eqBandsHtml() {
-  const curve = engCurve();
-  return EQ_FREQS.map((f, i) => `
-    <div class="eq-band">
-      <em class="mono" data-eqv="${i}">${curve[i] > 0 ? '+' : ''}${curve[i]}</em>
-      <span class="eq-slot">
-        <input type="range" min="-12" max="12" step="1" value="${curve[i]}" data-eq="${i}" aria-label="${f}Hz"/>
-      </span>
-      <span>${f >= 1000 ? (f / 1000) + 'k' : f}</span>
-    </div>`).join('');
-}
-
-/* 参数段行：频率/Q 用对数滑条 —— 线性轴上 20-20kHz 的九成都被低频吃掉，
-   100Hz 以下挤成一条缝没法调。滑条值 0-1000：频率 20-20000（三个十倍频程）、
-   Q 0.1-10（两个十倍频程）；增益线性 ±12。 */
-function fToSlider(f) {
-  return Math.round(1000 * Math.log(Math.max(20, Math.min(20000, f)) / 20) / Math.log(1000));
-}
-function sliderToF(t) { return 20 * Math.pow(1000, (Number(t) || 0) / 1000); }
-function qToSlider(q) {
-  return Math.round(1000 * Math.log10(Math.max(0.1, Math.min(10, q)) / 0.1) / 2);
-}
-function sliderToQ(t) { return 0.1 * Math.pow(100, (Number(t) || 0) / 1000); }
-
-function eqFmtF(f) {
-  if (f >= 1000) return (f / 1000).toFixed(f >= 10000 ? 1 : 2).replace(/\.?0+$/, '') + 'k';
-  return String(Math.round(f));
-}
-function eqFmtQ(q) { return (Math.round(q * 100) / 100).toFixed(2); }
+/* —— 频段选择条：选中段的精确输入。画布上拖圆点改形态、
+   这里输精确值 —— 推子条做不到的「调到 105.3 Hz / Q 0.71 / +6.5 dB」 */
+const EQB_TYPE_LABEL = { peaking: '峰', lowshelf: '低架', highshelf: '高架' };
 /** dB 读数：负号用 U+2212（与响度目标/K 歌变调读数同一排版口径） */
 function eqFmtDb(db) {
   const v = Math.round(db * 10) / 10;
@@ -4809,45 +4810,110 @@ function eqFmtDb(db) {
   return v > 0 ? '+' + s : v < 0 ? '−' + s : '0.0';
 }
 
-const EQB_TYPE_LABEL = { peaking: '峰', lowshelf: '低架', highshelf: '高架' };
-
-function eqbRowHtml(i, key, label, sliderVal, txt) {
-  const isDb = key === 'db';
-  return `
-      <div class="eqb-row">
-        <span class="eqb-lab">${label}</span>
-        <input type="range" class="eqb-fader" data-k="${key}"
-          min="${isDb ? -12 : 0}" max="${isDb ? 12 : 1000}" step="${isDb ? 0.5 : 1}"
-          value="${sliderVal}" aria-label="第 ${i + 1} 段 ${label}"/>
-        <span class="eqb-val mono" data-v="${key}">${txt}</span>
-      </div>`;
-}
-
-function eqParamBandsHtml() {
+/* —— 十段推子：eq_bands 的标准位镜像视图。每个推子绑定一个 EQ_FREQS 频率：
+   段表里有同频段就显示该增益，没有就显示 0。拉回 0 → 该段删除（identity = 不渲染）。
+   推子本体三位一体：纵拖（0.1dB 步进）/ 数字直填（一位小数，Enter 或失焦生效）/
+   滚轮微调（0.1dB，Shift+滚轮 = 1dB）—— 曲线和推子共享同一数据源，两侧互为镜像。 */
+function eqGraphicSlots() {
   const bands = engBands();
-  if (!bands.length) {
-    return '<p class="eq-empty">还没有参数段 · 点「加一段」从零调，或导入 AutoEq 档案</p>';
-  }
-  return bands.map((b, i) => `
-    <div class="eqb" data-b="${i}">
-      <div class="eqb-head">
-        <div class="km-chips eqb-type" role="group" aria-label="第 ${i + 1} 段滤波类型">
-          ${['peaking', 'lowshelf', 'highshelf'].map((t) =>
-            `<button type="button" data-t="${t}" title="${EQB_TYPE_LABEL[t]}滤波器"${b.type === t ? ' class="on"' : ''}>${EQB_TYPE_LABEL[t]}</button>`).join('')}
-        </div>
-        <button type="button" class="eqb-del" data-del="${i}" title="删掉这段" aria-label="删除第 ${i + 1} 段">×</button>
-      </div>
-      ${eqbRowHtml(i, 'f', '频率', fToSlider(b.f), eqFmtF(b.f))}
-      ${eqbRowHtml(i, 'q', 'Q 值', qToSlider(b.q), eqFmtQ(b.q))}
-      ${eqbRowHtml(i, 'db', '增益', b.db, eqFmtDb(b.db))}
-    </div>`).join('');
+  return EQ_FREQS.map((f, i) => ({ i, f, band: bands.find((x) => Math.abs(x.f - f) < 1) || null }));
 }
+
+function eqGraphicHtml() {
+  return eqGraphicSlots().map(({ i, f, band }) => {
+    const db = band ? Math.round((Number(band.db) || 0) * 10) / 10 : 0;
+    const label = f >= 1000 ? (f / 1000) + 'k' : String(f);
+    return `
+    <div class="eq-band" data-gb="${i}">
+      <span class="eq-slot">
+        <input type="range" min="-12" max="12" step="0.1" value="${db}" data-gi="${i}" aria-label="${label}Hz 推子"/>
+      </span>
+      <input class="eq-db-in mono" type="number" min="-12" max="12" step="0.1"
+        value="${db}" data-gn="${i}" aria-label="${label}Hz 增益（dB）"/>
+      <span>${label}</span>
+    </div>`;
+  }).join('');
+}
+
+function paintEqGraphic() {
+  const box = document.getElementById('eqBands');
+  if (!box) return;
+  const slots = eqGraphicSlots();
+  for (const { i, band } of slots) {
+    const db = Math.round((band ? Number(band.db) || 0 : 0) * 10) / 10;
+    const range = box.querySelector(`input[data-gi="${i}"]`);
+    const num = box.querySelector(`input[data-gn="${i}"]`);
+    if (range && document.activeElement !== range) range.value = String(db);
+    if (num && document.activeElement !== num) num.value = db.toFixed(1);
+  }
+}
+
+/** 推子改动（拖/填/滚轮同一路径）：→ 0 删段，否则同频更新/新建（峰值 Q=1）。
+    值域 ±12、一位小数（与后端 _clean_bands 的钳制口径一致）。 */
+function engSetGraphicBand(i, db) {
+  const f = EQ_FREQS[i];
+  if (f == null) return;
+  const bands = engBands();
+  const idx = bands.findIndex((x) => Math.abs(x.f - f) < 1);
+  const v = Math.max(-12, Math.min(12, Math.round((Number(db) || 0) * 10) / 10));
+  if (v === 0) {
+    if (idx >= 0) bands.splice(idx, 1);
+    state.settings.eq_bands = bands;
+    engParamStructural();                          // 删除 = 结构改动，即时落盘
+    return;
+  }
+  if (idx >= 0) bands[idx].db = v;
+  else bands.push({ type: 'peaking', f, q: 1, db: v });
+  state.settings.eq_bands = bands;
+  engParamChanged();
+}
+
+function engEqSel() {
+  const bands = engBands();
+  let sel = state.eqSel;
+  if (!(sel >= 0) || sel >= bands.length) sel = bands.length ? 0 : -1;
+  state.eqSel = sel;
+  return { bands, sel };
+}
+
+function paintEqSelBar() {
+  const box = document.getElementById('eqSelBar');
+  if (!box) return;
+  const { bands, sel } = engEqSel();
+  if (!bands.length) {
+    box.innerHTML = '<div class="eq-sel-empty eq-empty">还没有参数段 · 点「加一段」从零调，或导入 AutoEq 档案</div>';
+    return;
+  }
+  if (sel < 0) {
+    box.innerHTML = '<div class="eq-sel-empty">点曲线上的圆点选中一段；选中后可精调频率 / Q / 增益</div>';
+    return;
+  }
+  const b = bands[sel];
+  const typeOn = (t) => (b.type === t ? ' on' : '');
+  box.innerHTML = `
+    <div class="eq-sel-row">
+      <div class="eq-sel-head"><span class="eq-sel-name mono">第 ${sel + 1} 段</span>
+        <button type="button" class="eqb-del" id="eqDelBand" title="删掉这段" aria-label="删除第 ${sel + 1} 段">×</button></div>
+      <div class="km-chips eqb-type" role="group" aria-label="第 ${sel + 1} 段滤波类型">
+        ${['peaking', 'lowshelf', 'highshelf'].map((t) =>
+          `<button type="button" data-t="${t}" title="${EQB_TYPE_LABEL[t]}滤波器" class="${b.type === t ? 'on' : ''}">${EQB_TYPE_LABEL[t]}</button>`).join('')}
+      </div>
+      <div class="eq-sel-fields">
+        <label class="eq-sel-field"><span>频率</span><span class="eq-sel-in mono"><input id="eqF" type="number" min="20" max="20000" step="1" value="${Math.round(b.f)}" aria-label="第 ${sel + 1} 段 中心频率"/><i>Hz</i></span></label>
+        <label class="eq-sel-field"><span>Q 值</span><span class="eq-sel-in mono"><input id="eqQ" type="number" min="0.1" max="10" step="0.01" value="${b.q.toFixed(2)}" aria-label="第 ${sel + 1} 段 Q 值"/><i>Q</i></span></label>
+        <label class="eq-sel-field"><span>增益</span><span class="eq-sel-in mono"><input id="eqDb" type="number" min="-12" max="12" step="0.1" value="${(+b.db).toFixed(1)}" aria-label="第 ${sel + 1} 段 增益"/><i>dB</i></span></label>
+      </div>
+    </div>`;
+}
+
+/* paintEqParam 保留名字（各处调用不变）：内部就是选择条重绘 */
+function paintEqParam() { paintEqGraphic(); paintEqSelBar(); }
 
 function viewSettings() {
   const s = state.settings;
   return `
   <div class="set-sec">
-    <h4>播放与音质</h4>
+    <h4>${icon('play')}播放与音质</h4>
     <div class="field">
       <div><label>在线播放音质</label><p class="tip">默认 MP3 优先起播快、省流量；播放条右侧规格可随时临时切换</p></div>
       <select id="setPlayQuality">
@@ -4884,7 +4950,7 @@ function viewSettings() {
   </div>
 
   <div class="set-sec">
-    <h4>播放引擎</h4>
+    <h4>${icon('gear')}播放引擎</h4>
     <div class="field">
       <div><label>引擎 2.0</label><p class="tip">双缓冲无缝播放与均衡器都靠它；关掉即回到 1.x 的原生播放路径</p></div>
       <input type="checkbox" class="switch" id="setEngineV2"/>
@@ -4905,30 +4971,29 @@ function viewSettings() {
   </div>
 
   <div class="set-sec">
-    <h4>均衡器</h4>
+    <h4>${icon('mix')}均衡器</h4>
     <div class="field">
-      <div><label>均衡器</label><p class="tip">拖动即时生效，只作用于本机播放；依赖播放引擎 2.0</p></div>
+      <div><label>启用</label><p class="tip">拖动即时生效，只作用于本机播放；依赖播放引擎 2.0</p></div>
       <input type="checkbox" class="switch" id="setEqOn"/>
     </div>
-    <div class="field">
-      <div><label>模式</label><p class="tip">图形十段快速调音；参数模式自由增减段数、可导入 AutoEq 耳机修正档案</p></div>
-      <div class="set-seg" id="eqModeSeg" role="group" aria-label="均衡器模式">
-        <button type="button" data-mode="graphic">图形</button>
-        <button type="button" data-mode="parametric">参数</button>
-      </div>
+    <div class="eq-graphic" id="eqGraphic">
+      <div class="eq-curve-head"><span>十段推子</span><span class="mono">31Hz – 16kHz · Q = 1 · 拖 / 填 / 滚轮微调</span></div>
+      <div class="eq-bands" id="eqBands">${eqGraphicHtml()}</div>
     </div>
-    <div id="eqGraphicPane">
+    <div class="eq-curve" id="eqCurveWrap">
+      <div class="eq-curve-head"><span>响应曲线</span><span class="mono" id="eqCurveNote">20Hz – 20kHz</span></div>
+      <canvas id="eqCurve" height="116" aria-hidden="true"></canvas>
+    </div>
+    <div id="eqPane">
+      <div class="eq-selbar" id="eqSelBar"></div>
       <div class="field">
-        <div><label>预设</label><p class="tip">挑一个再微调；动过推子之后自动记为「自定义」</p></div>
+        <div><label>预设</label><p class="tip">挑一个快速起手，再拖曲线微调；动过曲线或输入之后自动记为「自定义」</p></div>
         <select id="setEqPreset">
           ${Object.keys(EQ_PRESETS).map((k) => `<option value="${k}">${EQ_LABEL[k]}</option>`).join('')}
           <option value="custom">自定义</option>
           ${s.eq_preset === 'autoeq' ? `<option value="autoeq" disabled>${EQ_LABEL.autoeq}</option>` : ''}
         </select>
       </div>
-      <div class="eq-bands" id="eqBands">${eqBandsHtml()}</div>
-    </div>
-    <div id="eqParamPane" hidden>
       <div class="field">
         <div><label>前级</label><p class="tip">手动前级，与自动补偿相加才是链路实际增益；AutoEq 档案自带前级，自动补偿会把各段拉高的部分先压掉，防削波</p></div>
         <div class="loud-target">
@@ -4941,14 +5006,13 @@ function viewSettings() {
         <div><label>自动补偿</label><p class="tip">按各段里增益拉得最高的那段自动压前级；关掉后前级只听手动值</p></div>
         <input type="checkbox" class="switch" id="setEqAutoPre"/>
       </div>
-      <div class="field">
+      <div class="field" style="display:block">
         <div><label>档案库</label><p class="tip">导入过与存过的调音档案（耳机型号即档案名），换耳机一键切回；上限 50 份，超出淘汰最旧，仅存本机</p></div>
-        <div class="field-acts">
+        <div class="field-acts eqlib-row">
           <select id="setEqLib"></select>
           <button class="btn ghost sm danger" id="eqLibDel" title="删除选中的档案">删档案</button>
         </div>
       </div>
-      <div class="eq-params" id="eqParamBands">${eqParamBandsHtml()}</div>
       <div class="set-actions">
         <button class="btn sm primary" id="eqAddBand">＋ 加一段</button>
         <button class="btn ghost sm" id="eqImportBtn">导入 AutoEq</button>
@@ -4972,7 +5036,7 @@ function viewSettings() {
   </div>
 
   <div class="set-sec">
-    <h4>响度归一化</h4>
+    <h4>${icon('vol')}响度归一化</h4>
     <div class="field">
       <div><label>归一化</label><p class="tip">按曲目实测响度（EBU R128）预置增益，歌与歌之间不再忽大忽小。只对实测过的歌生效，没测的原样播放——和音质徽标同一条规矩：没实测就不冒充。切歌后后台实测，测完自动接上；依赖播放引擎 2.0</p></div>
       <select id="setLoudMode">
@@ -4991,7 +5055,7 @@ function viewSettings() {
   </div>
 
   <div class="set-sec">
-    <h4>多端同步</h4>
+    <h4>${icon('sync')}多端同步</h4>
     <div class="field">
       <div><label>服务器</label><p class="tip">你自己的 WebDAV 地址，例如坚果云 https://dav.jianguoyun.com/dav</p></div>
       <input type="text" id="setDavUrl" placeholder="https://dav.jianguoyun.com/dav"/>
@@ -5021,7 +5085,7 @@ function viewSettings() {
   </div>
 
   <div class="set-sec">
-    <h4>界面</h4>
+    <h4>${icon('moon')}界面</h4>
     <div class="field">
       <div><label>主题</label><p class="tip">深色取 Spotify 的密度，浅色取 Apple Music 的通透</p></div>
       <select id="setTheme">
@@ -5038,7 +5102,7 @@ function viewSettings() {
   </div>
 
   <div class="set-sec">
-    <h4>个性化推荐</h4>
+    <h4>${icon('spark')}个性化推荐</h4>
     <div class="field">
       <div><label>总开关</label><p class="tip">关掉后首页不再生成推荐，本地口味数据仍保留</p></div>
       <input type="checkbox" class="switch" id="setPersonalized"/>
@@ -5058,7 +5122,7 @@ function viewSettings() {
   </div>
 
   <div class="set-sec">
-    <h4>下载</h4>
+    <h4>${icon('dl')}下载</h4>
     <div class="field">
       <div><label>保存位置</label><p class="tip ell" id="dirTip">${esc(s.download_dir || '')}</p></div>
       <button class="btn sm" data-act="set-dir">更改</button>
@@ -5093,7 +5157,7 @@ function viewSettings() {
   </div>
 
   <div class="set-sec">
-    <h4>试听缓存</h4>
+    <h4>${icon('clock')}试听缓存</h4>
     <div class="field" style="display:block">
       <div><label>自动缓存规则</label>
         <p class="tip">当天听完 2 次进今日缓存（跨天清）；7 天内听完 5 次以上升为长期缓存（3 天没听自动清）</p>
@@ -5125,7 +5189,7 @@ function viewSettings() {
 
   ${document.documentElement.dataset.platform === 'android' ? '' : `
   <div class="set-sec">
-    <h4>窗口</h4>
+    <h4>${icon('mini')}窗口</h4>
     <div class="field">
       <div><label>托盘图标</label><p class="tip">关掉后应用只活在任务栏；关掉后「收进托盘」也就不成立了。改完重启生效</p></div>
       <input type="checkbox" class="switch" id="setTray"/>
@@ -5144,7 +5208,7 @@ function viewSettings() {
   </div>`}
 
   <div class="set-sec">
-    <h4>本地曲库</h4>
+    <h4>${icon('folder')}本地曲库</h4>
     <div class="field" style="display:block">
       <div><label>扫描目录</label>
         <p class="tip">默认只扫下载目录；这里可以再添几个你自己整理的目录。只扫你明确添加的地方，不做全盘扫描</p></div>
@@ -5155,18 +5219,18 @@ function viewSettings() {
     </div>
   </div>
 
-  <div class="set-sec">
-    <h4>数据</h4>
+  <div class="set-sec danger">
+    <h4>${icon('trash')}数据</h4>
     <div class="set-actions">
-      <button class="btn sm" data-act="data-clear" data-what="recent_clear">清除播放记录</button>
-      <button class="btn sm" data-act="data-clear" data-what="history_clear">清除搜索历史</button>
-      <button class="btn sm" data-act="data-clear" data-what="downloads_clear">清除下载记录</button>
-      <button class="btn sm" data-act="data-clear" data-what="favorites_clear">清空收藏</button>
+      <button class="btn sm danger" data-act="data-clear" data-what="recent_clear">清除播放记录</button>
+      <button class="btn sm danger" data-act="data-clear" data-what="history_clear">清除搜索历史</button>
+      <button class="btn sm danger" data-act="data-clear" data-what="downloads_clear">清除下载记录</button>
+      <button class="btn sm danger" data-act="data-clear" data-what="favorites_clear">清空收藏</button>
     </div>
   </div>
 
   <div class="set-sec">
-    <h4>更新</h4>
+    <h4>${icon('retry')}更新</h4>
     <div class="field">
       <div><label>版本状态</label><p class="tip" id="updTip">${esc(updTipText())}</p></div>
       <div class="field-acts">
@@ -5183,7 +5247,7 @@ function viewSettings() {
   </div>
 
   <div class="set-sec">
-    <h4>网络自检</h4>
+    <h4>${icon('pulse')}网络自检</h4>
     <div class="field">
       <div><label>逐跳体检</label><p class="tip">「搜得到歌但放不出来」时逐跳定位：搜索与取流是两批不同主机，断哪一跳当场指认；不改动任何设置</p></div>
       <div class="field-acts">
@@ -5202,23 +5266,8 @@ function viewSettings() {
   <div class="set-ver">ELYSIUM ${state.version ? 'v' + esc(state.version) : ''} · 本机运行</div>`;
 }
 
-/* —— 均衡器区绘制：模式两态 / 参数段行 / 前级读数 / 档案库（发烧客 D 组） ——
+/* —— 均衡器区绘制：曲线 + 选择条 + 前级读数 + 档案库（发烧客 P2） ——
    只在设置抽屉开着时干活（$ 找不到节点就空过），改设置后随手调，不用管开没开。 */
-function paintEqMode() {
-  const seg = $('#eqModeSeg');
-  const mode = (state.settings.eq_mode || 'graphic') === 'parametric' ? 'parametric' : 'graphic';
-  if (seg) seg.querySelectorAll('button[data-mode]').forEach((b) => b.classList.toggle('on', b.dataset.mode === mode));
-  const g = $('#eqGraphicPane');
-  const p = $('#eqParamPane');
-  if (g) g.hidden = mode !== 'graphic';
-  if (p) p.hidden = mode !== 'parametric';
-}
-
-function paintEqParam() {
-  const box = $('#eqParamBands');
-  if (box) box.innerHTML = eqParamBandsHtml();
-}
-
 /** 前级读数：手动值 + 自动补偿分开摆（D-3）—— 步进器只动手动值，
     补偿量是引擎按段表现算的，混在一起写就成假读数了。
     补偿生效且手动非零时补第三段「实际」，三个数各自有出处。 */
@@ -5226,8 +5275,7 @@ function paintEqPreamp() {
   const el = $('#eqPreVal');
   if (!el) return;
   const manual = Math.round((Number(state.settings.eq_preamp) || 0) * 10) / 10;
-  const active = state.settings.eq_enabled === true
-    && (state.settings.eq_mode || 'graphic') === 'parametric';
+  const active = state.settings.eq_enabled === true;
   const auto = active ? engAutoPreampDb(engBands().map((b) => b.db)) : 0;
   let txt = `${eqFmtDb(manual)} dB`;
   if (auto < 0) {
@@ -5248,11 +5296,245 @@ function paintEqLib() {
 }
 
 function paintEqAll() {
-  paintEqMode();
   paintEqParam();
   paintEqPreamp();
   paintEqLib();
+  paintEqCurve();
 }
+
+/* —— 响应曲线：eq_gains / eq_bands / 前级（含自动补偿）换算成 20Hz–20kHz 总响应。
+   BiquadFilter 是级联的，各滤波器分贝直接相加就是精确总响应；EQ 关闭时
+   链路就是直通，曲线也是平直线 —— 画一条假的不算数。 */
+const EQ_FS = 48000;
+const EQ_FMIN = 20, EQ_FMAX = 20000, EQ_SPAN = Math.log10(EQ_FMAX / EQ_FMIN);
+const EQ_YC = 15;                          // 纵轴显示范围 ±15dB（段表最大 ±12 + 前级 12）
+/* 画布内边距（画图与命中测试共用，别两处各写一套） */
+const EQ_PAD_L = 22, EQ_PAD_R = 6, EQ_PAD_T = 6, EQ_PAD_B = 16;
+const EQ_HANDLES = [];                      // 最近一次绘制的控制点位置（CSS 像素，命中测试用）
+
+function eqCurveBiq(type, f0, q, gainDb) {
+  const A = Math.pow(10, gainDb / 40);
+  const W = 2 * Math.PI * f0 / EQ_FS;
+  const cw = Math.cos(W), sw = Math.sin(W);
+  const alpha = sw / (2 * Math.max(0.1, Math.min(10, q)));
+  if (type === 'peaking') {
+    return [1 + alpha * A, -2 * cw, 1 - alpha * A, 1 + alpha / A, -2 * cw, 1 - alpha / A];
+  }
+  const t = 2 * Math.sqrt(A) * alpha;
+  if (type === 'lowshelf') {
+    return [A * ((A + 1) - (A - 1) * cw + t), 2 * A * ((A - 1) - (A + 1) * cw), A * ((A + 1) - (A - 1) * cw - t),
+            (A + 1) + (A - 1) * cw + t, -2 * ((A - 1) + (A + 1) * cw), (A + 1) + (A - 1) * cw - t];
+  }
+  return [A * ((A + 1) + (A - 1) * cw + t), -2 * A * ((A - 1) + (A + 1) * cw), A * ((A + 1) + (A - 1) * cw - t),
+          (A + 1) - (A - 1) * cw + t, 2 * ((A - 1) - (A + 1) * cw), (A + 1) - (A - 1) * cw - t];
+}
+
+function eqCurveMagDb(band, f) {
+  const c = eqCurveBiq(band.type, band.f, band.q, band.db);
+  const b0 = c[0], b1 = c[1], b2 = c[2], a0 = c[3], a1 = c[4], a2 = c[5];
+  const W = 2 * Math.PI * f / EQ_FS;
+  const c1 = Math.cos(W), c2 = Math.cos(2 * W);
+  const num = b0 * b0 + b1 * b1 + b2 * b2 + 2 * (b0 * b1 + b1 * b2) * c1 + 2 * b0 * b2 * c2;
+  const den = a0 * a0 + a1 * a1 + a2 * a2 + 2 * (a0 * a1 + a1 * a2) * c1 + 2 * a0 * a2 * c2;
+  return 10 * Math.log10(Math.max(1e-9, num / den));
+}
+
+/** 实际链路：仅 EQ 启用时才画非平直线（否则曲线不是耳朵听到的东西） */
+function eqCurveChain() {
+  const s = state.settings || {};
+  if (s.eq_enabled !== true) return { bands: [], preamp: 0, mode: 'parametric', enabled: false };
+  const bands = engBands();
+  const manual = Math.max(-12, Math.min(12, Number(s.eq_preamp) || 0));
+  const comp = s.eq_auto_preamp === false ? 0 : engAutoPreampDb(bands.map((b) => b.db));
+  return { bands, preamp: manual + comp, mode: 'parametric', enabled: true };
+}
+
+function paintEqCurve() {
+  const canvas = document.getElementById('eqCurve');
+  if (!canvas) return;
+  const cssW = canvas.clientWidth || (canvas.parentNode && canvas.parentNode.clientWidth) || 300;
+  const cssH = 116;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.round(cssW * dpr));
+  canvas.height = Math.max(1, Math.round(cssH * dpr));
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  const chain = eqCurveChain();
+  const noteEl = document.getElementById('eqCurveNote');
+  if (noteEl) {
+    if (!chain.enabled) noteEl.textContent = 'EQ 已关闭 · 直通';
+    else if (chain.mode === 'parametric' && Math.abs(chain.preamp) >= 0.05) {
+      noteEl.textContent = `EQ 响应 · 前级 ${eqFmtDb(chain.preamp)} dB`;
+    } else noteEl.textContent = 'EQ 响应';
+  }
+  const css = getComputedStyle(document.documentElement);
+  const cLine = (css.getPropertyValue('--line') || '').trim() || 'rgba(128,128,128,.25)';
+  const cLine2 = (css.getPropertyValue('--line-2') || '').trim() || 'rgba(128,128,128,.4)';
+  const cMuted = (css.getPropertyValue('--muted') || '').trim() || '#888';
+  const cAccent = (css.getPropertyValue('--accent') || '').trim() || '#f5325b';
+  const cAccent2 = (css.getPropertyValue('--accent-2') || '').trim() || '#ff5c7a';
+  const L = EQ_PAD_L, R = EQ_PAD_R, T = EQ_PAD_T, B = EQ_PAD_B;
+  const iw = cssW - L - R, ih = cssH - T - B;
+  const xOf = (f) => L + (Math.log10(f / EQ_FMIN) / EQ_SPAN) * iw;
+  const yOf = (db) => T + (1 - (Math.max(-EQ_YC, Math.min(EQ_YC, db)) + EQ_YC) / (2 * EQ_YC)) * ih;
+  const bands = chain.bands;
+  const eqShape = bands.length
+    ? (f) => bands.reduce((acc, b) => acc + eqCurveMagDb(b, f), 0)
+    : () => 0;                                     // 直通：0dB 平直线
+  /* 链路 = EQ 响应 × 前级；图分两层画：accent 实线 = 频段形状（APO 口径），
+     accent-2 虚线 = 手动+自动补偿合成的前级（只有非零才画）。 */
+  const showPreampLine = chain.enabled && Math.abs(chain.preamp) >= 0.05;
+  ctx.lineWidth = 1;
+  for (const f of [31, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]) {
+    ctx.strokeStyle = cLine;
+    ctx.beginPath(); ctx.moveTo(xOf(f), T); ctx.lineTo(xOf(f), T + ih); ctx.stroke();
+  }
+  for (const db of [-12, -6, 6, 12]) {
+    ctx.strokeStyle = cLine;
+    ctx.beginPath(); ctx.moveTo(L, yOf(db)); ctx.lineTo(L + iw, yOf(db)); ctx.stroke();
+  }
+  ctx.strokeStyle = cLine2;
+  ctx.beginPath(); ctx.moveTo(L, yOf(0)); ctx.lineTo(L + iw, yOf(0)); ctx.stroke();
+  ctx.fillStyle = cMuted;
+  ctx.font = '8px ui-monospace,Consolas,monospace';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  [['+12', 12], ['0', 0], ['−12', -12]].forEach(([t, db]) => ctx.fillText(t, L - 4, yOf(db)));
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  [[20, '20'], [100, '100'], [1000, '1k'], [10000, '10k']].forEach(([f, t]) => ctx.fillText(t, xOf(f), T + ih + 3));
+  if (showPreampLine) {
+    ctx.strokeStyle = cAccent2;
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath(); ctx.moveTo(L, yOf(chain.preamp)); ctx.lineTo(L + iw, yOf(chain.preamp)); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  const N = 240;
+  ctx.beginPath();
+  for (let i = 0; i <= N; i++) {
+    const f = EQ_FMIN * Math.pow(10, (i / N) * EQ_SPAN);
+    const y = yOf(eqShape(f));
+    if (i === 0) ctx.moveTo(xOf(f), y); else ctx.lineTo(xOf(f), y);
+  }
+  ctx.strokeStyle = cAccent;
+  ctx.lineWidth = 1.8;
+  ctx.shadowColor = cAccent;
+  ctx.shadowBlur = 7;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.lineTo(L + iw, yOf(0)); ctx.lineTo(L, yOf(0)); ctx.closePath();
+  const grad = ctx.createLinearGradient(0, T, 0, T + ih);
+  grad.addColorStop(0, 'rgba(245,50,91,.22)');
+  grad.addColorStop(0.5, 'rgba(245,50,91,.07)');
+  grad.addColorStop(1, 'rgba(245,50,91,.14)');
+  ctx.fillStyle = grad;
+  ctx.fill();
+  /* 频段圆点（只读）：点它 = 选中该段，给下面的精确输入用 */
+  EQ_HANDLES.length = 0;
+  for (let i = 0; i < bands.length; i++) {
+    const b = bands[i];
+    const hx = xOf(b.f), hy = yOf(b.db);
+    EQ_HANDLES.push({ x: hx, y: hy, i });
+    const sel = i === state.eqSel;
+    if (sel) {
+      ctx.beginPath(); ctx.arc(hx, hy, 9, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(245,50,91,.18)'; ctx.fill();
+      ctx.strokeStyle = cAccent2; ctx.lineWidth = 1.4; ctx.stroke();
+    }
+    ctx.beginPath(); ctx.arc(hx, hy, sel ? 4.6 : 3.2, 0, Math.PI * 2);
+    ctx.fillStyle = sel ? cAccent2 : cAccent; ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.4; ctx.stroke();
+  }
+}
+window.addEventListener('resize', () => requestAnimationFrame(paintEqCurve));
+
+/* ---------------- 曲线只读：点击圆点选中该段；空白处点击取消选中。
+   没有拖拽 —— 段值全部走推子（拖/填/滚轮）与精确输入框。 */
+function eqCurvePointerPos(e) {
+  const c = document.getElementById('eqCurve');
+  if (!c) return null;
+  const r = c.getBoundingClientRect();
+  return { c, r, x: e.clientX - r.left, y: e.clientY - r.top };
+}
+function eqCurveHit(p) {
+  for (const h of EQ_HANDLES) {
+    if (Math.hypot(h.x - p.x, h.y - p.y) <= 11) return h.i;
+  }
+  return -1;
+}
+document.addEventListener('pointerdown', (e) => {
+  if (e.button !== undefined && e.button !== 0) return;
+  /* 只处理落在曲线画布上的指针。其他任何地方的点击不动选中态 ——
+     否则点「峰/低架/高架」这类按钮时会先把选择条重渲染成占位符，
+     真实的 mousedown/click 落到已替换的 DOM 上，chip 就永远点不动。 */
+  if (!(e.target && e.target.closest && e.target.closest('#eqCurve'))) return;
+  const p = eqCurvePointerPos(e);
+  if (!p) return;
+  const hit = eqCurveHit(p);
+  if (hit >= 0) {
+    state.eqSel = hit;
+    paintEqSelBar();
+    paintEqCurve();
+    e.preventDefault();
+    return;
+  }
+  if (state.eqSel >= 0) { state.eqSel = -1; paintEqSelBar(); paintEqCurve(); }
+});
+
+/* 推子滚轮微调：0.1dB/格（Shift = 1dB）；上滚 = 增，下滚 = 减 */
+document.addEventListener('wheel', (e) => {
+  const band = e.target && e.target.closest && e.target.closest('.eq-band');
+  if (!band || band.dataset.gb == null) return;
+  const i = Number(band.dataset.gb);
+  const cur = (engBands().find((x) => Math.abs(x.f - EQ_FREQS[i]) < 1) || { db: 0 }).db;
+  const step = e.shiftKey ? 1 : 0.1;
+  const dir = e.deltaY > 0 ? -1 : 1;
+  e.preventDefault();
+  engSetGraphicBand(i, Math.round((Number(cur) + dir * step) * 10) / 10);
+}, { passive: false });
+
+document.addEventListener('click', (e) => {
+  const chip = e.target.closest && e.target.closest('#eqSelBar button[data-t]');
+  if (chip) {
+    const sel = state.eqSel;
+    const bands = engBands();
+    if (bands[sel]) { engSetParamBand(sel, { type: chip.dataset.t }); paintEqSelBar(); }
+    return;
+  }
+  const del = e.target.closest && e.target.closest('#eqDelBand');
+  if (del) {
+    const sel = state.eqSel;
+    engDelParamBand(sel);
+    const rest = engBands().length;
+    state.eqSel = rest ? Math.min(sel, rest - 1) : -1;
+    paintEqSelBar();
+    paintEqCurve();
+  }
+});
+document.addEventListener('input', (e) => {
+  const inp = e.target;
+  if (!inp) return;
+  /* 十段推子：单独路由到标准位镜像逻辑 */
+  if (inp.dataset && inp.dataset.gi !== undefined) {
+    engSetGraphicBand(Number(inp.dataset.gi), Number(inp.value));   // 引擎重配 + 两侧镜像刷新
+    return;
+  }
+  /* 推子数字直填：一位小数，清空/非法输入不提交（避免误删段） */
+  if (inp.dataset && inp.dataset.gn !== undefined) {
+    if (inp.value === '' || !Number.isFinite(Number(inp.value))) return;
+    engSetGraphicBand(Number(inp.dataset.gn), Number(inp.value));
+    return;
+  }
+  if (!/^eq(F|Q|Db)$/.test(inp.id || '')) return;
+  const sel = state.eqSel;
+  const bands = engBands();
+  if (!(sel >= 0) || !bands[sel]) return;
+  const v = Number(inp.value);
+  if (!Number.isFinite(v)) return;
+  const patch = inp.id === 'eqF' ? { f: Math.max(20, Math.min(20000, Math.round(v))) }
+    : inp.id === 'eqQ' ? { q: Math.max(0.1, Math.min(10, v)) }
+    : { db: Math.max(-12, Math.min(12, Math.round(v * 10) / 10)) };
+  engSetParamBand(sel, patch);               // 引擎重配 + 曲线随动（engApplyEq → paintEqCurve）
+});
 
 function fillSettings() {
   const s = state.settings;
@@ -5502,79 +5784,15 @@ function bindSettings() {
     paintEqPreamp();             // 补偿量跟总开关走，读数同步
     toast(e.target.checked ? '均衡器已开启' : '均衡器已关闭');
   });
-  on('#setEqPreset', 'change', (e) => {
-    engSetPreset(e.target.value);
-    const box = $('#eqBands');
-    if (box) box.innerHTML = eqBandsHtml();
-  });
-  $$('#eqBands input[data-eq]').forEach((inp) => {
-    inp.addEventListener('input', (e) => {
-      const i = Number(e.target.dataset.eq);
-      const db = Number(e.target.value);
-      engSetBand(i, db);
-      const lab = $(`#eqBands [data-eqv="${i}"]`);
-      if (lab) lab.textContent = (db > 0 ? '+' : '') + db;
-      const sel = $('#setEqPreset');
-      if (sel) sel.value = 'custom';
-    });
-  });
+  on('#setEqPreset', 'change', (e) => engSetPreset(e.target.value));
 
-  /* ---- 均衡器·参数模式与 AutoEq（发烧客 B/C/D 组） ---- */
-  const modeSeg = $('#eqModeSeg');
-  if (modeSeg) {
-    modeSeg.addEventListener('click', (e) => {
-      const b = e.target.closest('button[data-mode]');
-      if (b) engSetEqMode(b.dataset.mode);
-    });
-  }
-  const pb = $('#eqParamBands');
-  if (pb) {
-    pb.addEventListener('input', (e) => {
-      const inp = e.target.closest('input[data-k]');
-      if (!inp) return;
-      const row = inp.closest('.eqb');
-      if (!row) return;
-      const i = Number(row.dataset.b);
-      const k = inp.dataset.k;
-      let val = null;
-      let txt = '';
-      if (k === 'f') {
-        val = Math.round(sliderToF(inp.value) * 10) / 10;
-        txt = eqFmtF(val);
-      } else if (k === 'q') {
-        val = Math.round(sliderToQ(inp.value) * 100) / 100;
-        txt = eqFmtQ(val);
-      } else {
-        val = Math.round(Number(inp.value) * 10) / 10;
-        txt = eqFmtDb(val);
-      }
-      engSetParamBand(i, { [k]: val });
-      const out = row.querySelector(`.eqb-val[data-v="${k}"]`);
-      if (out) out.textContent = txt;
-      paintEqPreamp();   // 段增益变了补偿量就变，前级读数同步
-    });
-    pb.addEventListener('click', (e) => {
-      const del = e.target.closest('button[data-del]');
-      if (del) {
-        engDelParamBand(Number(del.dataset.del));
-        paintEqParam();
-        paintEqPreamp();
-        return;
-      }
-      const chip = e.target.closest('button[data-t]');
-      if (chip) {
-        const row = chip.closest('.eqb');
-        if (row) {
-          engSetBandType(Number(row.dataset.b), chip.dataset.t);
-          paintEqParam();
-        }
-      }
-    });
-  }
+  /* ---- 均衡器·交互曲线与 AutoEq（发烧客 P2） ---- */
   on('#eqAddBand', 'click', () => {
     if (engAddParamBand()) {
+      state.eqSel = engBands().length - 1;   // 新段直接选中，画布上即有焦点
       paintEqParam();
       paintEqPreamp();
+      paintEqCurve();
     }
   });
   on('#eqPreDown', 'click', () => engNudgePreamp(-0.5));
@@ -5639,7 +5857,8 @@ async function showLyric() {
     lyricLines = parseLrc(currentLyric, trans);
     renderLyricLines($('#lyricBody'), true);
   } catch (e) {
-    $('#lyricBody').innerHTML = `<span class="muted">歌词没有取到：${esc(e.message)}`
+    console.warn('[lyric] 取词失败：', e);
+    $('#lyricBody').innerHTML = `<span class="muted">歌词没取到——可能是网络波动或上游限制，点重试再试一次`
       + `<button class="btn ghost sm" data-act="lrc-retry" title="重新取歌词">重试</button></span>`;
   }
 }
@@ -6878,6 +7097,7 @@ async function refreshStore() {
   try {
     const d = await getJson('/api/store');
     state.settings = d.settings || {};
+    migrateEqToBands();                      // 图形推子 → 参数段（一次性，双二次等价）
     LRC_OFF = (Number(state.settings.lrc_offset_ms) || 0) / 1000;
     state.version = d._version || '';    // 单一来源：别在前端再写死一份版本号
     state.favs = d.favorites || [];
