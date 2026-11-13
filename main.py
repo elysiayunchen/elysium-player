@@ -40,7 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "Elysium"
 APP_TITLE = "Elysium - 在线音乐"
-VERSION = "2.3.0-beta2"
+VERSION = "2.3.0-beta3"
 _BASE_URL = ""            # main() 里落值；桌面歌词小窗据此建页
 _LYRIC_WIN = None         # 桌面歌词小窗句柄（pywebview window 或 None）
 LEGACY_NAME = "FlacMusic"
@@ -5036,13 +5036,16 @@ def start_tray(win):
     return True
 
 
-def _on_closing(win):
+def _on_closing(*_args):
     """点关闭按钮：按设置决定「退出」还是「收进托盘」。
 
+    pywebview 的 closing 事件不传窗口实参（新版直接零参调用），窗口从
+    _TRAY 取；写成必填 win 会在关窗时抛 TypeError，托盘隐藏路径静默失效。
     托盘没起来时一律真退出 —— 否则窗口一藏就再也叫不出来了，「关不掉」
     比「关了就退」更吓人。
     """
-    if _TRAY.get("win") is None:
+    win = _TRAY.get("win")
+    if win is None:
         return True
     if (STORE.data.get("settings") or {}).get("close_behavior") != "tray":
         return True

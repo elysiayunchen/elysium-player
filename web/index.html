@@ -33,6 +33,7 @@
   <symbol id="i-trash" viewBox="0 0 24 24"><path d="M9 3h6l1 2h4v2H4V5h4l1-2zM6 9h12l-1 12H7L6 9z"/></symbol>
   <symbol id="i-retry" viewBox="0 0 24 24"><path d="M12 5V2L8 6l4 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z"/></symbol>
   <symbol id="i-check" viewBox="0 0 24 24"><path d="M9.6 16.2 5.4 12l-1.4 1.4 5.6 5.6L20 8.6 18.6 7.2z"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5"/></symbol>
   <symbol id="i-more" viewBox="0 0 24 24"><path d="M6 10.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zm6 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zm6 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z"/></symbol>
   <symbol id="i-home" viewBox="0 0 24 24"><path d="M12 3.2 21 10v10.3c0 .4-.3.7-.7.7H15v-6h-6v6H3.7c-.4 0-.7-.3-.7-.7V10l9-6.8z"/></symbol>
   <symbol id="i-lib" viewBox="0 0 24 24"><path d="M4 4h2v16H4zm4 0h2v16H8zm4.6.3 2-.5 4.2 15.5-2 .5z"/></symbol>
@@ -306,25 +307,30 @@
     <button class="ic k-x" data-act="k-close" title="退出演唱" aria-label="退出演唱"><svg><use href="#i-back"/></svg></button>
     <div class="k-meta">
       <div class="k-title ell" id="kTitle"></div>
-      <div class="k-artist ell" id="kArtist"></div>
-      <div class="k-badge mono" id="kKeyBadge" hidden title="调性 / 音域由原唱旋律自动解析，供参考"></div>
+      <div class="k-sub">
+        <span class="k-artist ell" id="kArtist"></span>
+        <span class="k-badge mono" id="kKeyBadge" hidden title="调性 / 音域由原唱旋律自动解析，供参考"></span>
+      </div>
     </div>
   </div>
   <div class="k-prog"><div class="k-prog-fill" id="kProgFill"></div></div>
-  <div class="k-stage" id="kStage"></div>
-  <!-- 实时音准（P9）：大字音名 + 音分偏差 + CDEFGAB 音阶刻度条 -->
-  <div class="k-pitch" id="kPitchBar">
-    <div class="kp-note mono" id="kpNote">—</div>
-    <div class="kp-mid">
+  <!-- 舞台：ready 说明 / 倒数 / 结算；演唱中清空退场，让歌词占满主区 -->
+  <div class="k-main">
+    <div class="k-stage" id="kStage"></div>
+    <div class="k-lines" id="kLines"></div>
+    <!-- 实时音准（P9）：音名/音分读数在上，音阶轨严格居中 —— 左右不再有任何占位把中轴顶偏 -->
+    <div class="k-pitch" id="kPitchBar">
+      <div class="kp-top">
+        <div class="kp-note mono" id="kpNote">—</div>
+        <div class="kp-cents mono" id="kpCents">等你开口</div>
+      </div>
       <div class="kp-bar">
         <div class="kp-ticks" id="kpTicks"></div>
         <div class="kp-target" id="kpTarget" hidden></div>
         <div class="kp-needle" id="kpNeedle"></div>
       </div>
-      <div class="kp-cents mono" id="kpCents">等你开口</div>
     </div>
   </div>
-  <div class="k-lines" id="kLines"></div>
   <!-- 控制坞：调音台面板（按需展开）+ 传输行 + 模式行。
        交互对齐全民K歌：原唱/伴唱是切换、调音进面板（通道推子+混响预设+耳返开关）、变调用步进器 -->
   <div class="k-ctl" id="kCtl">
@@ -383,9 +389,9 @@
       <input type="checkbox" id="kVocal" hidden/>
     </div>
     <div class="kc-trans">
-      <span class="k-rec mono" id="kRecTime">0:00</span>
-      <button class="btn primary lg" id="kBegin" data-act="k-begin" hidden>开始演唱</button>
-      <button class="btn primary sm" id="kFinish" data-act="k-finish" hidden>唱完了</button>
+      <span class="k-clock"><span class="k-rec mono" id="kRecTime">0:00</span><span class="k-clock-cap" id="kClockCap">演唱中</span></span>
+      <button class="btn primary kc-go" id="kBegin" data-act="k-begin" hidden>开始演唱</button>
+      <button class="btn primary kc-finish" id="kFinish" data-act="k-finish" hidden><svg><use href="#i-stop"/></svg>唱完了</button>
     </div>
     <div class="kc-row">
       <div class="k-seg" id="kSeg" role="group" aria-label="原唱 / 伴唱（消人声）" title="消原唱状态：自动判定或手动选择">
