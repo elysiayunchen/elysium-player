@@ -4414,6 +4414,35 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         return data if isinstance(data, dict) else {}
 
+    def _drain_body(self, clen, cap=8 * 1024 * 1024, wait=0.6):
+        """回 413 前把已声明的大 body 读掉，避免客户端还在发时被 RST。
+
+        Content-Length 可能是谎报的（客户端只发 2 字节就等响应），所以给
+        读超时；骗人的长度最多多占 0.6s，不会把服务线程挂死。
+        """
+        left = min(max(0, int(clen or 0)), cap)
+        if not left:
+            return
+        sock = self.connection
+        try:
+            old_to = sock.gettimeout()
+        except OSError:
+            old_to = None
+        try:
+            sock.settimeout(wait)
+            while left > 0:
+                chunk = self.rfile.read(min(65536, left))
+                if not chunk:
+                    break
+                left -= len(chunk)
+        except OSError:
+            pass
+        finally:
+            try:
+                sock.settimeout(old_to)
+            except OSError:
+                pass
+
     # -- 音频代理 / 缓存 ---------------------------------------------------
     def _serve_media(self, key, url, ext):
         """命中今天的缓存就直接读盘，否则原样转发上游（含 Range），不落盘。"""
@@ -4758,27 +4787,7 @@ class Handler(BaseHTTPRequestHandler):
                     clen = 0
                 if clen > 4 * 1024 * 1024:
                     # 用户数据的单次写入不该有 MB 级；放进来只会把 data.json 撑爆。
-                    # 先把已声明的 body 读掉再回 413：直接关连接会让还在发大
-                    # body 的客户端收到 RST，拿不到「请求体过大」这句人话。
-                    # 但 Content-Length 可能是谎报的（客户端根本不发 body），
-                    # 所以设 0.6s 读超时，骗人的长度不能把服务线程挂死。
-                    left = min(clen, 8 * 1024 * 1024)
-                    sock = self.connection
-                    old_to = sock.gettimeout()
-                    try:
-                        sock.settimeout(0.6)
-                        while left > 0:
-                            chunk = self.rfile.read(min(65536, left))
-                            if not chunk:
-                                break
-                            left -= len(chunk)
-                    except OSError:
-                        pass
-                    finally:
-                        try:
-                            sock.settimeout(old_to)
-                        except OSError:
-                            pass
+                    self._drain_body(clen)
                     self._send(413, {"ok": False, "error": "请求体过大"})
                     return
                 body = self._json_body()
@@ -4804,6 +4813,7 @@ class Handler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     clen = 0
                 if clen > 1024 * 1024:
+                    self._drain_body(clen, cap=2 * 1024 * 1024)
                     self._send(413, {"ok": False, "error": "请求体过大"})
                     return
                 try:
