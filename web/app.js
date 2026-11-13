@@ -7801,16 +7801,48 @@ function karpNoteCents(f0) {
   return { midi, name: karpNote(midi), cents: Math.round((midiFloat - midi) * 100) };
 }
 
+/** 混音总线软限幅（P8 挂账收口）。伴奏 + 大声人声 + 混响在 bus 上求和，
+    超 ±1 时 16bit WAV 编码会切平顶（验收实测 peak 触顶 1.0）。
+    曲线：|x|≤0.7 严格线性（正常响度零染色）；之后按 (1−u)^k 幂式压向 0.97
+    天花板，k=(1−knee)/(top−knee) 使膝点斜率恰为 1（与线性区 C¹ 连续）且
+    y≤x 全程成立（只压不抬）。WaveShaper 零延迟、无 worklet 依赖，
+    桌面 Chromium 与 Android WebView 同源支持。 */
+function karLimCurve() {
+  const N = 2048, KNEE = 0.7, TOP = 0.97;
+  const K = (1 - KNEE) / (TOP - KNEE);
+  const curve = new Float32Array(N);
+  for (let i = 0; i < N; i += 1) {
+    const x = (i / (N - 1)) * 2 - 1;
+    const a = Math.abs(x);
+    if (a <= KNEE) { curve[i] = x; continue; }
+    const u = (a - KNEE) / (1 - KNEE);
+    curve[i] = Math.sign(x) * (KNEE + (TOP - KNEE) * (1 - (1 - u) ** K));
+  }
+  return curve;
+}
+
+function karLimiter(ctx) {
+  const ws = ctx.createWaveShaper();
+  ws.curve = karLimCurve();
+  /* 不开 2x 超采样：抗混叠 FIR 在陡沿上振铃会冲破天花板（实测实时链路 0.97
+     过冲到 1.018，编码时又被 1.0 削一次）。曲线查表线性插值本身零过冲，
+     输出严格 ≤0.97；膝区混叠只在过热段落出现，好过切平顶。 */
+  ws.oversample = 'none';
+  return ws;
+}
+
 /** 音频图 + 录音抽头（P9 重构）。全程 try 包死：K 歌失败不能把播放器拖下水。
 
     伴奏： src → split → L·(+0.5)/R·(−0.5) → cancel ┐
-            └──────────────────────────→ orig ──────┴→ acc ─┬→ bus(录音)
-                                                              └→ destination(监听)
+            └──────────────────────────→ orig ──────┴→ acc ─┬→ bus → busLim(录音限幅)
+                                                              └→ mon(监听限幅) → destination
     人声： micSrc → micTap(电平/音高抽头) → hp80 → micGain → tone(亮暗) → micBus ─┬→ bus
                                     convolver → wet ────────────────────────────┘
-                                                          micBus → echoGate → destination
+                                                          micBus → echoGate → mon
     监听拆开的含义：耳返开关只控制「自己的声音回不给耳朵」，伴奏监听永远在；
-    录音 bus 不受耳返影响 —— 存下来的作品永远带人声与混响。 */
+    录音 bus 不受耳返影响 —— 存下来的作品永远带人声与混响。
+    限幅两道：busLim 守录音（求和超 1 不再切平顶），mon 守监听（伴奏+耳返
+    求和同理，顺带护耳）。 */
 function karBuild(stream) {
   try {
     const CE = window.AudioContext || window.webkitAudioContext;
@@ -7849,7 +7881,8 @@ function karBuild(stream) {
 
     const bus = ctx.createGain(); bus.gain.value = 1;
     acc.connect(bus);
-    acc.connect(ctx.destination);   // 监听：伴奏永远在；自己的声音只走耳返（echoGate）
+    const mon = karLimiter(ctx);    // 监听求和限幅：伴奏 + 耳返都汇进它再出 destination
+    acc.connect(mon); mon.connect(ctx.destination);   // 监听：伴奏永远在；自己的声音只走耳返（echoGate）
 
     Object.assign(KAR, { ctx, el, cancel, orig, acc,
       micGain: null, wet: null, convolver: null, echoGate: null, toneFilter: null,
@@ -7909,11 +7942,12 @@ function karBuild(stream) {
       micBus.connect(convolver); convolver.connect(wet); wet.connect(bus);
       micBus.connect(bus);                                  // 干路永远在
       const echoGate = ctx.createGain(); echoGate.gain.value = KAR.echo ? 1 : 0;
-      micBus.connect(echoGate); echoGate.connect(ctx.destination);   // 耳返
+      micBus.connect(echoGate); echoGate.connect(mon);   // 耳返（进监听限幅汇出）
 
       const rec = ctx.createScriptProcessor(4096, 2, 2);
       const sink = ctx.createGain(); sink.gain.value = 0;    // SP 必须连到 destination 才会跑
-      bus.connect(rec); rec.connect(sink); sink.connect(ctx.destination);
+      const busLim = karLimiter(ctx);          // 录音总线限幅：伴奏+干+湿求和超 1 不切平顶
+      bus.connect(busLim); busLim.connect(rec); rec.connect(sink); sink.connect(ctx.destination);
 
       rec.onaudioprocess = (e) => {
         if (KAR.phase !== 'sing') return;      // 倒数 / 回顾不进录音
