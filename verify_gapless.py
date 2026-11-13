@@ -273,21 +273,21 @@ def main():
             ENG.cross = engCrossSeconds();
             state.settings.eq_enabled = true;
             state.settings.eq_preset = 'custom';
-            const flat = [0,0,0,0,0,0,0,0,0,0];
-            state.settings.eq_gains = flat.slice();
+            // P2 起引擎只认参数段表（eq_bands）；eq_gains 是图形推子历史字段
+            state.settings.eq_mode = 'parametric';
+            state.settings.eq_bands = [];
             engApplyEq(true);
             await playAt(state.playList, 0);
             audio().currentTime = 0.8;
             await new Promise(r => setTimeout(r, 500));
             const base = __g.peak();
             // 只把 500Hz 段拉到 -12dB：440Hz 落在它的通带里，应该听得出塌下去
-            const cut = flat.slice(); cut[4] = -12;
-            state.settings.eq_gains = cut;
+            state.settings.eq_bands = [{ type: 'peaking', f: 500, q: 1, db: -12 }];
             engApplyEq();
             await new Promise(r => setTimeout(r, 600));
             const low = __g.peak();
             const liveAfterCut = !audio().paused;
-            state.settings.eq_gains = flat.slice();
+            state.settings.eq_bands = [];
             engApplyEq();
             await new Promise(r => setTimeout(r, 600));
             const back = __g.peak();
