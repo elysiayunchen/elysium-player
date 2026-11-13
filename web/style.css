@@ -1579,75 +1579,220 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
 
 /* ---- K 歌（P8）：全屏演唱层 + 我的作品 ----
    z-index 70：压过抽屉(30)/右键菜单(55)/输入浮层(60)。背景图模糊铺底，
-   再盖一层主题色渐变，明暗两套都保证歌词对比度。 */
+   再压一层主题色渐变，明暗两套都保证歌词对比度。
+   布局对齐全民K歌演唱页：顶栏(返回/曲名/调性) → 歌词主角 → 居中音准轨 → 底部演唱坞。 */
 .sing-layer{
   position:fixed;inset:0;z-index:70;display:flex;flex-direction:column;
   background:var(--bg);color:var(--ink);overflow:hidden;
 }
 .k-bg{
   position:absolute;inset:-8%;background:center/cover no-repeat;
-  filter:blur(46px) saturate(1.05);opacity:.2;transform:scale(1.12);
+  filter:blur(46px) saturate(1.05);opacity:.24;transform:scale(1.12);
   pointer-events:none;
 }
-/* 封面氛围光之上压一层主题色渐变罩：脏棕感消失，前景文字更稳 */
+/* 封面氛围光之上压一层主题色罩：脏棕感消失，前景文字更稳 */
 .sing-layer::after{
   content:'';position:absolute;inset:0;z-index:0;pointer-events:none;
-  background:linear-gradient(color-mix(in srgb,var(--bg) 58%,transparent) 0%,
-    color-mix(in srgb,var(--bg) 26%,transparent) 42%,
-    color-mix(in srgb,var(--bg) 52%,transparent) 100%);
+  background:linear-gradient(color-mix(in srgb,var(--bg) 54%,transparent) 0%,
+    color-mix(in srgb,var(--bg) 22%,transparent) 44%,
+    color-mix(in srgb,var(--bg) 66%,transparent) 100%);
 }
-.sing-layer::after{
-  content:'';position:absolute;inset:0;pointer-events:none;
-  background:linear-gradient(180deg,transparent 0%,var(--bg) 96%);opacity:.72;
+/* 无封面时的中间氛围光：纯黑大屏不再是一块死背景 */
+.sing-layer::before{
+  content:'';position:absolute;inset:0;z-index:0;pointer-events:none;
+  background:radial-gradient(58% 46% at 50% 42%,var(--accent-dim) 0%,transparent 72%);
+  opacity:.55;
 }
-.k-head,.k-prog,.k-stage,.k-lines,.k-ctl{position:relative;z-index:1}
-.k-head{display:flex;align-items:center;gap:16px;padding:18px 26px 14px;flex:0 0 auto}
-.k-meta{min-width:0;flex:1}
-.k-title{font-size:19px;font-weight:650;letter-spacing:.01em}
-.k-artist{font-size:12px;color:var(--muted);margin-top:3px}
-.k-rec{font-size:13px;color:var(--accent);letter-spacing:.06em}
-.k-x{width:32px;height:32px;flex:0 0 32px}
-.k-prog{height:3px;background:var(--line);flex:0 0 auto}
-.k-prog-fill{height:100%;width:0;background:var(--accent);transition:width .12s linear}
-.k-stage{flex:1 1 auto;min-height:0;display:flex;align-items:center;
-  justify-content:center;padding:12px 24px;text-align:center}
-/* ready 态：舞台只留一段居中说明（CTA 已在坞的传输行），
-   歌词预览占住歌词条；音准条是演唱态的东西 ready 隐掉；
-   计时器 ready 无意义——必须 display:none（visibility 会占位把居中 CTA 顶偏）。
-   行高由 .kc-trans 的 min-height 锁住，显隐不跳。没词时 k-lines 整个退场 */
-.sing-layer.is-ready .k-pitch{visibility:hidden}
-.sing-layer.is-ready .kc-trans .k-rec{display:none}
-.sing-layer.no-preview .k-lines{display:none}
-.k-ready{display:flex;flex-direction:column;align-items:center;gap:9px;
-  text-align:center;align-self:center;max-width:560px}
-.k-review{display:flex;flex-direction:column;align-items:center;
-  gap:12px;max-width:520px;align-self:center;text-align:center}
-.k-ready-t{font-size:20px;font-weight:700}
-.k-count{align-self:center}
-.k-ready-s{font-size:12.5px;color:var(--ink-2);line-height:1.7}
+.sing-layer.sing .k-bg{opacity:.42}
+
+/* 顶栏：返回键、曲名、调性在同一条中线上（旧版三行堆叠导致返回键掉到标题下方） */
+.k-head{
+  position:relative;z-index:1;flex:0 0 auto;
+  display:grid;grid-template-columns:40px minmax(0,1fr) auto;align-items:center;gap:14px;
+  padding:max(16px,env(safe-area-inset-top)) clamp(18px,3.2vw,44px) 12px;
+}
+.k-x{
+  width:36px;height:36px;border-radius:50%;flex:0 0 auto;
+  display:grid;place-items:center;background:var(--hover);color:var(--ink-2);
+  transition:.15s;
+}
+.k-x:hover{background:var(--hover-2);color:var(--ink)}
+.k-x svg{width:20px;height:20px;fill:currentColor}
+.k-meta{min-width:0}
+.k-title{font-size:18px;font-weight:650;letter-spacing:.01em;line-height:1.3}
+.k-sub{display:flex;align-items:center;gap:10px;margin-top:4px;min-width:0}
+.k-artist{font-size:12.5px;color:var(--muted);min-width:0}
+.k-prog{position:relative;z-index:1;height:2px;background:var(--line);flex:0 0 auto}
+.k-prog-fill{height:100%;width:0;background:var(--accent);
+  box-shadow:0 0 10px var(--accent-dim);transition:width .12s linear}
+
+/* 主区：ready=封面+说明，演唱=五句歌词铺满，音准轨贴在主区底部 */
+.k-main{
+  position:relative;z-index:1;flex:1 1 auto;min-height:0;width:100%;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:8px clamp(18px,4vw,56px) 0;
+}
+.k-stage{
+  width:100%;min-height:0;flex:1 1 auto;
+  display:flex;align-items:center;justify-content:center;
+}
+/* 开唱后舞台清空即退场：不再用一块空 flex 把歌词顶到屏幕最下方 */
+.k-stage:empty{display:none}
+.k-lines{
+  width:100%;max-width:1040px;flex:0 0 auto;min-height:132px;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:10px;text-align:center;
+}
+.sing .k-lines{
+  flex:0 1 auto;min-height:0;max-height:100%;overflow:hidden;
+  gap:clamp(12px,2.4vh,28px);
+  mask-image:linear-gradient(180deg,transparent 0,#000 9%,#000 91%,transparent 100%);
+  -webkit-mask-image:linear-gradient(180deg,transparent 0,#000 9%,#000 91%,transparent 100%);
+}
+.is-ready .k-main{justify-content:center}
+.is-ready .k-stage{flex:0 1 auto}
+.is-ready .k-lines{flex:0 0 auto;margin-top:10px}
+
+/* 歌词：当前句大字（带跟唱进度填充），前后句退后；移动端只留三句 */
+.k-line{
+  font-size:16px;color:var(--ink-2);line-height:1.55;max-width:100%;
+  white-space:pre-wrap;overflow-wrap:break-word;
+  transition:color .18s,opacity .18s,font-size .18s;
+}
+.k-line.dim{color:var(--ink-2);opacity:.55;font-size:clamp(14px,1.4vw,19px)}
+.k-line.far{color:var(--ink-2);opacity:.28;font-size:clamp(12px,1.15vw,16px)}
+.k-line.now{
+  color:var(--ink);font-size:clamp(26px,2.7vw,40px);font-weight:700;
+  line-height:1.44;letter-spacing:.005em;text-wrap:balance;
+}
+/* 跟唱进度：已唱过的字走 accent，未唱保持墨白 —— 全民K歌式逐字高亮（JS 每 ~80ms 推一次 --kp） */
+.k-line.now .k-line-txt{
+  --kp:0;display:inline;
+  background-image:linear-gradient(90deg,
+    var(--accent) calc(var(--kp) * 100%),var(--ink) calc(var(--kp) * 100%));
+  -webkit-background-clip:text;background-clip:text;
+  -webkit-text-fill-color:transparent;color:transparent;
+}
+/* ready 是开嗓前的封面页：歌词先不出现（首句常是「词/曲」版权行，会像一截乱入的正文） */
+.is-ready .k-lines{display:none}
+.k-trans{
+  display:block;font-size:clamp(10.5px,.4em,13.5px);font-weight:400;
+  color:var(--muted);margin-top:4px;letter-spacing:.01em;
+  -webkit-text-fill-color:currentColor;
+}
+.k-nolrc{font-size:13px;color:var(--muted)}
+
+/* ready：封面 + 开嗓提示（CTA 在坞里，这里只交代状态） */
+.k-ready{
+  display:flex;flex-direction:column;align-items:center;gap:13px;
+  text-align:center;max-width:620px;padding:0 8px;
+}
+.k-ready-art{
+  width:132px;aspect-ratio:1;border-radius:18px;overflow:hidden;
+  background:radial-gradient(circle at 50% 32%,var(--accent-dim),var(--card-2) 72%);
+  background-size:cover;background-position:center;
+  display:grid;place-items:center;color:var(--accent);
+  box-shadow:0 18px 44px rgba(0,0,0,.42),0 0 0 1px var(--line);
+}
+.k-ready-art svg{width:44px;height:44px;fill:currentColor;opacity:.55}
+.k-ready-art.has-cover svg{display:none}
+.k-ready-t{font-size:26px;font-weight:700;letter-spacing:-.01em}
+.k-ready-s{font-size:13px;color:var(--ink-2);line-height:1.7;max-width:560px}
+.k-ready-notes{display:flex;flex-direction:column;gap:3px;font-size:11px;color:var(--muted)}
 .k-hint{font-size:11px;color:var(--muted)}
-.btn.lg{height:40px;padding:0 22px;font-size:13px}
-.k-count{font-size:96px;font-weight:700;color:var(--accent);
-  font-variant-numeric:tabular-nums}
-.k-score{font-size:19px}
-.k-score b{color:var(--accent);font-size:24px}
-.k-review-acts{display:flex;gap:10px;margin-top:8px}
-.k-lines{flex:0 0 auto;height:132px;display:flex;flex-direction:column;
-  align-items:center;justify-content:center;gap:9px;padding:0 24px;text-align:center}
-.k-line{font-size:15px;color:var(--ink-2);line-height:1.5;max-width:760px;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.k-line.dim{color:var(--muted);opacity:.62;font-size:12.5px}
-.k-line.now{color:var(--ink);font-size:19px;font-weight:650}
-.k-trans{display:block;font-size:11px;font-weight:400;color:var(--muted);margin-top:3px}
-.k-nolrc{font-size:12px;color:var(--muted)}
-/* 控制坞两行：传输行永远有重心（ready=开始演唱 / 演唱=计时+唱完了 / 倒数=计时），
-   控制行一个群组排开居中，窄屏自动换行 —— 不再用角落堆凑对称 */
-.k-ctl{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:10px;
-  padding:12px 26px 16px;
-  border-top:1px solid var(--line);background:var(--bg-soft)}
-.kc-trans{display:flex;align-items:center;gap:14px;min-height:40px}
-.kc-row{display:flex;align-items:center;gap:14px;flex-wrap:wrap;justify-content:center}
-.kc-trans .k-rec{font-size:15px}
+.k-count-wrap{display:flex;flex-direction:column;align-items:center;gap:12px}
+.k-count{
+  font-size:clamp(96px,11vw,150px);font-weight:800;line-height:1;
+  color:var(--accent);font-variant-numeric:tabular-nums;
+  text-shadow:0 10px 46px var(--accent-dim);
+}
+.k-count.pop{animation:kcount .62s cubic-bezier(.2,.8,.2,1)}
+@keyframes kcount{
+  0%{transform:scale(.7);opacity:.15}
+  38%{transform:scale(1.08);opacity:1}
+  100%{transform:scale(1);opacity:.94}
+}
+.k-count-hint{font-size:11px;letter-spacing:.3em;color:var(--muted)}
+/* 倒数时主区只留数字：歌词/音准轨退场，倒数严格居中 */
+.counting .k-lines,.counting .k-pitch{display:none}
+.k-review{
+  display:flex;flex-direction:column;align-items:center;gap:13px;
+  max-width:560px;text-align:center;
+}
+.k-score{font-size:24px;font-weight:650}
+.k-score b{color:var(--accent);font-size:34px}
+.k-pitch-score{font-size:13px;color:var(--ink-2)}
+.k-pitch-score b{color:#39d98a;font-size:18px}
+.k-review-acts{display:flex;gap:10px;margin-top:4px}
+
+/* 音准轨：读数在上、轨道占满中轴 —— 左右不再有固定宽度的音名槽把整体顶偏 50px */
+.k-pitch{
+  position:relative;z-index:1;flex:0 0 auto;width:100%;max-width:860px;
+  display:flex;flex-direction:column;align-items:center;gap:6px;
+  padding:10px 0 14px;
+}
+.kp-top{display:flex;align-items:baseline;justify-content:center;gap:12px;min-height:34px}
+.kp-note{
+  font-size:32px;font-weight:750;line-height:1;min-width:2.2ch;text-align:center;
+  color:var(--muted);letter-spacing:.02em;transition:color .12s;
+}
+.kp-note.ok{color:#39d98a}
+.kp-note.near{color:var(--gold)}
+.kp-note.off{color:var(--accent)}
+.kp-cents{font-size:12px;color:var(--ink-2);opacity:.85;letter-spacing:.03em;white-space:nowrap}
+.kp-bar{
+  position:relative;width:100%;height:30px;overflow:hidden;
+  background:linear-gradient(180deg,var(--hover-2),var(--hover));
+  border:1px solid var(--line-2);border-radius:10px;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.04),inset 0 -10px 22px rgba(0,0,0,.1);
+}
+.kp-ticks{position:absolute;inset:0}
+/* 刻度只留长短竖线（音名读数在上方大字里）：字母挤在 26px 轨里既小又会在两端被裁 */
+.kp-tick{
+  position:absolute;bottom:0;width:1px;height:9px;transform:translateX(-50%);
+  background:var(--line-2);
+}
+.kp-tick.blk{height:5px;opacity:.6}
+.kp-tick.c0{height:14px;width:1.5px;background:var(--ink-2)}
+.kp-tick:first-child,.kp-tick:last-child{display:none}
+.kp-target{
+  position:absolute;top:3px;bottom:3px;width:22px;transform:translateX(-50%);
+  background:var(--accent-dim);border:1.5px dashed var(--accent);border-radius:5px;
+}
+.kp-needle{
+  position:absolute;top:0;bottom:0;width:2.5px;transform:translateX(-50%);
+  background:var(--ink);box-shadow:0 0 8px color-mix(in srgb,var(--ink) 45%,transparent);
+  transition:left .09s linear;
+}
+
+/* 底部演唱坞：时间/主按钮居中叠放，控制行一条排开；不再是三个小件漂在大空场里 */
+.k-ctl{
+  position:relative;z-index:2;flex:0 0 auto;
+  display:flex;flex-direction:column;align-items:center;gap:10px;
+  padding:12px clamp(16px,3vw,40px) 16px;
+  border-top:1px solid var(--line);
+  background:linear-gradient(180deg,color-mix(in srgb,var(--bg-soft) 78%,transparent),var(--bg-soft));
+  backdrop-filter:blur(16px);
+}
+.kc-trans,.kc-row,.kc-mixer{width:min(920px,100%)}
+.kc-trans{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:8px;min-height:78px;
+}
+.k-clock{display:flex;align-items:baseline;gap:9px;min-width:0}
+.k-clock-cap{font-size:10px;letter-spacing:.18em;color:var(--muted)}
+.k-rec{
+  font-size:16px;color:var(--accent);letter-spacing:.06em;
+  font-variant-numeric:tabular-nums;
+}
+.kc-go{height:50px;padding:0 40px;border-radius:25px;font-size:15px;font-weight:650}
+.kc-finish{
+  height:48px;padding:0 32px;border-radius:24px;font-size:14.5px;font-weight:650;
+  gap:9px;box-shadow:0 8px 26px var(--accent-dim);
+}
+.kc-finish svg{width:15px;height:15px}
+.kc-row{display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap}
+
 /* —— 调音台面板：全民K歌式「调音」按钮拉起；通道化推子 + 混响预设 + 耳返开关 —— */
 .kc-mixer{
   width:min(820px,100%);background:var(--card);border:1px solid var(--line);
@@ -1673,87 +1818,81 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
 }
 .km-chips button:hover{color:var(--ink);border-color:var(--line-2)}
 .km-chips button.on{color:var(--accent);border-color:var(--accent);background:var(--accent-dim)}
-/* 推子：调音台通道推杆，带填充与读数；比裸 range 厚一档 */
 .k-fader{width:100%;height:4px;border-radius:2px}
 .k-fader::-webkit-slider-thumb{
   width:14px;height:14px;border-radius:50%;background:var(--ink);
   box-shadow:0 1px 4px rgba(0,0,0,.45);
 }
 .k-fader:hover::-webkit-slider-thumb{background:var(--accent)}
+
 /* —— 模式行：原唱/伴唱 segmented + 变调步进 + 调音按钮 —— */
-/* segmented：K 歌坞语汇（.k-seg） */
-.k-seg{display:flex;background:var(--card-2);border:1px solid var(--line);border-radius:9px;padding:2px;gap:2px}
-.k-seg button{height:26px;padding:0 13px;border-radius:7px;font-size:12px;color:var(--muted);cursor:pointer;transition:.13s}
+.k-seg{display:flex;background:var(--card-2);border:1px solid var(--line);border-radius:12px;padding:3px;gap:2px}
+.k-seg button{height:32px;padding:0 16px;border-radius:9px;font-size:12.5px;color:var(--muted);cursor:pointer;transition:.13s}
 .k-seg button:hover{color:var(--ink)}
 .k-seg button.on{background:var(--accent-dim);color:var(--accent)}
-.k-step{display:flex;align-items:center;background:var(--card-2);border:1px solid var(--line);border-radius:9px;padding:2px;gap:1px}
-.k-pitch-btn{width:26px;height:26px;border-radius:7px;font-size:14px;color:var(--ink-2);cursor:pointer;transition:.13s}
+.k-step{display:flex;align-items:center;background:var(--card-2);border:1px solid var(--line);border-radius:12px;padding:3px;gap:1px}
+.k-pitch-btn{width:32px;height:32px;border-radius:9px;font-size:16px;color:var(--ink-2);cursor:pointer;transition:.13s}
 .k-pitch-btn:hover{background:var(--hover-2);color:var(--ink)}
 .k-pitch-btn:disabled{opacity:.35;cursor:default}
-.k-step-val{min-width:46px;text-align:center;font-size:12px;color:var(--ink-2);font-variant-numeric:tabular-nums}
+.k-step-val{min-width:52px;text-align:center;font-size:12.5px;color:var(--ink-2);font-variant-numeric:tabular-nums}
 .k-mixer-btn{
-  display:flex;align-items:center;gap:6px;height:30px;padding:0 13px;border-radius:9px;
-  border:1px solid var(--line);background:var(--card-2);color:var(--ink-2);font-size:12px;cursor:pointer;transition:.13s;
+  display:flex;align-items:center;gap:7px;height:38px;padding:0 16px;border-radius:12px;
+  border:1px solid var(--line);background:var(--card-2);color:var(--ink-2);font-size:12.5px;cursor:pointer;transition:.13s;
 }
-.k-mixer-btn svg{width:13px;height:13px;fill:currentColor}
+.k-mixer-btn svg{width:15px;height:15px;fill:currentColor}
 .k-mixer-btn:hover{color:var(--ink);border-color:var(--line-2)}
 .k-mixer-btn.on{color:var(--accent);border-color:var(--accent);background:var(--accent-dim)}
-.k-vol{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--ink-2);
-  text-shadow:0 1px 2px rgba(0,0,0,.45)}   /* 暖棕渐变上 muted 几乎不可见，提一档 + 轻投影 */
-.k-vol svg{width:14px;height:14px;fill:currentColor}
-.k-vol input[type=range]{width:92px}
 .k-meter{width:64px;height:4px;border-radius:4px;background:var(--hover-2);overflow:hidden}
-.k-meter span{display:block;height:100%;width:0;background:var(--accent);
-  transition:width .08s}
-.k-vocal{display:flex;align-items:center;gap:6px;font-size:11.5px;
-  color:var(--ink-2);cursor:pointer}
-.k-vocal input{accent-color:var(--accent)}
-.sing-layer.sing .k-bg{opacity:.36}
-/* ---------- P9 音准引擎 ---------- */
-.k-badge{font-size:10.5px;color:var(--gold);background:var(--gold-dim);
-  border-radius:6px;padding:1px 8px;margin-top:5px;display:inline-block;width:fit-content}
-.k-sel{background:var(--card-2);color:var(--ink-2);border:1px solid var(--line);
-  border-radius:7px;height:26px;font-size:11px;padding:0 6px;cursor:pointer}
-.k-auto{font-style:normal;font-size:9.5px;color:var(--muted);
-  border:1px solid var(--line-2);border-radius:5px;padding:0 4px;line-height:1.5}
-.k-analyze{color:var(--muted)}
-.k-pitch{flex:0 0 auto;position:relative;z-index:1;display:flex;align-items:center;
-  justify-content:center;gap:14px;padding:2px 24px 8px}
-.kp-note{font-size:26px;font-weight:750;width:88px;text-align:right;
-  color:var(--muted);transition:color .12s}
-.kp-note.ok{color:#39d98a}
-.kp-note.near{color:var(--gold)}
-.kp-note.off{color:var(--accent)}
-.kp-mid{display:flex;flex-direction:column;gap:5px;width:min(460px,58vw)}
-.kp-bar{position:relative;height:30px;background:var(--hover);
-  border:1px solid var(--line);border-radius:8px;overflow:hidden}
-.kp-tick{position:absolute;bottom:0;width:1px;height:10px;background:var(--line-2);
-  font-size:9px;color:var(--muted);transform:translateX(-.5px)}
-.kp-tick:not(.blk){height:14px}
-.kp-tick.c0{background:var(--ink-2)}
-.kp-target{position:absolute;top:3px;bottom:3px;width:22px;transform:translateX(-50%);
-  background:var(--accent-dim);border:1.5px dashed var(--accent);border-radius:5px}
-.kp-needle{position:absolute;top:0;bottom:0;width:2.5px;transform:translateX(-50%);
-  background:var(--ink);box-shadow:0 0 6px rgba(255,255,255,.5);
-  transition:left .09s linear}
-.kp-cents{font-size:11px;color:var(--muted);text-align:center}
-.k-pitch-score{font-size:13px;color:var(--ink-2)}
-.k-pitch-score b{color:#39d98a;font-size:18px}
+.k-meter span{display:block;height:100%;width:0;background:var(--accent);transition:width .08s}
+
+/* 状态退场：ready 不占音准/计时，review 只留结算；音准条是演唱态的东西 */
+.sing-layer.is-ready .k-pitch,
+.sing-layer.is-review .k-pitch{display:none}
+.sing-layer.is-ready .kc-trans .k-clock{display:none}
+.sing-layer.is-review .k-lines{display:none}
+.sing-layer.is-review .k-ctl{display:none}
+.sing-layer.no-preview .k-lines{display:none}
 /* 听唱模式（.nomi）：拿不到麦克风（Android WebView 常态）时，
    人声链路控件与实时音准条整体退场，只留伴奏音量 / 变调 / 消原唱 */
 .sing-layer.nomi .k-mic-only,
 .sing-layer.nomi .k-pitch{display:none}
-/* 迷你条 / 矮窗：收紧留白，别让控制条把歌词挤没 */
+
+.k-badge{
+  flex:0 0 auto;font-size:10.5px;color:var(--gold);background:var(--gold-dim);
+  border-radius:6px;padding:1px 8px;display:inline-block;width:fit-content;
+}
+.k-analyze{color:var(--muted)}
+/* 矮窗 / 横屏小窗：压扁留白，先保歌词与主按钮，装饰让位 */
 @media (max-height:420px){
-  .k-stage{padding:4px 16px}
-  .k-lines{height:66px;gap:2px}
-  .k-line.now{font-size:15px}
-  .k-ctl{padding:6px 14px 10px;gap:9px}
+  .k-head{grid-template-columns:32px minmax(0,1fr) auto;gap:10px;padding:6px 14px 4px}
+  .k-x{width:30px;height:30px}
+  .k-title{font-size:14px}
+  .k-sub{margin-top:2px}
+  .k-main{padding:2px 16px 0}
+  .k-lines{gap:2px}
+  .k-line.now{font-size:17px;line-height:1.35}
+  .k-line.dim{font-size:11px}
+  .k-line.far{display:none}
+  .k-pitch{max-width:560px;gap:2px;padding:2px 0 4px}
+  .kp-top{min-height:20px;gap:8px}
+  .kp-note{font-size:20px}
+  .kp-cents{font-size:10px}
+  .kp-bar{height:20px}
+  .kp-tick{font-size:7px;gap:1px;padding-bottom:2px}
+  .k-ctl{padding:4px 12px 6px;gap:6px}
+  .kc-trans{min-height:46px;flex-direction:row;gap:12px}
+  .kc-go{height:36px;padding:0 24px}
+  .kc-finish{height:34px;padding:0 20px;font-size:12.5px}
+  .kc-row{gap:8px}
+  .k-seg button,.k-pitch-btn{height:26px}
+  .k-seg button{padding:0 11px}
+  .k-pitch-btn{width:26px}
+  .k-step-val{min-width:44px}
+  .k-mixer-btn{height:30px;padding:0 12px}
+  .k-ready-art,.k-hint{display:none}
   .k-ready-t{font-size:17px}
-  .k-hint{display:none}
-  .kp-note{font-size:19px;width:64px}
-  .kp-bar{height:22px}
-  .k-pitch{padding:0 16px 4px}
+  .k-ready{gap:6px}
+  .k-count{font-size:64px}
 }
 /* 我的作品：沿用 .cards/.card 骨架，只补日期 + 导出/删除脚注 */
 .wcard-foot{display:flex;align-items:center;justify-content:space-between;
@@ -1899,18 +2038,50 @@ html[data-mini="on"] .pl-seek .mono{font-size:9.5px}
   .ask-card{width:min(360px,88vw)}
   .qmenu,.ctxmenu{max-width:calc(100vw - 16px)}
 
-  /* K 歌层：控制行窄屏换行，调音台两列（高度减半），贴安全区 */
-  .k-head{padding:12px 14px 8px;gap:10px}
-  .k-stage{padding:4px 12px}
-  .k-lines{height:88px}
-  .k-ctl{gap:8px;padding:8px 12px calc(10px + env(safe-area-inset-bottom))}
-  .kc-row{gap:10px}
+  /* K 歌层（手机是主战场）：顶栏收紧、歌词大字、音准轨满宽、演唱坞贴安全区 */
+  .k-head{grid-template-columns:36px minmax(0,1fr) auto;gap:10px;
+    padding:max(10px,env(safe-area-inset-top)) 14px 8px}
+  .k-x{width:34px;height:34px}
+  .k-x svg{width:18px;height:18px}
+  .k-title{font-size:15.5px}
+  .k-sub{gap:7px;margin-top:3px}
+  .k-artist{font-size:11.5px}
+  .k-badge{font-size:9.5px;padding:1px 6px}
+  .k-main{padding:6px 16px 0}
+  .sing .k-lines{gap:14px}
+  .k-line.now{font-size:26px;line-height:1.4}
+  .k-line.dim{font-size:15px}
+  .k-line.far{font-size:13.5px}
+  .k-trans{margin-top:2px}
+  .k-pitch{max-width:100%;gap:4px;padding:8px 0 10px}
+  .kp-top{min-height:28px;gap:9px}
+  .kp-note{font-size:26px}
+  .kp-cents{font-size:10.5px}
+  .kp-bar{height:26px;border-radius:8px}
+  .kp-tick{font-size:8px;padding-bottom:3px}
+  .k-ctl{gap:8px;padding:10px 12px calc(8px + env(safe-area-inset-bottom))}
+  .kc-trans{min-height:72px;gap:6px}
+  .kc-go{height:46px;padding:0 34px;font-size:14px}
+  .kc-finish{height:44px;padding:0 26px;font-size:13.5px}
+  .k-rec{font-size:14px}
+  .k-clock-cap{font-size:9.5px}
+  .kc-row{gap:8px}
+  .k-seg button{height:36px;padding:0 13px}
+  .k-pitch-btn{width:36px;height:36px;font-size:16px}
+  .k-step-val{min-width:48px;font-size:12px}
+  .k-mixer-btn{height:40px;padding:0 13px;font-size:12px}
+  .k-ready-art{width:108px;border-radius:15px}
+  .k-ready-t{font-size:22px}
+  .k-ready-s{font-size:12px}
+  .k-hint{font-size:10.5px}
+  .k-count{font-size:104px}
+  .k-score{font-size:21px}
+  .k-score b{font-size:30px}
   .km-grid{grid-template-columns:1fr 1fr;gap:12px 16px}
 
   /* NP 展开层（手机）：音质 chip 入坞，音量/静音让位（手机用硬件音量键） */
   .np-kr #npVol,.np-kr #npMute{display:none}
   .np-kr .np-spec{margin:0 2px 0 0}
-  .k-vol input[type=range]{width:84px}
 }
 
 /* ---------------------------------------------------------------- 正在播放 · SP 式全屏展开层
