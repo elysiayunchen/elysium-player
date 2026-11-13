@@ -11,8 +11,8 @@ android {
         applicationId "com.elysium.player"
         minSdk 24
         targetSdk 34
-        versionCode 28
-        versionName "2.3.0-beta6-diag"
+        versionCode 29
+        versionName "2.3.0-beta6"
         python {
             version "3.10"
         }
