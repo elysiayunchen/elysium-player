@@ -475,6 +475,81 @@ def main():
         check("U12b 延迟自检出结果或给出明确失败原因",
               bool(res) and ("往返延迟" in res or "没测成" in res), str(res)[:160])
 
+        # U13 混音总线软限幅（P8 挂账收口）：伴奏+人声+混响在 bus 求和超 1 时
+        # 16bit WAV 会切平顶。曲线静态断言 + OfflineAudioContext 离线真渲染
+        # （确定性，不碰假麦/上游）：同料不限幅必须撞顶，限幅后不得再有平顶。
+        u13a = d.execute_script(r"""
+        const c = karLimCurve();
+        let mono = true, peak = 0, boost = 0;
+        for (let i = 1; i < c.length; i += 1) if (c[i] < c[i - 1]) mono = false;
+        for (let i = 0; i < c.length; i += 1) {
+          peak = Math.max(peak, Math.abs(c[i]));
+          const x = (i / (c.length - 1)) * 2 - 1;
+          boost = Math.max(boost, Math.abs(c[i]) - Math.abs(x));
+        }
+        const at = (x) => c[Math.round((x + 1) / 2 * (c.length - 1))];
+        const linOk = [0, 0.2, 0.5, 0.69, -0.5].every((x) => Math.abs(at(x) - x) <= 1e-3);
+        const kneeSlope = (at(0.75) - at(0.70)) / 0.05;
+        return { n: c.length, mono, peak: +peak.toFixed(4), boost: +boost.toFixed(4),
+                 linOk, kneeSlope: +kneeSlope.toFixed(3),
+                 odd: Math.abs(at(-1) + at(1)) < 1e-6 && Math.abs(at(-0.8) + at(0.8)) < 1e-3 };
+        """)
+        check("U13a 限幅曲线：单调、奇对称、天花板 0.97、线性区零染色、只压不抬、膝点斜率连续",
+              u13a["n"] == 2048 and u13a["mono"] and u13a["odd"]
+              and 0.96 < u13a["peak"] <= 0.9701 and u13a["boost"] <= 0.0005
+              and u13a["linOk"] and 0.9 <= u13a["kneeSlope"] <= 1.02,
+              str(u13a))
+
+        u13b = d.execute_script(r"""
+        const renderLim = async (useLim) => {
+          const sr = 48000;
+          const oc = new OfflineAudioContext(2, sr * 0.5, sr);
+          const o1 = oc.createOscillator(); o1.type = 'sine'; o1.frequency.value = 220;
+          const o2 = oc.createOscillator(); o2.type = 'sine'; o2.frequency.value = 331;
+          const g = oc.createGain(); g.gain.value = 0.62;
+          o1.connect(g); o2.connect(g);
+          if (useLim) {
+            const lim = karLimiter(oc);
+            g.connect(lim); lim.connect(oc.destination);
+          } else g.connect(oc.destination);
+          o1.start(); o2.start();
+          const buf = await oc.startRendering();
+          let p = 0, flat = 0, e = 0;
+          for (const ch of [0, 1]) {
+            const d = buf.getChannelData(ch);
+            for (let i = 0; i < d.length; i += 1) {
+              const a = Math.abs(d[i]);
+              if (a > p) p = a;
+              if (a >= 0.995) flat += 1;
+              e += d[i] * d[i];
+            }
+          }
+          return { peak: +p.toFixed(4), flat, rms: +Math.sqrt(e / (2 * buf.length)).toFixed(3) };
+        };
+        const raw = await renderLim(false);
+        const hot = await renderLim(true);
+        const oc2 = new OfflineAudioContext(2, 48000 * 0.5, 48000);
+        const o = oc2.createOscillator(); o.type = 'sine'; o.frequency.value = 440;
+        const g2 = oc2.createGain(); g2.gain.value = 0.5;
+        const lim2 = karLimiter(oc2);
+        o.connect(g2); g2.connect(lim2); lim2.connect(oc2.destination); o.start();
+        const b2 = await oc2.startRendering();
+        let p2 = 0;
+        for (const ch of [0, 1]) {
+          const d = b2.getChannelData(ch);
+          for (let i = 0; i < d.length; i += 1) p2 = Math.max(p2, Math.abs(d[i]));
+        }
+        return { raw, hot, clean: +p2.toFixed(4) };
+        """)
+        check("U13b 离线渲染：同料不限幅撞顶、限幅后 ≤0.98 且零平顶样本",
+              u13b["raw"]["peak"] >= 0.999 and u13b["raw"]["flat"] > 0
+              and 0.5 < u13b["hot"]["peak"] <= 0.98 and u13b["hot"]["flat"] == 0
+              and u13b["hot"]["rms"] > 0.1,
+              "raw=%s hot=%s" % (u13b["raw"], u13b["hot"]))
+        check("U13c 线性区透明：0.5 正弦过限幅峰值偏差 ≤2%",
+              abs(u13b["clean"] - 0.5) <= 0.01,
+              "clean=%s want≈0.5" % u13b["clean"])
+
         noise = ("favicon", "/api/local/cover", "/api/probe")
         errs = [e for e in d.get_log("browser")
                 if e.get("level") == "SEVERE"
