@@ -13,9 +13,10 @@ dist_v*/
 dist_prev/
 dist_t/
 
-# UI 回归自检的截图产物（verify_ui.py / verify_walk.py / verify_unify.py 每次跑都会重新生成）
+# UI 回归自检的截图产物（verify_ui.py / verify_walk.py / verify_unify.py / K 歌页验收 每次跑都会重新生成）
 _art/_v_*.png
 _art/_u_*.png
+_art/_kar*.png
 _art/_zoom_*.png
 _art/walk/
 
@@ -26,8 +27,8 @@ _art/*.md
 _tmp_*
 _tmp/
 
-# 边缘测试报告是 verify_edge.py 每次重跑生成的产物
-edge_report.md
+# 验收报告是 verify_*.py 每次重跑生成的产物
+*_report.md
 
 # 编辑器 / 代理工具生成的会话计划，不属于项目
 .zcode/
@@ -40,6 +41,12 @@ desktop.ini
 
 # 发布产物不进仓库（走 Releases）
 release/
+*.apk
+
+# 本机会话工具：_box.sh 内含 MCP 令牌明文，绝不入库
+_box.sh
+_ui_clip.png
+_v_iso*/
 
 # Android：python 源码镜像由 gradle syncPythonSources 任务生成（见 app/build.gradle）
 android/app/src/main/python/
