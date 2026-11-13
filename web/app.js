@@ -7147,7 +7147,8 @@ const KAR = {
   pitchAcc: null,                                  // 当前行 {sum, n} |cents| 累计
   pitchRows: [],                                   // 结算 [{ok, avg}]
   echo: true, reverb: 'studio',
-  noMic: false,                                    // 听唱模式：拿不到麦克风（Android WebView 常态）
+  noMic: false,                                    // 听唱模式：麦克风权限未授予 / 设备无麦克风
+  bound: false,                                    // 调音台监听只装一次（层是复用的）
   // --- P10 升降调（WSOLA 离线变调）---
   pitchSemi: 0,                                    // 目标半音数 −6..+6（0 = 原调）
   decodedBuf: null,                                // 原采样率解码缓存（变调原料）
@@ -7179,7 +7180,7 @@ async function karaokeStart(item) {
       toast('这个窗口拿不到麦克风。用系统浏览器打开 ' + location.origin + ' 就能 K 歌', 'err');
       return;
     }
-    KAR.noMic = true;    // Android WebView 无麦克风链路：听唱模式（伴奏/歌词/变调/消原唱都在，不录音）
+    KAR.noMic = true;    // 拿不到 getUserMedia（旧 WebView / 非安全来源）：听唱模式
   }
   // 播放器让位：暂停并记下位置，退出 K 歌回到原位（不自动续播，避免惊喜）
   const a = audio();
@@ -7230,7 +7231,7 @@ function karPaintReady() {
   if (it.cover) { bg.style.backgroundImage = `url("${String(it.cover).replace(/"/g, '')}")`; }
   else bg.style.backgroundImage = 'none';
   const sub = KAR.noMic
-    ? '听唱模式 · 手机端暂不支持麦克风：伴奏 / 歌词 / 变调 / 消原唱都在，不录音'
+    ? '听唱模式 · 麦克风不可用：伴奏 / 歌词 / 变调 / 消原唱都在，不录音'
     : (KAR.lines.length
       ? `已就位 ${KAR.lines.length} 行歌词 · 建议戴耳机（避免伴奏串进麦克风）`
       : '这首歌没找到带时间轴的歌词 · 纯伴奏模式');
@@ -7244,7 +7245,7 @@ function karPaintReady() {
         <div class="k-analyze" id="kPitchProg"></div>
       </div>
       <div class="k-hint">${KAR.noMic
-        ? '想录自己的歌声请用桌面版（K2 阶段手机麦克风会跟上）'
+        ? '想录自己的歌声：到系统设置里允许 Elysium 使用麦克风，再重新进入 K 歌'
         : '全程录音只保存在本机，唱完由你决定保存或丢弃'}</div>
     </div>`;
   const art = $('#kReadyArt');
@@ -7355,6 +7356,10 @@ function karBindOnce() {
 
   /* —— 调音台面板 / 模式行（控件 id 不变，交互对齐全民K歌） —— */
   karPaintMixer();
+  /* 层是复用的：addEventListener 只装一次。重复进入 K 歌再叠加一遍会让
+     「调音」点一下开一下关（两次 toggle 抵消）、变调一次跳两格。 */
+  if (KAR.bound) return;
+  KAR.bound = true;
   const mixer = $('#kMixer');
   if (mixer) {
     mixer.addEventListener('input', (e) => { if (e.target.classList.contains('k-fader')) karPaintFader(e.target); });
@@ -7658,9 +7663,9 @@ async function karaokeBegin() {
         toast('拿不到麦克风：' + (e && (e.name || e.message) || '权限被拒绝'), 'err');
         return;
       }
-      KAR.noMic = true;               // Android 权限被拒：不白来一趟，转听唱模式
+      KAR.noMic = true;               // 权限被拒 / 无设备：不白来一趟，转听唱模式
       karNoMicUI();
-      toast('拿不到麦克风，已转为听唱模式（伴奏 + 歌词 + 变调，不录音）');
+      toast('麦克风权限未授予，已转为听唱模式（伴奏 + 歌词 + 变调，不录音）');
     }
   }
   if (!karBuild(stream)) {
