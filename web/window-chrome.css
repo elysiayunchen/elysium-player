@@ -173,22 +173,34 @@ html[data-window-active="false"] .wc-title{opacity:.74}
 html[data-platform="android"][data-chrome="on"] .wc-title{display:none}
 html[data-platform="android"][data-chrome="on"] .shell{
   grid-template-rows:minmax(0,1fr) 92px;
-  height:calc(100vh - var(--wc-safe-top) - var(--wc-safe-bottom));
   padding-top:var(--wc-safe-top);
   padding-bottom:var(--wc-safe-bottom);
 }
+/* height 保持基底的 100vh：border-box 下 padding 已在内部留出系统栏区域，
+   再减一次 insets 会双重计数 —— 播放条悬在离屏底 2×inset 的地方，
+   底部拖出一条多余的深色空带（beta7 edge-to-edge 真机） */
 html[data-platform="android"] .side,
 html[data-platform="android"] .stage{grid-row:1}
 html[data-platform="android"] .player{grid-row:2}
-html[data-platform="android"] .drawer{top:0}
+/* 抽屉是 body 级 fixed，吃不到 shell 的整体内缩：顶停在状态栏之下，
+   底部跟播放条顶（92px 行 + 安全区）对齐 —— style.css 的 bottom:92px 是桌面行高 */
+html[data-platform="android"] .drawer{top:0;bottom:calc(92px + var(--wc-safe-bottom))}
 html[data-platform="android"] body{background:var(--bg)}
 html[data-platform="android"]::after{display:none}
 html[data-platform="android"] .wc-ctrls{display:none}
 /* 手机窄屏：播放条压到 66px（业务侧移动布局在 style.css 的 ≤480px 段；
    这里只把壳层行高跟上——必须写在本文件：上面的 android 规则优先级 (0,3,1)
-   高于 style.css 的媒体块，同文件后置才能盖得住） */
+   高于 style.css 的媒体块，同文件后置才能盖得住）。抽屉底跟行高走。
+   style.css ≤480 的 .player{padding-bottom:env(safe-area-inset-bottom)} 在
+   这里是双重避让（shell 已整体内缩），压平回去 —— 否则 64px 播放条被
+   手势条 inset 再压一层，42px 封面挤扁（beta7 edge-to-edge 真机）。 */
 @media (max-width:480px){
   html[data-platform="android"][data-chrome="on"] .shell{grid-template-rows:minmax(0,1fr) 66px}
+  html[data-platform="android"][data-chrome="on"] .drawer{bottom:calc(66px + var(--wc-safe-bottom))}
+  html[data-platform="android"][data-chrome="on"] .player{padding-bottom:0}
+  /* np-layer 是 body 级全屏层，自己的 padding-bottom:env 已避让手势区；
+     坞内的 env 是第二层，压平 —— 否则播放坞悬空 2×inset */
+  html[data-platform="android"][data-chrome="on"] .np-dock{padding-bottom:14px}
 }
 /* 没有 safe-area 的 WebView（旧 Android）退化成 0，不会撑破布局 */
 @supports not (padding:env(safe-area-inset-top)){

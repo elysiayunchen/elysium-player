@@ -8,6 +8,7 @@ import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.view.Window;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
@@ -16,6 +17,8 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 import androidx.core.content.FileProvider;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
@@ -112,6 +115,20 @@ public class MainActivity extends Activity {
             ensureNotifPermission();
             PlaybackService.push(MainActivity.this, json);
         }
+
+        /** 页面 → 原生：主题切换时同步系统栏图标明暗（浅色页配深色图标，
+            否则 edge-to-edge 下白底白图标看不见）。深浅色以外的值一律按深色。 */
+        @JavascriptInterface
+        public void themeUpdate(String theme) {
+            final boolean dark = !"light".equals(theme);
+            runOnUiThread(() -> {
+                Window w = getWindow();
+                WindowInsetsControllerCompat c =
+                        WindowCompat.getInsetsController(w, w.getDecorView());
+                c.setAppearanceLightStatusBars(!dark);
+                c.setAppearanceLightNavigationBars(!dark);
+            });
+        }
     }
 
     /** 通知栏控制需要 POST_NOTIFICATIONS（API 33+ 运行时权限）；拒绝也只是没通知，不拦播放。 */
@@ -133,6 +150,15 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         ref = new WeakReference<>(this);
+        // edge-to-edge：窗口画进状态栏/导航栏后面，页面用 env(safe-area-inset-*)
+        // 自留安全区（index.html 的 viewport-fit=cover 与 style.css 的 padding
+        // 早就按这个约定写好了，但原生侧一直没开 —— 手势条区域落在窗口外，
+        // MIUI 给它铺系统白底，深色模式下播放条下面一条白断层，beta7 真机实测）。
+        // 透明后露出来的是应用的深色页面，图标明暗随页面主题经 themeUpdate 同步。
+        Window w = getWindow();
+        WindowCompat.setDecorFitsSystemWindows(w, false);
+        w.setStatusBarColor(Color.TRANSPARENT);   // API 35+ 弃用，但 29-34 仍生效
+        w.setNavigationBarColor(Color.TRANSPARENT);
         if (!Python.isStarted()) {
             Python.start(new AndroidPlatform(getApplicationContext()));
         }
@@ -229,6 +255,38 @@ public class MainActivity extends Activity {
         String host = u.getHost() == null ? "" : u.getHost();
         return ("http".equals(scheme) || "https".equals(scheme))
                 && (host.equals("127.0.0.1") || host.equals("localhost") || host.equals("::1"));
+    }
+
+    /**
+     * 返回键 / 侧边返回手势：应用是 SPA，返回语义归页面管 ——
+     * 先问 window.__elysiumBack()（关浮层 → 路由退一级，见 app.js），
+     * 消化了就停手；已在根视图时播放中退后台保播放（音频在 WebView 里，
+     * finish 会掐断），空闲才真正退出。enableOnBackInvokedCallback 未开
+     * （targetSdk 34 默认关），系统 back 一律走这里。
+     */
+    @Override
+    public void onBackPressed() {
+        if (web == null) {
+            super.onBackPressed();
+            return;
+        }
+        try {
+            web.evaluateJavascript(
+                    "window.__elysiumBack ? window.__elysiumBack() : false",
+                    value -> {
+                        if ("true".equals(value)) {
+                            return;
+                        }
+                        if (PlaybackService.lastPlaying) {
+                            moveTaskToBack(true);
+                        } else {
+                            finish();
+                        }
+                    });
+        } catch (Exception e) {
+            // WebView 已销毁（页面没了）：没有可退的层级，按退出处理
+            finish();
+        }
     }
 
     /** 系统麦克风权限对话框回来：答应就放行页面里挂起的 getUserMedia，拒绝就明确告知。 */

@@ -828,6 +828,7 @@ input[type=range]:hover::-webkit-slider-thumb{background:var(--accent)}
 /* ---------------------------------------------------------------- 抽屉 */
 .drawer{
   position:fixed;top:0;bottom:92px;right:0;width:380px;z-index:30;
+  padding-top:env(safe-area-inset-top);   /* Android edge-to-edge 让出状态栏；桌面恒 0 */
   background:var(--bg-soft);border-left:1px solid var(--line);
   display:flex;flex-direction:column;
   box-shadow:-20px 0 50px rgba(0,0,0,.28);
@@ -1960,7 +1961,8 @@ html[data-mini="on"] .pl-seek .mono{font-size:9.5px}
 @media (max-width:480px){
   .nav-btn,.tr-kar{display:grid}
 
-  /* 骨架：单列，播放条 66px */
+  /* 骨架：单列，播放条 64px。Android 壳（window-chrome.css）会把整个
+     shell 用 --wc-safe-* 内缩避让系统栏，这里不用 env() 双重避让 */
   .shell{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr) 64px}
   /* .stage 基础规则 grid-column:2 是桌面双栏用的；单栏网格下它会掉进 0 宽
      隐式列，真机主内容区整个消失（v1.6.0 内容挤成一细条的根源）。必须拉回。 */
@@ -1992,7 +1994,7 @@ html[data-mini="on"] .pl-seek .mono{font-size:9.5px}
      都命中遮罩 → 全部抽屉被关闭（JS .click() 绕过命中测试，桌面模拟测不出）。
      侧栏 40 仍在遮罩之上，遮罩 29 与桌面同层。 */
   .drawer-mask{z-index:29}
-  .drawer{bottom:64px}                  /* 原值 bottom:92px 是桌面播放条高度，硬编码 */
+  .drawer{bottom:64px}                  /* 原值 bottom:92px 是桌面播放条高度，硬编码；Android 的避让在 window-chrome.css */
   /* ≤820 的 .drawer{max-width:420px} 在 <420px 视口反而放大宽抽屉：
      .drawer.wide 基础宽度 430（优先级 0,2,0）压过媒体规则的 width:100%，
      只剩 max-width:420 兜住 → 420 > 390 视口，右锚定向左溢出 30px，
@@ -2000,7 +2002,7 @@ html[data-mini="on"] .pl-seek .mono{font-size:9.5px}
   .drawer,.drawer.wide,.drawer.xwide{width:100%;max-width:100%}
 
   /* 顶栏：汉堡 + 返回 + 搜索 + 主题/队列；设置/全风格歌单都在抽屉里可达 */
-  .bar{grid-template-columns:auto minmax(0,1fr) auto;height:56px;padding:0 10px;gap:8px}
+  .bar{grid-template-columns:auto minmax(0,1fr) auto;height:56px;padding:0 10px;gap:8px}   /* 状态栏避让在 window-chrome.css（shell 整体内缩） */
   .bar-l{gap:4px}
   #styleBtn,#settingsBtn{display:none}
   .search-in{height:36px}

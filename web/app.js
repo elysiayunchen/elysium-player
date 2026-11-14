@@ -186,6 +186,12 @@ function applyTheme(mode) {
   if (btn) btn.innerHTML = real === 'dark' ? icon('sun') : icon('moon');
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.setAttribute('content', real === 'dark' ? '#08080b' : '#fbfbfd');
+  // Android edge-to-edge：系统栏透明、露出页面背景，图标明暗跟着页面主题走
+  // （浅色页配深色图标，否则白底白图标看不见）。theme-color meta 只对浏览器
+  // 生效，WebView 里靠原生桥。
+  if (window.ElysiumAndroid && window.ElysiumAndroid.themeUpdate) {
+    try { window.ElysiumAndroid.themeUpdate(real); } catch (e) { /* 桥暂未就绪 */ }
+  }
 }
 mqLight.addEventListener('change', () => {
   if ((state.settings.theme || 'dark') === 'auto') applyTheme('auto');
@@ -1983,6 +1989,44 @@ function mediaPushTick(force) {
   }
   if (force) mediaPushMeta(true);   // seek 后两端进度都立即校正
 }
+
+/* Android 返回键 / 侧边返回手势入口（MainActivity.onBackPressed 查询）：
+   返回 true = 已消化（关浮层 / 路由退一级）；false = 已在根视图，
+   原生自行收尾 —— 播放中退后台保播放，空闲才退出。
+   层级顺序与 Esc 一致：K 歌层 > 确认框 > 菜单 > 抽屉 > 路由栈。 */
+window.__elysiumBack = () => {
+  /* KAR / state 都是脚本级 const（不在 window 上），hook 只会在整页加载后被
+     原生调起，此时初始化必然完成 —— 直接裸引用，别用 window.KAR 短路。 */
+  if (KAR.open) { karClose(); return true; }
+  const ask = $('#askLayer');
+  if (ask && !ask.hidden) { _askDone(null); return true; }
+  const qm = $('#qmenu'), cm = $('#ctxmenu');
+  if ((qm && !qm.hidden) || (cm && !cm.hidden)) {
+    closeQualityMenu();
+    closeCtxMenu();
+    return true;
+  }
+  let closed = false;
+  ['npDrawer', 'panelDrawer', 'settingsDrawer', 'importDrawer', 'syncDrawer']
+    .forEach((id) => {
+      const el = document.getElementById(id);
+      if (el && !el.hidden) { el.hidden = true; closed = true; }
+    });
+  const side = document.querySelector('.side');
+  if (side && side.classList.contains('open')) {
+    side.classList.remove('open');
+    closed = true;
+  }
+  if (closed) {
+    // 遮罩显隐由 MutationObserver 跟着抽屉 hidden 同步；移除 side.open 不是属性
+    // 变更，同 Esc：直接归位，别留一层压暗。
+    const mask = $('#drawerMask');
+    if (mask) mask.hidden = true;
+    return true;
+  }
+  if (state.stack.length) { goBack(); return true; }
+  return false;
+};
 
 /* 原生（Android PlaybackService）→ 页面的命令入口；桌面端不会被调用 */
 window.__elysiumMedia = (cmd, arg) => {

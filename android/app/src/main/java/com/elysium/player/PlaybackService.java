@@ -71,6 +71,10 @@ public class PlaybackService extends Service {
     private Bitmap coverBmp;
     private String coverLoaded = "";
 
+    /** 最近一次推送的播放态（页面约 3s 节流）：MainActivity 返回键据此决定
+        退后台还是退出 —— 音频在 WebView 里，播放中 finish 会掐断播放。 */
+    static volatile boolean lastPlaying = false;
+
     /** JS 桥入口：起服务并投递状态 JSON（可从任意线程调用）。 */
     public static void push(Context c, String json) {
         Intent it = new Intent(c, PlaybackService.class).setAction(ACTION_PUSH);
@@ -157,6 +161,7 @@ public class PlaybackService extends Service {
     private void applyState(JSONObject j) {
         meta = j;
         boolean playing = j.optBoolean("playing", false);
+        lastPlaying = playing;
         updateWake(playing);
         updateSession(playing);
         startForegroundTyped(buildNotification(playing));
