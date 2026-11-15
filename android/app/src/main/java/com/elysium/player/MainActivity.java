@@ -8,6 +8,7 @@ import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.Window;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
@@ -22,6 +23,8 @@ import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
+
+import org.json.JSONObject;
 
 import java.io.File;
 import java.lang.ref.WeakReference;
@@ -116,6 +119,84 @@ public class MainActivity extends Activity {
             PlaybackService.push(MainActivity.this, json);
         }
 
+        /* —— K 歌原生直通耳返（2026-11-14，见 KaraokeMonitor / KaraokeMonitorHub）——
+           页面只在 Android + 本桥可用时启用；所有调用都返回 JSON 字符串，
+           失败由页面回退 WebView 耳返。引擎只在前台 Activity 期间运行，
+           onStop 会停，不声明麦克风 FGS。
+           beta10：每个桥方法套 try/catch —— 桥线程抛异常会直接杀进程（闪退），
+           一律转成 {ok:false,...} 并落面包屑（见 CrashLog），自检面板可读。 */
+        @JavascriptInterface
+        public String startKaraokeMonitor(String json) {
+            CrashLog.log("bridge startKaraokeMonitor begin");
+            try {
+                String r = KaraokeMonitorHub.get().start(MainActivity.this, json);
+                CrashLog.log("bridge startKaraokeMonitor ok");
+                return r;
+            } catch (Throwable t) {
+                CrashLog.log("bridge startKaraokeMonitor throw\n" + Log.getStackTraceString(t));
+                return errJson("bridge_throw", t);
+            }
+        }
+
+        @JavascriptInterface
+        public String updateKaraokeMonitor(String json) {
+            try {
+                return KaraokeMonitorHub.get().update(json);
+            } catch (Throwable t) {
+                CrashLog.log("bridge updateKaraokeMonitor throw\n" + Log.getStackTraceString(t));
+                return errJson("bridge_throw", t);
+            }
+        }
+
+        @JavascriptInterface
+        public String karaokeMonitorStatus() {
+            try {
+                return KaraokeMonitorHub.get().status();
+            } catch (Throwable t) {
+                CrashLog.log("bridge karaokeMonitorStatus throw\n" + Log.getStackTraceString(t));
+                return errJson("bridge_throw", t);
+            }
+        }
+
+        @JavascriptInterface
+        public void stopKaraokeMonitor() {
+            CrashLog.log("bridge stopKaraokeMonitor begin");
+            try {
+                KaraokeMonitorHub.get().stop();
+                CrashLog.log("bridge stopKaraokeMonitor ok");
+            } catch (Throwable t) {
+                CrashLog.log("bridge stopKaraokeMonitor throw\n" + Log.getStackTraceString(t));
+            }
+        }
+
+        @JavascriptInterface
+        public String startKaraokeMonitorDiag(String json) {
+            CrashLog.log("bridge startKaraokeMonitorDiag begin");
+            try {
+                String r = KaraokeMonitorHub.get().startDiag(MainActivity.this, json);
+                CrashLog.log("bridge startKaraokeMonitorDiag ok");
+                return r;
+            } catch (Throwable t) {
+                CrashLog.log("bridge startKaraokeMonitorDiag throw\n" + Log.getStackTraceString(t));
+                return errJson("bridge_throw", t);
+            }
+        }
+
+        @JavascriptInterface
+        public void stopKaraokeMonitorDiag() {
+            try {
+                KaraokeMonitorHub.get().stopDiag();
+            } catch (Throwable t) {
+                CrashLog.log("bridge stopKaraokeMonitorDiag throw\n" + Log.getStackTraceString(t));
+            }
+        }
+
+        /** 自检面板读崩溃/桥面包屑尾部（beta10）。 */
+        @JavascriptInterface
+        public String crashLog() {
+            return CrashLog.tail(12000);
+        }
+
         /** 页面 → 原生：主题切换时同步系统栏图标明暗（浅色页配深色图标，
             否则 edge-to-edge 下白底白图标看不见）。深浅色以外的值一律按深色。 */
         @JavascriptInterface
@@ -150,6 +231,11 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         ref = new WeakReference<>(this);
+        // 崩溃/桥面包屑：beta9「唱完闪退」无法定位（用户侧没有 adb），beta10 起
+        // 证据落应用外部目录 crash-log.txt，自检面板经 crashLog() 桥读取。
+        CrashLog.init(getApplicationContext());
+        CrashLog.install();
+        CrashLog.log("app create version=" + Build.VERSION.SDK_INT);
         // edge-to-edge：窗口画进状态栏/导航栏后面，页面用 env(safe-area-inset-*)
         // 自留安全区（index.html 的 viewport-fit=cover 与 style.css 的 padding
         // 早就按这个约定写好了，但原生侧一直没开 —— 手势条区域落在窗口外，
@@ -246,6 +332,19 @@ public class MainActivity extends Activity {
         waitAndLoad();
     }
 
+    /** 桥方法 catch 到 Throwable 时的统一返回体；让页面走回退而不是跟着崩。 */
+    private static String errJson(String code, Throwable t) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("ok", false);
+            o.put("error", code);
+            o.put("detail", String.valueOf(t));
+            return o.toString();
+        } catch (Exception e) {
+            return "{\"ok\":false,\"error\":\"" + code + "\"}";
+        }
+    }
+
     /** WebView 只加载 127.0.0.1（见 shouldOverrideUrlLoading）；权限也只给这个源。 */
     private static boolean isLocalOrigin(Uri u) {
         if (u == null) {
@@ -315,6 +414,17 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onStop() {
+        // 麦克风只能在前台 Activity 使用（Android 9+）；离前台立刻停直通，
+        // 页面 visibilitychange 会在回到前台且仍在演唱时重新拉起。
+        CrashLog.log("activity onStop begin");
+        KaraokeMonitorHub.get().stop();
+        KaraokeMonitorHub.get().stopDiag();
+        CrashLog.log("activity onStop done");
+        super.onStop();
+    }
+
+    @Override
     protected void onDestroy() {
         if (pendingMic != null) {
             try {
@@ -323,6 +433,8 @@ public class MainActivity extends Activity {
             }
             pendingMic = null;
         }
+        KaraokeMonitorHub.get().stop();
+        KaraokeMonitorHub.get().stopDiag();
         // 壳退出：撤掉前台服务与通知，别留一个点不动的控制面板。
         // 旋转等配置变化走 configChanges 不重建；真重建（isFinishing=false）时保留服务。
         if (isFinishing()) {

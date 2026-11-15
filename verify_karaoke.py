@@ -7,6 +7,18 @@ B 组（后端，纯标准库 urllib）
   B7  非法 id 一律 400（路径穿越）                B8  小于 WAV 头拒收
   B9  export 不含 works                          B10 /api/store 非法 id 不入库
   B11 删除后列表空、文件清干净                    B12 重复删除幂等
+  B13 karaoke_native_mon 落盘 round-trip
+
+N 组（Android UA + CDP 注入假 ElysiumAndroid 桥；原生直通 2026-11-14）
+  N1  桌面/无桥：原生行不出现、WebView 耳返链路不变
+  N2  Android + 桥：原生行显示且默认开
+  N3  开唱调 start：gain/toneDb/muted 正确 + WebView 耳返静音
+  N4  人声推子 / 音色实时镜像到原生
+  N5  耳返开关只切原生 mute，WebView 耳返始终静音
+  N6  start 失败：回退 WebView 耳返、开唱不受影响
+  N7  引擎停止：看门狗回退并恢复 WebView 耳返
+  N8  karStop 停原生：回顾页不再监听
+  N9  返回键关 K 歌并停原生
 
 U 组（Chrome 假麦端到端）
   U1  K 歌层 CSS：fixed / z-index 70 / 铺满视口 / 默认 hidden
@@ -131,6 +143,101 @@ def make_driver():
     return d
 
 
+def make_native_driver():
+    """N 组：Android UA + 假桥。手机视口，原生行才不会被窄抽屉布局挤掉。"""
+    o = Options()
+    for a in ("--headless=new", "--disable-gpu", "--window-size=390,844",
+              "--lang=zh-CN", "--autoplay-policy=no-user-gesture-required",
+              "--use-fake-ui-for-media-stream",
+              "--use-fake-device-for-media-stream"):
+        o.add_argument(a)
+    o.set_capability("goog:loggingPrefs", {"browser": "ALL"})
+    d = webdriver.Chrome(options=o)
+    d.set_window_size(390, 844)
+    d.set_page_load_timeout(45)
+    d.set_script_timeout(60)
+    return d
+
+
+# 注入在 app.js 之前：ELYSIUM_PLATFORM 先于页面执行，karNativeBridge 才认。
+# 假桥记录调用并回放可改的响应；N6/N7 直接改 __fakeNative.startResp/statusResp。
+FAKE_BRIDGE_JS = r"""
+window.ELYSIUM_PLATFORM = 'android';
+window.__fakeNative = {
+  calls: [], polls: 0,
+  startResp: {ok:true, source:'unprocessed', sampleRate:48000, chunkFrames:256,
+              recordBufFrames:1024, trackBufFrames:1024, recordBufMs:21.3,
+              trackBufMs:21.3, performanceMode:'low_latency', route:'wired_headset'},
+  statusResp: {ok:true, running:true, inRms:0.02, outRms:0.02, underruns:0,
+               route:'wired_headset', source:'unprocessed', sampleRate:48000,
+               recordBufFrames:1024, trackBufFrames:1024, lastError:''},
+  updateResp: {ok:true},
+  diagResp: {ok:true}
+};
+window.ElysiumAndroid = {
+  openUrl(){ return false; }, openAppSettings(){ return false; },
+  installUpdate(){ return false; }, mediaUpdate(){}, themeUpdate(){},
+  startKaraokeMonitor(cfg){
+    window.__fakeNative.calls.push(['start', JSON.parse(cfg)]);
+    return JSON.stringify(window.__fakeNative.startResp);
+  },
+  updateKaraokeMonitor(cfg){
+    window.__fakeNative.calls.push(['update', JSON.parse(cfg)]);
+    return JSON.stringify(window.__fakeNative.updateResp);
+  },
+  karaokeMonitorStatus(){
+    window.__fakeNative.polls += 1;
+    return JSON.stringify(window.__fakeNative.statusResp);
+  },
+  stopKaraokeMonitor(){ window.__fakeNative.calls.push(['stop']); },
+  startKaraokeMonitorDiag(){ window.__fakeNative.calls.push(['diag']); return JSON.stringify(window.__fakeNative.diagResp); },
+  stopKaraokeMonitorDiag(){ window.__fakeNative.calls.push(['diagstop']); }
+};
+"""
+
+
+def native_open(dn, wid):
+    """在 Android 假桥页里打开 K 歌 ready 页（歌词接口打桩，避免上游抖动）。"""
+    dn.execute_script("window.__kItem = arguments[0];", {
+        "platform": "work", "id": wid, "name": "测试伴奏",
+        "artist": "信号组", "cover": "", "duration": 3,
+    })
+    return dn.execute_async_script(r"""
+    const done = arguments[arguments.length - 1];
+    (async () => {
+      const orig = window.rpc;
+      if (typeof orig === 'function') {
+        window.rpc = (fn, p) => (fn === 'getlyric'
+          ? Promise.resolve({ lyric: '' }) : orig(fn, p));
+      }
+      try { await karaokeStart(window.__kItem); done({ ok: true, phase: KAR.phase }); }
+      catch (e) { done({ ok: false, error: String(e) }); }
+    })();
+    """)
+
+
+def native_begin(dn):
+    dn.execute_script("document.getElementById('kBegin').click();")
+    return wait_js(dn, "KAR.phase === 'sing' ? KAR.phase : null", timeout=30)
+
+
+def native_state(dn):
+    return dn.execute_script(r"""
+    return {
+      calls: window.__fakeNative.calls.slice(),
+      polls: window.__fakeNative.polls,
+      on: KAR.native.on, failed: KAR.native.failed, reason: KAR.native.reason,
+      wanted: KAR.native.wanted,
+      gate: KAR.echoGate ? KAR.echoGate.gain.value : -1,
+      layer: document.getElementById('singLayer').hidden,
+      phase: KAR.phase,
+      rowHidden: document.getElementById('kNativeRow').hidden,
+      rowChecked: document.getElementById('kNative').checked,
+      info: document.getElementById('kNativeInfo').textContent,
+    };
+    """)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--keep", action="store_true")
@@ -139,6 +246,7 @@ def main():
     base_dir = tempfile.mkdtemp(prefix="elysium_kar_")
     proc = None
     d = None
+    dn = None
     wid = ""
     new_rows = []
     try:
@@ -557,6 +665,129 @@ def main():
         check("U11 无未捕获的严重异常", not errs,
               "; ".join(e["message"][:120] for e in errs[:3]))
 
+        # ---------------------------------------------------------- N 组原生直通
+        # 桌面驱动（无桥）先确认整段退场：老用户/桌面链路零变化。
+        n1 = d.execute_script(
+            "return {hidden: document.getElementById('kNativeRow').hidden,"
+            " bridge: !!karNativeBridge()};")
+        check("N1 桌面/无桥：原生行不出现、WebView 耳返链路不变",
+              n1.get("hidden") and not n1.get("bridge"), str(n1))
+
+        dn = make_native_driver()
+        dn.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
+                           {"source": FAKE_BRIDGE_JS})
+        dn.get(base + "/")
+        time.sleep(2.0)
+
+        # —— 成功链路：显示 → 启动 → 参数镜像 → 耳返开关 → 停止 → 返回键
+        open_res = native_open(dn, wid)
+        n2 = native_state(dn)
+        check("N2 Android + 桥：原生行显示且默认开",
+              not open_res.get("error") and not n2["rowHidden"]
+              and n2["rowChecked"] and n2["wanted"] is True
+              and n2["phase"] == "ready", str(n2)[:160])
+
+        phase = native_begin(dn)
+        wait_js(dn, "KAR.echoGate && KAR.echoGate.gain.value < 0.05 ? true : null",
+                timeout=6)
+        n3 = native_state(dn)
+        starts = [c for c in n3["calls"] if c[0] == "start"]
+        check("N3 开唱调 start：gain/toneDb/muted 正确 + WebView 耳返静音",
+              phase == "sing" and len(starts) == 1
+              and starts[0][1].get("gain") == 1
+              and starts[0][1].get("toneDb") == 0
+              and starts[0][1].get("muted") is False
+              and n3["on"] and n3["gate"] < 0.05,
+              "starts=%s gate=%.3f" % (str(starts[:1]), n3["gate"]))
+
+        dn.execute_script(r"""
+        const m = document.getElementById('kMicVol');
+        m.value = '70'; m.dispatchEvent(new Event('input'));
+        const t = document.getElementById('kTone');
+        t.value = '3'; t.dispatchEvent(new Event('input'));
+        """)
+        time.sleep(0.3)
+        n4 = native_state(dn)
+        ups4 = [c[1] for c in n4["calls"] if c[0] == "update"]
+        check("N4 人声推子 / 音色实时镜像到原生",
+              any(abs(float(u.get("gain", -1)) - 0.7) < 1e-6 for u in ups4)
+              and any(abs(float(u.get("toneDb", -99)) - 3) < 1e-6 for u in ups4),
+              str(ups4[-3:]))
+
+        dn.execute_script(
+            "const e=document.getElementById('kEcho');"
+            " e.checked=false; e.dispatchEvent(new Event('change'));")
+        time.sleep(0.3)
+        n5a = native_state(dn)
+        dn.execute_script(
+            "const e=document.getElementById('kEcho');"
+            " e.checked=true; e.dispatchEvent(new Event('change'));")
+        time.sleep(0.3)
+        n5b = native_state(dn)
+        ups5 = [c[1] for c in n5b["calls"] if c[0] == "update"]
+        check("N5 耳返开关只切原生 mute，WebView 耳返始终静音",
+              any(u.get("muted") is True for u in ups5)
+              and any(u.get("muted") is False for u in ups5)
+              and n5a["gate"] < 0.05 and n5b["gate"] < 0.05,
+              "gate=%.3f/%.3f" % (n5a["gate"], n5b["gate"]))
+
+        dn.execute_script("karStop();")
+        time.sleep(0.3)
+        n8 = native_state(dn)
+        check("N8 karStop 停原生：回顾页不再监听",
+              any(c[0] == "stop" for c in n8["calls"])
+              and not n8["on"] and n8["phase"] == "review",
+              str(n8["calls"][-3:]))
+
+        dn.execute_script("karClose();")
+        time.sleep(0.3)
+        dn.execute_script("window.__fakeNative.calls = [];")
+        open_res = native_open(dn, wid)
+        phase = native_begin(dn)
+        wait_js(dn, "KAR.native.on === true ? true : null", timeout=5)
+        back = dn.execute_script("return window.__elysiumBack();")
+        time.sleep(0.3)
+        n9 = native_state(dn)
+        check("N9 返回键关 K 歌并停原生",
+              phase == "sing" and back is True and n9["layer"] is True
+              and n9["phase"] == "" and any(c[0] == "stop" for c in n9["calls"]),
+              "back=%s layer=%s phase=%s" % (back, n9["layer"], n9["phase"]))
+
+        # —— 启动失败：回退 WebView 耳返，不影响开唱
+        dn.get(base + "/")
+        time.sleep(2.0)
+        dn.execute_script(
+            "window.__fakeNative.startResp = {ok:false,error:'mic_busy',detail:'busy'};")
+        open_res = native_open(dn, wid)
+        phase = native_begin(dn)
+        time.sleep(0.4)
+        n6 = native_state(dn)
+        check("N6 start 失败：回退 WebView 耳返、开唱不受影响",
+              phase == "sing" and not n6["on"] and n6["failed"]
+              and n6["gate"] > 0.9
+              and any(c[0] == "start" for c in n6["calls"]),
+              "gate=%.3f failed=%s reason=%s"
+              % (n6["gate"], n6["failed"], n6["reason"]))
+        dn.execute_script("karClose();")
+
+        # —— 引擎停止/抢麦：看门狗回退并恢复 WebView 耳返
+        dn.get(base + "/")
+        time.sleep(2.0)
+        open_res = native_open(dn, wid)
+        phase = native_begin(dn)
+        wait_js(dn, "KAR.native.on === true ? true : null", timeout=5)
+        dn.execute_script("window.__fakeNative.statusResp.running = false;")
+        ok7 = wait_js(dn, "KAR.native.on === false && KAR.native.failed ? true : null",
+                      timeout=6)
+        wait_js(dn, "KAR.echoGate && KAR.echoGate.gain.value > 0.9 ? true : null",
+                timeout=5)
+        n7 = native_state(dn)
+        check("N7 引擎停止：看门狗回退并恢复 WebView 耳返",
+              bool(ok7) and n7["gate"] > 0.9
+              and ("停止" in (n7["reason"] or "") or "不可用" in (n7["reason"] or "")),
+              "ok=%s gate=%.3f reason=%s" % (ok7, n7["gate"], n7["reason"]))
+        dn.execute_script("karClose();")
+
         # ---------------------------------------------------------- 收尾清理
         for w in [x["id"] for x in new_rows] + [wid]:
             jpost(base, "/api/works/delete", {"id": w})
@@ -569,12 +800,25 @@ def main():
         st = jpost(base, "/api/works/delete", {"id": wid})
         check("B12 重复删除幂等（文件已不在也算成功）", st.get("ok") is True, str(st)[:80])
 
+        # 原生直通设置键是 bool 透传：关/开各写一次，GET 读回确认落盘。
+        jpost(base, "/api/store",
+              {"op": "settings", "payload": {"karaoke_native_mon": False}})
+        cfg = req(base, "/api/store").get("settings") or {}
+        off_ok = cfg.get("karaoke_native_mon") is False
+        jpost(base, "/api/store",
+              {"op": "settings", "payload": {"karaoke_native_mon": True}})
+        cfg = req(base, "/api/store").get("settings") or {}
+        on_ok = cfg.get("karaoke_native_mon") is True
+        check("B13 karaoke_native_mon 落盘 round-trip", off_ok and on_ok,
+              "off=%s on=%s" % (off_ok, on_ok))
+
     finally:
-        try:
-            if d:
-                d.quit()
-        except Exception:
-            pass
+        for drv in (d, dn):
+            try:
+                if drv:
+                    drv.quit()
+            except Exception:
+                pass
         try:
             if proc:
                 proc.terminate()

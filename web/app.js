@@ -5322,6 +5322,13 @@ function viewSettings() {
         <button class="btn sm" id="diagMicBtn">测麦克风延迟</button>
       </div>
     </div>
+    <div class="field" id="diagNativeRow" hidden>
+      <div><label>原生耳返自检</label><p class="tip">原生 AudioRecord→AudioTrack 直通链的实测往返：拔耳机、媒体音量最大、安静环境，8 发脉冲约 9 秒。用来和上面的 WebView 数字对比；跑的时候别再放歌</p></div>
+      <div class="field-acts">
+        <button class="btn sm" id="diagNativeBtn">测原生直通</button>
+        <button class="btn sm ghost" id="diagCrashBtn">崩溃日志</button>
+      </div>
+    </div>
     <div id="diagOut"></div>
   </div>
 
@@ -5711,6 +5718,9 @@ function bindSettings() {
     postSettings({ [k]: v });
   };
   const on = (sel, ev, fn) => { const el = $(sel); if (el) el.addEventListener(ev, fn); };
+  // 原生直通自检只在 Android + 桥可用时出现；桌面/旧 APK 整行退场
+  const dnr = $('#diagNativeRow');
+  if (dnr) dnr.hidden = !karNativeBridge();
 
   on('#setQuality', 'change', (e) => { state.quality = e.target.value; save('quality', e.target.value); });
   on('#setPlayQuality', 'change', (e) => { save('play_quality', e.target.value); toast('下次播放起生效，当前曲目可在播放条直接切'); });
@@ -5948,6 +5958,101 @@ function bindSettings() {
     }
     btn.disabled = false;
     btn.textContent = '测麦克风延迟';
+  });
+
+  /* ---- 原生耳返自检：同一把尺，量原生 AudioRecord→AudioTrack 链 ----
+     结果从 status().diag 轮询；不阻塞页面（Java 侧后台线程跑 9 秒）。 */
+  on('#diagNativeBtn', 'click', () => {
+    const b = karNativeBridge();
+    const btn = $('#diagNativeBtn'), out = $('#diagOut');
+    if (!b || typeof b.startKaraokeMonitorDiag !== 'function') {
+      toast('这个版本没有原生直通', 'err');
+      return;
+    }
+    if (KAR.open) { toast('先退出 K 歌再测原生直通', 'err'); return; }
+    const a = audio();
+    if (state.playing && a.src && !a.paused) {
+      toast('测量需要安静环境：先暂停播放再跑自检', 'err');
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = '测量中…';
+    out.innerHTML = '<div class="diag-detail dim">原生直通自检：扬声器会放 8 发短脉冲（约 9 秒），拔耳机、保持安静、别遮麦克风…</div>';
+    let res = null;
+    try { res = JSON.parse(b.startKaraokeMonitorDiag('{}') || '{}'); }
+    catch (e) { res = null; }
+    if (!res || !res.ok) {
+      btn.disabled = false;
+      btn.textContent = '测原生直通';
+      out.innerHTML = '<div class="diag-detail bad">原生自检启动失败：'
+        + esc((res && (res.error || res.detail)) || '未知错误') + '</div>';
+      return;
+    }
+    const t0 = Date.now();
+    const poll = () => {
+      let st = null;
+      try { st = JSON.parse(b.karaokeMonitorStatus() || '{}'); } catch (e) { st = null; }
+      const d = st && st.diag;
+      if (d && (d.done || d.error)) {
+        btn.disabled = false;
+        btn.textContent = '测原生直通';
+        if (d.error) {
+          out.innerHTML = '<div class="diag-detail bad">原生自检失败：' + esc(d.error) + '</div>';
+          return;
+        }
+        const hits = Array.isArray(d.hits) ? d.hits : [];
+        const rtt = d.rttMs == null ? NaN : Number(d.rttMs);
+        const route = d.route || (st && st.route) || '';
+        let verdict;
+        if (!hits.length || !Number.isFinite(rtt)) {
+          verdict = ['bad', '没测到脉冲：媒体音量最大、离扬声器近一点、别用耳机，再测一次'];
+        } else if (rtt <= 60) {
+          verdict = ['dim', '原生直通可用：比 WebView 链路（实测 179ms）低一个数量级'];
+        } else if (rtt <= 90) {
+          verdict = ['dim', '原生直通可用：仍在 90ms 目标以内'];
+        } else {
+          verdict = ['warn', '原生直通偏大：已低于 WebView，但没到 90ms 目标；记录数字后再决定是否上 Oboe'];
+        }
+        const row = (name, val) => '<div class="diag-row"><span class="diag-mark">✓</span>'
+          + '<span class="diag-name">' + name + '</span>'
+          + '<span class="mono diag-ms">' + val + '</span></div>';
+        const engRow = d.engine ? row('引擎 / 缓冲', esc(
+          String(d.engine) + (d.api ? ' · ' + d.api : '')
+          + (d.bufferFrames ? ' · ' + Math.round(Number(d.bufferFrames)) + ' 帧' : '')
+          + (d.inputLatencyMs != null ? ' · 入 ' + d.inputLatencyMs + 'ms' : '')
+          + (d.outputLatencyMs != null ? ' · 出 ' + d.outputLatencyMs + 'ms' : ''))) : '';
+        out.innerHTML = row('原生往返延迟（耳返体感）', Number.isFinite(rtt) ? rtt + ' ms' : '未测到')
+          + row('区间 / 命中', (d.minMs == null ? '—' : d.minMs) + '–' + (d.maxMs == null ? '—' : d.maxMs)
+            + ' ms · ' + hits.length + ' 发')
+          + row('输出路由', esc(route || '—'))
+          + engRow
+          + '<div class="diag-detail ' + verdict[0] + '">' + esc(verdict[1]) + '</div>';
+        return;
+      }
+      if (Date.now() - t0 > 15000) {
+        btn.disabled = false;
+        btn.textContent = '测原生直通';
+        out.innerHTML = '<div class="diag-detail bad">原生自检超时（15s）</div>';
+        return;
+      }
+      setTimeout(poll, 400);
+    };
+    setTimeout(poll, 400);
+  });
+
+  /* ---- 崩溃/桥面包屑：闪退后打开这里，最后一条就是断点（beta10） ---- */
+  on('#diagCrashBtn', 'click', () => {
+    const b = karNativeBridge();
+    const out = $('#diagOut');
+    if (!b || typeof b.crashLog !== 'function') {
+      out.innerHTML = '<div class="diag-detail bad">这个版本没有崩溃日志接口</div>';
+      return;
+    }
+    let txt = '';
+    try { txt = String(b.crashLog() || ''); } catch (e) { txt = '读取失败：' + e; }
+    out.innerHTML = '<div class="diag-detail mono" style="white-space:pre-wrap;word-break:break-all">'
+      + esc(txt.trim() || '暂无记录（本轮没有捕获到崩溃/桥异常）') + '</div>'
+      + '<div class="diag-detail dim">文件在 Android/data/com.elysium.player/files/，复制时请整份带上</div>';
   });
 
   /* ---- 窗口 ---- */
@@ -6656,8 +6761,9 @@ function bind() {
     }
   });
 
-  window.addEventListener('pagehide', () => saveLastTrack(true));
-  window.addEventListener('beforeunload', () => saveLastTrack(true));
+  const pageHide = () => { saveLastTrack(true); karNativeStop(false); };
+  window.addEventListener('pagehide', pageHide);
+  window.addEventListener('beforeunload', pageHide);
   // 页面滚动时收起浮层（浮层是 fixed，滚动后会脱离锚点）
   window.addEventListener('scroll', () => { closeQualityMenu(); closeCtxMenu(); }, true);
 
@@ -7368,6 +7474,12 @@ const KAR = {
   open: false, item: null, phase: '',     // '' | 'ready' | 'count' | 'sing' | 'review'
   ctx: null, el: null, cancel: null, orig: null, acc: null,
   micGain: null, wet: null, micLevel: 0, micStream: null,
+  monOut: null,                                    // 监听出口增益：原生直通时 −3dB headroom
+  // --- 原生直通（Android，2026-11-14）---
+  // 只把干声耳返搬原生；录音/混响/音准仍走上面的 WebAudio 图。
+  // failed = 本场启动失败或看门狗回退，不再自动重试；wanted 跟设置键走。
+  native: { supported: false, wanted: true, on: false, failed: false,
+    muted: false, stats: null, reason: '', badNative: 0, badWeb: 0, lastPoll: 0 },
   chunks: [], lines: [], sung: [], lastLine: -1, raf: 0,
   accVol: 0.9, micVol: 1.0, vocalOff: false,
   resume: null, t0: 0, saving: false, duration: 0,
@@ -7401,6 +7513,198 @@ const KAR_SING_THR = 0.035;   // 跟唱判定：行内 mic RMS 超过它算「�
 /* getUserMedia 必须绑在 mediaDevices 上调用：摘成裸函数再调会 Illegal invocation。 */
 const KAR_MON = () => (navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
   ? navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices) : null;
+
+/* ============================ 原生直通耳返（Android） ============================
+   设计见 plans/NATIVE-MON-2026-11-14.md。要点：
+   - 双采集：WebView 的 getUserMedia 继续供录音/混响/音准；原生另开一路只做干声耳返。
+   - 不做人声补偿：伴奏输出延迟对「人声 vs 伴奏」是共模，真正偏移来自采集缓冲；
+     原生把采集从 ~110ms 压到 ~5–10ms，偏移自然消失。加补偿只会放大偏移。
+   - 任何失败/抢麦都回退 WebView 耳返，本场不再自动重试，不把 K 歌搞哑。
+   桥只在 Android 宿主注入；桌面/旧 APK 上 karNativeBridge() 返回 null，整段退场。 */
+function karNativeBridge() {
+  if (!IS_ANDROID) return null;
+  const b = window.ElysiumAndroid;
+  return (b && typeof b.startKaraokeMonitor === 'function'
+    && typeof b.karaokeMonitorStatus === 'function') ? b : null;
+}
+
+function karNativeWanted() {
+  const v = state.settings && state.settings.karaoke_native_mon;
+  return !(v === false || v === 'false' || v === 0 || v === '0');
+}
+
+function karNativeSetWebEcho(on) {
+  if (!KAR.echoGate || !KAR.ctx) return;
+  try {
+    KAR.echoGate.gain.setTargetAtTime(on ? 1 : 0, KAR.ctx.currentTime, 0.03);
+  } catch (e) {
+    KAR.echoGate.gain.value = on ? 1 : 0;
+  }
+}
+
+/** 原生人声进的是 OS 混音器，WebAudio 的 mon 限幅管不到它。
+    原生开着时给伴奏监听分支 −3dB，留出求和 headroom（录音总线不动）。 */
+function karNativeTrim(on) {
+  if (!KAR.monOut || !KAR.ctx) return;
+  const v = on ? 0.708 : 1;                 // 10^(-3/20)
+  try {
+    KAR.monOut.gain.setTargetAtTime(v, KAR.ctx.currentTime, 0.03);
+  } catch (e) {
+    KAR.monOut.gain.value = v;
+  }
+}
+
+function karNativeStart() {
+  const N = KAR.native;
+  const b = karNativeBridge();
+  N.supported = !!b;
+  if (!b || N.wanted === false || N.failed) { karNativePaint(); return false; }
+  if (!KAR.echo) { karNativePaint(); return false; }   // 耳返关着就不开原生麦
+  if (N.on || KAR.noMic || !KAR.ctx || !KAR.micStream) return false;
+  const cfg = {
+    gain: Number(KAR.micVol) || 1,
+    toneDb: Number(state.settings.karaoke_voice_tone ?? 0) || 0,
+    muted: !KAR.echo,
+  };
+  let res = null;
+  try { res = JSON.parse(b.startKaraokeMonitor(JSON.stringify(cfg)) || '{}'); }
+  catch (e) { res = null; }
+  if (!res || !res.ok) {
+    N.on = false;
+    N.failed = true;
+    N.reason = (res && (res.error || res.detail)) || '启动失败';
+    karNativePaint();
+    toast('原生直通启动失败，已回退 WebView 耳返', 'err');
+    return false;
+  }
+  N.on = true;
+  N.failed = false;
+  N.reason = '';
+  N.stats = res;
+  N.muted = !KAR.echo;
+  N.badNative = 0;
+  N.badWeb = 0;
+  N.lastPoll = 0;
+  karNativeSetWebEcho(false);     // 静音 WebAudio 耳返，避免双重人声
+  karNativeTrim(true);
+  karNativePaint();
+  return true;
+}
+
+function karNativeUpdate(patch) {
+  if (!KAR.native.on) return;
+  const b = karNativeBridge();
+  if (!b || typeof b.updateKaraokeMonitor !== 'function') return;
+  try { b.updateKaraokeMonitor(JSON.stringify(patch || {})); } catch (e) { /* 桥忙，下个参数变更再试 */ }
+}
+
+/** restoreEcho=true：回退/手动关原生时把 WebView 耳返接回来；
+    false：回顾/关闭页面/切后台，只停原生，不恢复监听。 */
+function karNativeStop(restoreEcho) {
+  const N = KAR.native;
+  const b = karNativeBridge();
+  if (N.on || N.stats) {
+    try { if (b && typeof b.stopKaraokeMonitor === 'function') b.stopKaraokeMonitor(); }
+    catch (e) { /* 引擎可能已自行退出 */ }
+  }
+  N.on = false;
+  N.stats = null;
+  N.muted = false;
+  N.badNative = 0;
+  N.badWeb = 0;
+  N.lastPoll = 0;
+  if (KAR.ctx) {
+    karNativeTrim(false);
+    if (restoreEcho && KAR.echo) karNativeSetWebEcho(true);
+  }
+}
+
+function karNativeFallback(reason) {
+  const N = KAR.native;
+  if (!N.on) return;
+  N.failed = true;
+  N.reason = reason || '原生直通异常';
+  karNativeStop(true);
+  karNativePaint();
+  toast('原生直通不可用（' + N.reason + '），已回退 WebView 耳返', 'err');
+}
+
+/** 1s 一次的状态轮询兼看门狗：双向 RMS 判定谁抢了麦。
+    原生没声 + WebView 有声 = 原生被占用；WebView 没声 + 原生有声 = 原生抢麦。 */
+function karNativePoll() {
+  const N = KAR.native;
+  if (!N.on) return;
+  const b = karNativeBridge();
+  if (!b) { karNativeFallback('原生桥不可用'); return; }
+  const now = Date.now();
+  if (now - (N.lastPoll || 0) < 1000) return;
+  N.lastPoll = now;
+  let st = null;
+  try { st = JSON.parse(b.karaokeMonitorStatus() || '{}'); } catch (e) { st = null; }
+  if (!st || st.ok === false) { karNativeFallback('状态读取失败'); return; }
+  N.stats = st;
+  if (!st.running) { karNativeFallback(st.lastError || '原生引擎已停止'); return; }
+  const lvl = KAR.micLevel || 0;
+  const inRms = Number(st.inRms) || 0;
+  if (inRms < 0.002 && lvl > 0.02) {
+    N.badNative = (N.badNative || 0) + 1;
+    if (N.badNative >= 3) { karNativeFallback('原生采集被占用'); return; }
+  } else {
+    N.badNative = 0;
+  }
+  if (lvl < 0.002 && inRms > 0.01) {
+    N.badWeb = (N.badWeb || 0) + 1;
+    if (N.badWeb >= 3) { karNativeFallback('原生采集影响了 WebView 录音'); return; }
+  } else {
+    N.badWeb = 0;
+  }
+  karNativePaint();
+}
+
+function karNativePaint() {
+  const row = $('#kNativeRow'), info = $('#kNativeInfo'), box = $('#kNative');
+  const supported = !!karNativeBridge();
+  KAR.native.supported = supported;
+  if (!row || !info) return;
+  row.hidden = !supported;
+  info.hidden = !supported;
+  if (!supported) return;
+  if (box) box.checked = KAR.native.wanted !== false;
+  const N = KAR.native;
+  const st = N.stats;
+  let txt;
+  let warn = false;
+  if (N.on && st) {
+    const rate = st.sampleRate ? Math.round(Number(st.sampleRate) / 1000) + 'k' : '—';
+    const rb = Math.round(Number(st.recordBufMs) || 0);
+    const tb = Math.round(Number(st.trackBufMs) || 0);
+    const eng = st.engine === 'oboe' ? 'Oboe' : '';
+    txt = `原生直通${eng ? ' · ' + eng : ''} · ${rate} · 缓冲 ${rb}/${tb}ms`;
+    if (st.engine === 'java') { txt += ' · 回退 Java'; warn = true; }
+    if (st.engine === 'oboe') {
+      if (st.source) txt += ` · ${st.source}`;
+      if (st.ringMs != null) txt += ` · 环 ${Math.round(Number(st.ringMs) || 0)}ms`;
+      const u = Number(st.underruns) || 0, o = Number(st.overruns) || 0;
+      if (u || o) { txt += ` · xrun ${u}/${o}`; warn = true; }
+    }
+    if (st.route === 'bluetooth' || st.route === 'ble_headset') {
+      txt += ' · 蓝牙延迟不可控，建议有线';
+      warn = true;
+    } else if (st.route === 'speaker') {
+      txt += ' · 外放注意啸叫';
+      warn = true;
+    }
+  } else if (N.failed) {
+    txt = '原生直通不可用 · ' + (N.reason || '已回退 WebView 耳返');
+    warn = true;
+  } else if (N.wanted === false) {
+    txt = '已关闭 · 走 WebView 耳返';
+  } else {
+    txt = '开唱时启用 · 有线耳机最佳';
+  }
+  info.textContent = txt;
+  info.classList.toggle('warn', warn);
+}
 
 function karLineAt(t) {
   const ls = KAR.lines;
@@ -7448,6 +7752,16 @@ async function karaokeStart(item) {
   KAR.reverb = state.settings.karaoke_reverb || 'studio';
   KAR.echo = state.settings.karaoke_echo !== false;
   KAR.pitchSemi = Math.max(-6, Math.min(6, Number(state.settings.karaoke_pitch) || 0));
+  // 原生直通：每场重置失败标记，设置键决定是否尝试（默认开）
+  KAR.native.wanted = karNativeWanted();
+  KAR.native.on = false;
+  KAR.native.failed = false;
+  KAR.native.muted = !KAR.echo;
+  KAR.native.stats = null;
+  KAR.native.reason = '';
+  KAR.native.badNative = 0;
+  KAR.native.badWeb = 0;
+  KAR.native.lastPoll = 0;
   KAR.pitchBuf = null;                         // 换歌必须重算变调
   $('#singLayer').hidden = false;
   $('#singLayer').classList.remove('is-review', 'counting');
@@ -7613,6 +7927,7 @@ function karBindOnce() {
   mic.oninput = () => {
     KAR.micVol = Number(mic.value) / 100;
     if (KAR.micGain) KAR.micGain.gain.setTargetAtTime(KAR.micVol, KAR.ctx.currentTime, 0.03);
+    karNativeUpdate({ gain: KAR.micVol });      // 原生耳返音量跟推子同步
   };
   voc.onchange = () => {
     KAR.vocalOff = voc.checked;
@@ -7637,6 +7952,7 @@ function karBindOnce() {
     const db = Number(tn.value);
     state.settings.karaoke_voice_tone = db;
     if (KAR.toneFilter) KAR.toneFilter.gain.setTargetAtTime(db, KAR.ctx.currentTime, 0.03);
+    karNativeUpdate({ toneDb: db });            // 原生耳返音色跟推子同步
     if (tn._deb) clearTimeout(tn._deb);
     tn._deb = setTimeout(() => postSettings({ karaoke_voice_tone: db }), 400);
   };
@@ -7645,13 +7961,44 @@ function karBindOnce() {
     KAR.echo = ec.checked;
     state.settings.karaoke_echo = KAR.echo;
     postSettings({ karaoke_echo: KAR.echo });
-    if (KAR.echoGate) {
-      try {
-        KAR.echoGate.gain.setTargetAtTime(KAR.echo ? 1 : 0, KAR.ctx.currentTime, 0.03);
-      } catch (e) { KAR.echoGate.gain.value = KAR.echo ? 1 : 0; }
+    if (KAR.native.on) {
+      // 原生接管耳返：WebAudio 耳返始终静音，只切原生输出 mute
+      karNativeUpdate({ muted: !KAR.echo });
+      karNativeSetWebEcho(false);
+    } else if (!KAR.echo) {
+      karNativeSetWebEcho(false);
+    } else {
+      // 原生没在跑：耳返刚开 → 能起原生就起，起不来回 WebView 耳返
+      let started = false;
+      if (KAR.native.wanted !== false && !KAR.native.failed && karNativeBridge()
+          && (KAR.phase === 'count' || KAR.phase === 'sing')) {
+        started = karNativeStart();
+      }
+      if (!started) karNativeSetWebEcho(true);
     }
     toast(KAR.echo ? '耳返已开（外放时小心啸叫）' : '耳返已关');
   };
+  /* 原生直通开关（仅 Android + 桥可用时显示）：默认开，关掉即回 WebView 耳返。
+     唱到一半切换也即时生效；启动失败/抢麦由 karNativeFallback 自动回退。 */
+  const nt = $('#kNative');
+  if (nt) {
+    nt.checked = KAR.native.wanted !== false;
+    nt.onchange = () => {
+      const want = !!nt.checked;
+      KAR.native.wanted = want;
+      state.settings.karaoke_native_mon = want;
+      postSettings({ karaoke_native_mon: want });
+      if (!want) {
+        karNativeStop(true);           // 恢复 WebView 耳返（echo 开着才接回）
+        KAR.native.failed = false;
+        KAR.native.reason = '';
+      } else if (KAR.phase === 'count' || KAR.phase === 'sing') {
+        karNativeStart();              // 唱到一半打开：即时切原生
+      }
+      karNativePaint();
+      toast(want ? '原生直通已开（有线耳机最佳）' : '已切回 WebView 耳返');
+    };
+  }
   const pk = $('#kPitch');
   if (pk) {
     pk.value = String(KAR.pitchSemi);
@@ -7784,6 +8131,7 @@ function karPaintMixer() {                   // 打开层/换歌后全量刷新�
   karPaintReverb();
   karPaintSeg();
   karPaintPitchTxt();
+  karNativePaint();
 }
 
 function karSetVocal(cancelOn) {
@@ -7890,14 +8238,15 @@ function karLimiter(ctx) {
 
     伴奏： src → split → L·(+0.5)/R·(−0.5) → cancel ┐
             └──────────────────────────→ orig ──────┴→ acc ─┬→ bus → busLim(录音限幅)
-                                                              └→ mon(监听限幅) → destination
+                                                              └→ mon(监听限幅) → monOut(原生时 −3dB) → destination
     人声： micSrc → micTap(电平/音高抽头) → hp80 → micGain → tone(亮暗) → micBus ─┬→ bus
                                     convolver → wet ────────────────────────────┘
                                                           micBus → echoGate → mon
     监听拆开的含义：耳返开关只控制「自己的声音回不给耳朵」，伴奏监听永远在；
     录音 bus 不受耳返影响 —— 存下来的作品永远带人声与混响。
     限幅两道：busLim 守录音（求和超 1 不再切平顶），mon 守监听（伴奏+耳返
-    求和同理，顺带护耳）。 */
+    求和同理，顺带护耳）。原生直通时人声在 OS 混音器里，不经过 mon，
+    monOut 给伴奏让出 −3dB headroom。 */
 function karBuild(stream) {
   try {
     const CE = window.AudioContext || window.webkitAudioContext;
@@ -7937,9 +8286,10 @@ function karBuild(stream) {
     const bus = ctx.createGain(); bus.gain.value = 1;
     acc.connect(bus);
     const mon = karLimiter(ctx);    // 监听求和限幅：伴奏 + 耳返都汇进它再出 destination
-    acc.connect(mon); mon.connect(ctx.destination);   // 监听：伴奏永远在；自己的声音只走耳返（echoGate）
+    const monOut = ctx.createGain(); monOut.gain.value = 1;   // 原生直通时 −3dB headroom
+    acc.connect(mon); mon.connect(monOut); monOut.connect(ctx.destination);   // 监听：伴奏永远在；自己的声音只走耳返（echoGate）
 
-    Object.assign(KAR, { ctx, el, cancel, orig, acc,
+    Object.assign(KAR, { ctx, el, cancel, orig, acc, monOut,
       micGain: null, wet: null, convolver: null, echoGate: null, toneFilter: null,
       micLevel: 0, micStream: stream,
       pitchAcc: null, pitchRows: [] });
@@ -8065,6 +8415,7 @@ async function karaokeBegin() {
       return;
     }
     karSetVocal(!KAR.vocalOff);
+    karNativeStart();       // 成功则静音 WebAudio 耳返，改走原生干声直通；失败保留原链路
     KAR.phase = 'count';
     const cap = $('#kClockCap');
     if (cap) cap.textContent = '准备中';
@@ -8078,6 +8429,7 @@ async function karaokeBegin() {
       if (!c) { KAR.phase = 'ready'; return; }   // 期间关了层
       c.textContent = n;
       c.classList.remove('pop'); void c.offsetWidth; c.classList.add('pop');
+      karNativePoll();                            // 倒数期间也盯着引擎/抢麦，别等开唱
       await new Promise((res) => setTimeout(res, 700));
     }
     karGo();
@@ -8113,6 +8465,7 @@ function karLoop() {
   if (!KAR.open) return;
   KAR.raf = requestAnimationFrame(karLoop);
   if (KAR.phase !== 'sing' || !KAR.el) return;
+  karNativePoll();        // 1s 节流；双采集抢麦/引擎退出在这里回退
   // 变调路径没有元素时钟：用 AudioContext 时钟减起点（WSOLA 输出与原曲等长同轴）
   const pos = KAR.bufSrc
     ? Math.max(0, KAR.ctx.currentTime - KAR.bufT0)
@@ -8263,6 +8616,7 @@ function karStop() {
   } else {
     try { KAR.el.pause(); } catch (e) { /* ignore */ }
   }
+  karNativeStop(false);      // 回顾页不再监听；结算/录音已在上面的 bus 里完成
   karCloseLine();
   const sung = KAR.sung.filter(Boolean).length;
   const total = KAR.lines.filter((l, i, a) => !i || a[i].t - a[i - 1].t > 0.5).length || KAR.lines.length;
@@ -8365,6 +8719,7 @@ async function karSave() {
 }
 
 function karClose() {
+  karNativeStop(false);                  // 先停原生（回顾页已停一次也幂等）
   cancelAnimationFrame(KAR.raf);
   KAR.gen = (KAR.gen || 0) + 1;          // 让所有在途的歌词 / 解析回调过期
   if (KAR.worker) { KAR.worker.terminate(); KAR.worker = null; }
@@ -8383,7 +8738,7 @@ function karClose() {
   if (KAR.ctx) { try { KAR.ctx.close(); } catch (e) { /* ignore */ } }
   if (KAR.pitchCtx) { try { KAR.pitchCtx.close(); } catch (e) { /* ignore */ } }
   Object.assign(KAR, { open: false, phase: '', ctx: null, el: null, cancel: null,
-    orig: null, acc: null, micGain: null, wet: null, micLevel: 0,
+    orig: null, acc: null, monOut: null, micGain: null, wet: null, micLevel: 0,
     micStream: null, chunks: [], blob: null, duration: 0, lastLine: -1,
     convolver: null, echoGate: null, toneFilter: null,
     melody: null, keyInfo: null, melodyRange: null, autoVocal: null, userMidi: null,
@@ -9119,9 +9474,18 @@ async function boot() {
   setInterval(() => loadUpdateStatus(), 30 * 60 * 1000);
   pollUpdateDl();                            // 若有进行中的版本下载（如刷新页面），恢复进度条
   /* 从系统设置回来后自动重试麦克风：Android 拒绝过一次权限后系统不再弹窗，
-     用户去权限页打开开关，回到 K 歌应直接恢复完整调音台，不用重进。 */
+     用户去权限页打开开关，回到 K 歌应直接恢复完整调音台，不用重进。
+     顺带管原生直通：切后台停（Android 麦克风只允许前台），回前台还在唱就重启。 */
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden || !KAR.open || !KAR.micRetry) return;
+    if (document.hidden) {
+      if (KAR.native.on) karNativeStop(false);
+      return;
+    }
+    if (KAR.open && (KAR.phase === 'count' || KAR.phase === 'sing')
+        && KAR.native.wanted !== false && !KAR.native.failed && karNativeBridge()) {
+      if (!karNativeStart() && KAR.echo) karNativeSetWebEcho(true);
+    }
+    if (!KAR.open || !KAR.micRetry) return;
     KAR.micRetry = false;
     if (!KAR.noMic || KAR.phase !== 'ready') return;   // 唱起来了就不再中途换麦
     KAR.noMic = false;

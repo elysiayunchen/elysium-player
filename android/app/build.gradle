@@ -6,19 +6,37 @@ plugins {
 android {
     namespace 'com.elysium.player'
     compileSdk 34
+    ndkVersion "26.1.10909125"
 
     defaultConfig {
         applicationId "com.elysium.player"
         minSdk 24
         targetSdk 34
-        versionCode 30
-        versionName "2.3.0-beta7"
+        versionCode 34
+        versionName "2.3.0-beta11"
         python {
             version "3.10"
         }
         ndk {
             abiFilters "arm64-v8a", "armeabi-v7a"
         }
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++17 -O2"
+                arguments "-DANDROID_STL=c++_shared"   // Oboe AAR 是 shared STL 构建
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+
+    buildFeatures {
+        prefab true          // 消费 Oboe AAR 的 prefab 包（find_package(oboe)）
     }
 
     // 固定签名：应用内更新靠覆盖安装，新旧 APK 签名必须一致。
@@ -50,6 +68,7 @@ android {
 dependencies {
     implementation 'androidx.core:core:1.13.1'   // FileProvider：把下载好的 APK 共享给系统安装器
     implementation 'androidx.media:media:1.7.0'  // MediaStyle：通知栏媒体控制模板
+    implementation 'com.google.oboe:oboe:1.9.3'   // AAudio/OpenSL 低延迟全双工（K 歌原生耳返）
 }
 
 chaquopy {

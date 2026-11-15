@@ -17,12 +17,13 @@ verify_mobile_play.py），问题只能在手机环境（网络/WebView/焦点�
 用法：python verify_diag.py
 """
 import json
+import os
 import struct
 import sys
 import tempfile
 import shutil
 
-sys.path.insert(0, r"<dev-root>\Elysium")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from verify_gapless import spawn  # noqa: E402
 from verify_mobile_play import run as run_page  # noqa: E402  # 复用驱动与探针外壳
 from selenium import webdriver  # noqa: E402

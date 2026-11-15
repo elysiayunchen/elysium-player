@@ -414,3 +414,79 @@ P7 扫描出的本地曲目后续可作为 P1 推荐候选池的增强来源（�
   产物就位即释放）；产物在临时 AudioContext 上 createBuffer（AudioBuffer 可跨 ctx）
 - 验收（verify_pitch.py 17/17）：P7 +2 半音后逐帧 ACF 全部 midi=71（源 440 → 493.88
   精确命中）；P8 时长 20s 不变；P7b buffer 路径开唱录音正常
+
+### P11 Android 原生直通耳返（v2.3.0-beta8 → beta9）
+
+> 2026-11-14 立项并落地。触发：beta7 真机 `diagMicRtt` 实测 RTT **179ms**
+> （178–179；base 5ms / output 64ms；采集回调 p50 5ms）。JS 图零缓冲，瓶颈在
+> WebView 平台栈：约 110ms 采集隐藏缓冲 + 64ms 输出缓冲。
+
+**架构（双采集，只搬干声）**
+- WebView `getUserMedia` 继续供录音 / 混响 / 音准；原生另开一路 `AudioRecord`
+  只做干声耳返（`KaraokeMonitor`，纯 Java，API 26+ `PERFORMANCE_MODE_LOW_LATENCY`）。
+- 录音 / 混响 / 音准 / 伴奏链路一字不动；原生只接干声，失败自动回退 WebView 耳返。
+- **不做人声补偿**：伴奏输出延迟对「人声 vs 伴奏」是共模（歌手跟着听到的拍子唱，
+  伴奏的延迟在参考里已经含了一次）；真正偏移是人声耳返整条链，WebView 下 179ms，
+  其中采集缓冲约 110ms 是主项。原生把采集压到 5–10ms、输出压到约 20ms，
+  整链到 30–60ms 量级。加补偿/延迟整轨只会放大偏移。
+- 无 FGS、无新权限：仅前台 Activity 期间运行，`onStop` + 页面 `visibilitychange` 停；
+  不申请音频焦点、不建 MediaSession（沿用 PlaybackService 的既有约定）。
+
+**实现**
+- `android/.../KaraokeMonitor.java`：48k mono PCM16，256 帧块，`UNPROCESSED` →
+  `VOICE_RECOGNITION` → `MIC`，HPF 80Hz + 增益 + 2.5kHz 音色 + 与 web 同曲线软限幅；
+  `status()` 回报 RMS / 缓冲 / 路由 / underrun；原生 8 发脉冲 RTT 自检。
+- `MainActivity`：`startKaraokeMonitor` / `updateKaraokeMonitor` / `karaokeMonitorStatus` /
+  `stopKaraokeMonitor` / `startKaraokeMonitorDiag` 五个 JS 桥方法。
+- `web/app.js`：原生会话 + `karaoke_native_mon` 设置（默认开）+ 推子/音色/耳返镜像 +
+  1s 双向 RMS 看门狗（原生被占用 / 原生抢麦都回退）+ 失败本场不重试。
+- UI：调音台耳返行下「原生直通」开关 + 采集/输出缓冲读数；设置→网络自检新增
+  「原生耳返自检」（外放 8 发脉冲，约 9s）。
+
+**验收**
+- `verify_karaoke.py 42/42`（新增 B13 + N1–N9：桌面退场 / 默认开 / 参数镜像 /
+  耳返 mute / start 失败回退 / 引擎停止看门狗 / karStop 停 / 返回键停）。
+- 回归：`verify_pitch 20/20`、`verify_ui 20/20`、`verify_mobile_play 2/2`、
+  `verify_diag 10/10`、`verify_gapless 16/16`。
+- 出包：`Elysium-2.3.0-beta8.apk`（versionCode 31，26,198,659 字节，
+  md5 `ec63f343517855505391466d9ff9405c`）；`aapt` 版本/权限、`classes.dex`
+  桥方法、`app.imy` 新前端均核验；桌面 exe 同步重建。
+
+**待真机 gate**
+- 外放「原生耳返自检」RTT ≤90ms（目标 30–60ms），与 web 179ms 对比；
+- 有线耳机 K 歌：无双重人声、echo/micVol/tone 实时、录音/音准正常；
+- 双采集抢麦时看门狗回退提示正常；蓝牙只提示「延迟不可控，建议有线」。
+- 若双采集大面积抢麦，另立单采集 PCM 回灌清单。
+
+**beta9（Oboe/AAudio，2026-11-14）**
+- 触发：beta8 真机 `recordBufMs=200` / `trackBufMs=128`，纯 Java minBuffer 压不下去；
+  自检 writer 从 0s 灌满 128ms 输出缓冲，217.7ms 是**满缓冲上界**，不是 monitor 稳态；
+  接耳机同样有可感延迟。按 D-2 预案上 Oboe。
+- 架构：Oboe 1.9.3 两条 `LowLatency/Shared` 流 + SPSC 环（≥4096 帧容量、2×输出
+  burst 预填）；输入回调做干声 DSP 入环、输出回调出环；采集 preset
+  `VoicePerformance`（K 歌专用，API 29+）→ `Unprocessed` → `VoiceRecognition` →
+  `Generic`；共享模式不抢 Exclusive（WebView 伴奏还要混音）。
+- 回退：`KaraokeMonitorHub` 三级 Oboe → beta8 Java → WebView；页面显示
+  `engine`/`oboeError`，失败不把 K 歌搞哑。
+- 自检：输入/输出回调各自打时间戳（脉冲输出回调 → 输入检测回调），回报
+  `inputLatencyMs` / `outputLatencyMs` / `xruns`，不再受自检灌满输出缓冲影响。
+- 构建：NDK 26.1.10909125 + CMake 3.22.1 + Oboe 1.9.3 AAR prefab +
+  `-DANDROID_STL=c++_shared`；`libelysium_oboe.so`/`liboboe.so`/`libc++_shared.so`
+  两 ABI，JNI 符号已核验。
+- 出包：`Elysium-2.3.0-beta9.apk`（versionCode 32，29,230,153 字节，约 27.9 MiB，
+  md5 `e85eb12d0d473616d59bee5db75dc51a`，sha256
+  `a8809b6a2512e0fc54852f609bbd9ad00941fb3efd59eae0d8977f553af1e4f1`）。
+- 回归：`verify_karaoke 42/42`、`verify_pitch 20/20`、`verify_diag 10/10`、
+  `verify_gapless 16/16`、`verify_mobile_play 2/2`；`verify_ui 17/20` 的
+  T0/T1 搜索用例是上游无结果（与本改动无关）。
+- 真机 gate：Oboe 自检 RTT 30–60ms（≤90ms）、有线耳机 K 歌无双重人声、
+  echo/micVol/tone 实时、录音/音准正常、双采集抢麦回退、长唱观察
+  `ringMs`/`underruns`/`overruns`。
+
+**真机 gate 结果（beta11，2026-11-15）**：唱完闪退修复 ✓（beta10 面包屑 +
+adb 崩溃栈定位 Android 15 legacy AAudio close 竞态，收口旗+120ms 宽限解决）；
+耳返缓冲 `3/11ms · 环 16ms · voice_performance` fast path 生效 ✓；自检 RTT
+**105ms**（>90ms gate，<179ms web 基线）——MTK/MIUI 对 MMAP 采集静默回退，
+legacy 路径地板，体感用户确认可接受；30–60ms 目标需平台 MMAP，另立课题。
+调试基建（CrashLog + 原生面包屑 + 自检面板崩溃日志 + USB adb 循环）随 beta10
+落库，后续闪退 20 分钟可定位。

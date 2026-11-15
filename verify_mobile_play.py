@@ -17,17 +17,18 @@ Range/206 正确、autoplay 放行、CA 有 chaquopy 兜底）。本脚本把「
 import http.server
 import json
 import math
+import os
 import struct
 import sys
 import threading
 import wave
 
-sys.path.insert(0, r"<dev-root>\Elysium")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from verify_gapless import spawn  # noqa: E402
 from selenium import webdriver  # noqa: E402
 from selenium.webdriver.chrome.options import Options  # noqa: E402
 
-REPO = r"<dev-root>\Elysium"
+REPO = os.path.dirname(os.path.abspath(__file__))
 RESULTS = []
 
 

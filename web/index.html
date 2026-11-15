@@ -347,6 +347,13 @@
           <label class="km-echo" title="耳返：耳机里听自己的声音。外放时建议关闭防啸叫">
             <input type="checkbox" class="switch" id="kEcho" checked/>耳返
           </label>
+          <!-- 原生直通（仅 Android 宿主注入桥后显示）：干声走 AudioRecord→AudioTrack，
+               录音/混响仍走 WebAudio；失败自动回退 WebView 耳返 -->
+          <label class="km-echo km-native" id="kNativeRow" hidden
+                 title="原生低延迟耳返：人声走 AudioRecord→AudioTrack 直通，录音/混响仍在 WebAudio；有线耳机最佳">
+            <input type="checkbox" class="switch" id="kNative" checked/>原生直通
+          </label>
+          <div class="km-native-info mono" id="kNativeInfo" hidden></div>
         </div>
         <div class="km-ch k-mic-only">
           <div class="km-head"><span class="km-name"><svg><use href="#i-spark"/></svg>音色</span><span class="km-val mono" id="kToneValTxt"></span></div>
