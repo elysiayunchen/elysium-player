@@ -99,4 +99,25 @@ python verify_mobile_play.py all && python verify_ui.py && python check_release.
   （两键白名单）、verify_karaoke.py（B14/B15 + N10-N13）。
 - 版本号：未提交工作区已把 beta12/versionCode 35 占给端口复用修复线，
   本线顺延 beta13/versionCode 36（结构重构 beta14/37）。
-- 真机 gate：待装包。
+- 回归：verify_karaoke **48/48**（含 N12 修正——3 秒测试曲会在看门狗观察窗内
+  唱完触发 ended→karStop，先等 sing 再暂停 `<audio>`；N13 假桥 statusResp 需带
+  engine:'oboe' 才走进 oboe 分支）、verify_pitch 20/20、verify_diag 10/10、
+  verify_gapless 16/16、verify_edge 92 PASS。
+- 构建机同步（教训两条）：① 构建树 /workspace/elysium-repo 的 git HEAD 停在
+  beta6，`git diff` 对比全失真（对 origin/main 也一样——远端 main 也停在
+  beta6，94d2225 从未推送），文件级 md5 对账 + patch 都不可靠；② `git checkout
+  FETCH_HEAD -- .` 在 FETCH_HEAD=beta6 时会把 box 的 beta7-12 工作区覆盖掉
+  （未跟踪的 cpp/Java 引擎文件幸存）。**正确姿势**：Windows 临时分支
+  `build/beta13-sync` 提交工作区快照推上去（repo 本就 public、*.apk 已
+  gitignore），box fetch 后 checkout 对齐，gradle.properties 用 box 本地变体
+  覆盖回去。此后每轮同步都走这条分支通道。
+- **beta13 出包**（box assembleRelease --offline，CMake 首跑暴露
+  `convertToText(ResultWithValue<int>)` 无实例化 → 改取 `.error()`）：
+  `Elysium-2.3.0-beta13.apk`，versionCode 36，29,295,689 字节，
+  md5 `f22991a4acef9140165c81cfe382cee1`，
+  sha256 `e1bbfaeb9403233aa3cf7d741a8c7caccda81ab22a0f09b073d919e707ef9770`。
+  aapt 核验版本 ✓；包内 app.imy 含 `karaoke_native_prefer`/`_KAR_NATIVE_PREFER_OK`
+  /`diagSweepBtn`/`kSoloRow` ✓；双 ABI `libelysium_oboe.so` ✓。
+  交付：box 快隧道出不去（UDP DNS 不通），走 adb 通道装机。
+- 同步分支 build/beta13-sync（681df7c）比 box 树落后 cpp 的 3 行
+  convertToText 修复（box 上直接改的）——beta14 同步时重新推快照覆盖。

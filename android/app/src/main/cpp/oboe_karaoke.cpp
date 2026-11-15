@@ -77,10 +77,14 @@ constexpr double kSweepLeadSec = 0.7;
 constexpr double kSweepGapSec = 0.5;
 
 // 输入候选：api 0=默认（API 27+ 即 AAudio）1=显式 AAudio 2=显式 OpenSL ES；
-// preset 0..4 见 presetName。默认顺序（mPrefer 为空）与 beta11 完全一致。
+// preset 0..4 见 presetName；exclusive=true 请求独占采集（P11.5 beta14：
+// 独占是摸到 mmap_no_irq_in 的必要条件之一，需无并发采集客户端——
+// sweep 自检天然满足；开失败就地弃掉该候选，不静默降级）。
+// 默认顺序（mPrefer 为空）与 beta13 完全一致（全部 shared）。
 struct Cand {
   int api;
   int preset;
+  bool exclusive;
 };
 
 // 与 web karLimCurve / Java 版同曲线：|x|≤0.7 线性，之后幂式压向 0.97。
@@ -262,11 +266,13 @@ class Engine : public oboe::AudioStreamDataCallback,
     if (p == 4) return oboe::InputPreset::VoiceCommunication;
     return oboe::InputPreset::Generic;
   }
-  // 候选标签："opensl/voice_communication"；api 0（默认）不写前缀。
+  // 候选标签："opensl/voice_communication"、"ex/voice_performance"（独占）。
   static std::string candLabel(const Cand& c) {
-    if (c.api == 1) return std::string("aaudio/") + presetName(c.preset);
-    if (c.api == 2) return std::string("opensl/") + presetName(c.preset);
-    return presetName(c.preset);
+    std::string s;
+    if (c.exclusive) s = "ex/";
+    if (c.api == 1) return s + "aaudio/" + presetName(c.preset);
+    if (c.api == 2) return s + "opensl/" + presetName(c.preset);
+    return s + presetName(c.preset);
   }
   static const char* modeName(int m) {
     if (m == kModeMonitor) return "monitor";
@@ -292,7 +298,8 @@ class Engine : public oboe::AudioStreamDataCallback,
   std::atomic<int> mAudioApi{0};
   std::atomic<int> mInApi{0};
   std::atomic<int> mInputPreset{0};
-  std::vector<Cand> mPrefer;      // start 的输入候选顺序；空 = 默认（与 beta11 一致）
+  std::atomic<bool> mInExclusive{false};
+  std::vector<Cand> mPrefer;      // start 的输入候选顺序；空 = 默认（与 beta13 一致）
 
   std::atomic<float> mGain{1.0f};
   std::atomic<float> mToneDb{0.0f};
@@ -318,6 +325,10 @@ class Engine : public oboe::AudioStreamDataCallback,
   std::atomic<uint32_t> mReadPos{0};
   std::atomic<uint64_t> mRingUnderruns{0};
   std::atomic<uint64_t> mRingOverruns{0};
+  // 自适应重采样（beta14）：输出回调的小数读指针 + 漂移控制速率。
+  // 只在输出回调线程读写，无锁；start 时复位。
+  double mResPos = 0.0;
+  double mResRatio = 1.0;
 
   // ---- 自检状态 ----
   std::atomic<bool> mDiagRunning{false};
@@ -418,6 +429,8 @@ int Engine::start(double gain, double toneDb, bool muted) {
   mPrefillFrames = std::max(2 * 128, std::min(cap / 2, 2 * outBurst));
   mWritePos.store(0);
   mReadPos.store(0);
+  mResPos = 0.0;
+  mResRatio = 1.0;
   mRingUnderruns.store(0);
   mRingOverruns.store(0);
 
@@ -564,10 +577,10 @@ int Engine::startSweep() {
   mSweepRows.clear();
   mSweepError.clear();
   mSweepIdx.store(-1);
-  // 全矩阵：显式 AAudio 与 OpenSL 各 × 5 preset。api 0（默认）与显式 AAudio
-  // 在 API 27+ 等价，不重复测。
-  mSweepList = {{1, 0}, {1, 1}, {1, 2}, {1, 3}, {1, 4},
-                {2, 0}, {2, 1}, {2, 2}, {2, 3}, {2, 4}};
+  // beta14 矩阵：AAudio shared × 5 preset + AAudio exclusive × 5 preset。
+  // （beta13 实测 opensl 与 aaudio 同价且略差，且 OpenSL 无独占语义——裁掉。）
+  mSweepList = {{1, 0, false}, {1, 1, false}, {1, 2, false}, {1, 3, false}, {1, 4, false},
+                {1, 0, true},  {1, 1, true},  {1, 2, true},  {1, 3, true},  {1, 4, true}};
   mMode.store(kModeDiag);          // 复用 diag 回调派发
   mSweepDone.store(false);
   mSweepRunning.store(true);
@@ -761,14 +774,15 @@ bool Engine::openOutputLocked(std::string* errs) {
   return false;
 }
 
-// 输入流：按候选（api × preset）开，mono → stereo；开成即记遥测并收缓冲。
+// 输入流：按候选（api × preset × exclusive）开，mono → stereo；开成即记遥测并收缓冲。
 bool Engine::openInputLocked(const Cand& cand, int rate, std::string* errs) {
   const int32_t inChannels[] = {1, 2};
   for (int c = 0; c < 2; c++) {
     oboe::AudioStreamBuilder b;
     b.setDirection(oboe::Direction::Input);
     b.setPerformanceMode(oboe::PerformanceMode::LowLatency);
-    b.setSharingMode(oboe::SharingMode::Shared);
+    b.setSharingMode(cand.exclusive ? oboe::SharingMode::Exclusive
+                                    : oboe::SharingMode::Shared);
     b.setFormat(oboe::AudioFormat::I16);
     b.setSampleRate(rate);
     b.setChannelCount(inChannels[c]);
@@ -812,13 +826,15 @@ bool Engine::openInputLocked(const Cand& cand, int rate, std::string* errs) {
     const int32_t cap = s->getBufferCapacityInFrames();
     if (burst > 0 && cap > 0 && cap > 2 * burst) {
       auto rr = s->setBufferSizeInFrames(std::min(cap, 2 * burst));
-      if (rr != oboe::Result::OK) {
-        blogLine(std::string("in trim buffer failed: ") + oboe::convertToText(rr));
+      if (rr.error() != oboe::Result::OK) {
+        blogLine(std::string("in trim buffer failed: ")
+                 + oboe::convertToText(rr.error()));
       }
     }
     mIn = s;
     mInputPreset.store(cand.preset);
     mInApi.store(apiToInt(s->getAudioApi()));
+    mInExclusive.store(cand.exclusive);
     mInRate.store(inRate);
     mInBurst.store(s->getFramesPerBurst());
     mInBuf.store(s->getBufferSizeInFrames());
@@ -840,11 +856,11 @@ bool Engine::openStreamsLocked(std::string* detail) {
   if (rate <= 0) rate = 48000;
   mOutRate.store(rate);
 
-  // 输入候选顺序：mPrefer（页面/自检给的最优序）优先；为空保持 beta11 的
-  // VoicePerformance → Unprocessed → VoiceRecognition → Generic。
+  // 输入候选顺序：mPrefer（页面/自检给的最优序）优先；为空保持 beta13 的
+  // VoicePerformance → Unprocessed → VoiceRecognition → Generic（全 shared）。
   std::vector<Cand> list = mPrefer;
   if (list.empty()) {
-    list = {{0, 0}, {0, 1}, {0, 2}, {0, 3}};
+    list = {{0, 0, false}, {0, 1, false}, {0, 2, false}, {0, 3, false}};
   }
   for (const Cand& cand : list) {
     if (openInputLocked(cand, rate, &errs)) {
@@ -1009,25 +1025,44 @@ oboe::DataCallbackResult Engine::onInputMonitor(oboe::AudioStream* /*stream*/, i
 
 oboe::DataCallbackResult Engine::onOutputMonitor(oboe::AudioStream* /*stream*/, int16_t* data,
                                                  int32_t numFrames, int channels) {
-  uint32_t rp = mReadPos.load(std::memory_order_relaxed);
-  uint32_t wp = mWritePos.load(std::memory_order_acquire);
-  const int avail = static_cast<int32_t>(wp - rp);
-  const int n = std::min(numFrames, mRingCapacity);
-  const uint32_t mask = mRingMask;
+  // beta14：自适应重采样读出。采集（SoC codec）与回放（可能是 USB DAC）是两个
+  // 独立晶振，整数帧直读时漂移会把环水位慢慢拖穿，穿底就是「沙沙」毛刺
+  //（beta13 真机 USB 路径实测）。这里按环水位微调消费速率（±600ppm = 0.06%，
+  // 听感不可闻），线性插值读出，水位钉在预填目标附近。
+  const int rate = std::max(1, mInRate.load(std::memory_order_relaxed));
+  const uint32_t wp = mWritePos.load(std::memory_order_acquire);
+  const int32_t level = static_cast<int32_t>(wp - static_cast<uint32_t>(mResPos));
+  const int32_t err = level - mPrefillFrames;
+  double ratio = 1.0 + std::max(-6e-4, std::min(6e-4,
+      static_cast<double>(err) / (4.0 * rate)));
+  mResRatio = ratio;
 
-  if (avail >= n) {
-    for (int i = 0; i < n; i++) {
-      const int16_t s = mRing[(rp + i) & mask];
-      for (int c = 0; c < channels; c++) data[i * channels + c] = s;
-    }
-    if (n < numFrames) {
-      std::memset(data + n * channels, 0,
-                  static_cast<size_t>(numFrames - n) * channels * sizeof(int16_t));
-    }
-    mReadPos.store(rp + static_cast<uint32_t>(n), std::memory_order_release);
-  } else {
+  const int n = std::min(numFrames, mRingCapacity);
+  if (level < n + 2) {                       // 底穿：整块补零并等生产者追上
     std::memset(data, 0, static_cast<size_t>(numFrames) * channels * sizeof(int16_t));
     mRingUnderruns.fetch_add(static_cast<uint64_t>(numFrames), std::memory_order_relaxed);
+    mFramesWritten.fetch_add(static_cast<uint64_t>(numFrames), std::memory_order_relaxed);
+    return oboe::DataCallbackResult::Continue;
+  }
+
+  const uint32_t mask = mRingMask;
+  double p = mResPos;
+  for (int i = 0; i < n; i++) {
+    const uint32_t i0 = static_cast<uint32_t>(p) & mask;
+    const uint32_t i1 = (i0 + 1) & mask;
+    const float f = static_cast<float>(p - std::floor(p));
+    const float s = static_cast<float>(mRing[i0]) * (1.0f - f)
+        + static_cast<float>(mRing[i1]) * f;
+    const int16_t v = static_cast<int16_t>(std::max(-32768.0f,
+        std::min(32767.0f, s)));
+    for (int c = 0; c < channels; c++) data[i * channels + c] = v;
+    p += ratio;
+  }
+  mResPos = p;
+  mReadPos.store(static_cast<uint32_t>(p), std::memory_order_release);
+  if (n < numFrames) {
+    std::memset(data + n * channels, 0,
+                static_cast<size_t>(numFrames - n) * channels * sizeof(int16_t));
   }
   mFramesWritten.fetch_add(static_cast<uint64_t>(numFrames), std::memory_order_relaxed);
   return oboe::DataCallbackResult::Continue;
@@ -1270,11 +1305,17 @@ void Engine::setPrefer(const std::string& json) {
     const std::string tok = json.substr(i + 1, j - i - 1);
     i = j + 1;
     int api = 0;
+    bool ex = false;
     std::string name = tok;
-    const size_t slash = tok.find('/');
+    // "ex/" 前缀 = 请求独占采集（beta14）；可与 api 前缀叠加："ex/aaudio/unprocessed"。
+    if (name.rfind("ex/", 0) == 0) {
+      ex = true;
+      name = name.substr(3);
+    }
+    const size_t slash = name.find('/');
     if (slash != std::string::npos) {
-      const std::string a = tok.substr(0, slash);
-      name = tok.substr(slash + 1);
+      const std::string a = name.substr(0, slash);
+      name = name.substr(slash + 1);
       if (a == "aaudio") api = 1;
       else if (a == "opensl") api = 2;
       else continue;
@@ -1283,7 +1324,7 @@ void Engine::setPrefer(const std::string& json) {
     for (int p = 0; p < 5; p++) {
       if (name == presetName(p)) { preset = p; break; }
     }
-    if (preset >= 0) list.push_back({api, preset});
+    if (preset >= 0) list.push_back({api, preset, ex});
   }
   std::lock_guard<std::mutex> lock(mLock);
   mPrefer = list;
@@ -1450,9 +1491,10 @@ std::string Engine::statusJson() {
   if (outLat >= 0) std::snprintf(outLatBuf, sizeof(outLatBuf), "%.1f", outLat);
   else std::snprintf(outLatBuf, sizeof(outLatBuf), "null");
 
-  char head[2048];
+  char head[2176];
   std::snprintf(head, sizeof(head),
                 "{\"ok\":true,\"engine\":\"oboe\",\"api\":\"%s\",\"inApi\":\"%s\","
+                "\"sharing\":\"%s\","
                 "\"running\":%s,\"mode\":\"%s\","
                 "\"inRms\":%.4f,\"outRms\":%.4f,\"underruns\":%d,\"overruns\":%d,"
                 "\"framesRead\":%llu,\"framesWritten\":%llu,"
@@ -1462,11 +1504,13 @@ std::string Engine::statusJson() {
                 "\"bufferCapacityFrames\":%d,\"framesPerBurst\":%d,"
                 "\"inputBufferCapacityFrames\":%d,"
                 "\"ringFrames\":%d,\"ringMs\":%d,\"latencyMs\":%s,"
+                "\"resPpm\":%.0f,"
                 "\"inCalcLatencyMs\":%s,\"outCalcLatencyMs\":%s,"
                 "\"performanceMode\":\"low_latency\","
                 "\"lastError\":\"%s\",\"diag\":{",
                 apiName(mAudioApi.load()),
                 apiName(mInApi.load()),
+                mInExclusive.load() ? "exclusive" : "shared",
                 mRunning.load() ? "true" : "false",
                 modeName(mMode.load()),
                 mInRms.load(), mOutRms.load(), underruns, overruns,
@@ -1475,7 +1519,8 @@ std::string Engine::statusJson() {
                 presetName(mInputPreset.load()),
                 rate, outBurst, inBurst, outBuf, recMs, trkMs,
                 mOutCap.load(), outBurst, mInCap.load(),
-                ringFrames, ringMs, latBuf, inLatBuf, outLatBuf,
+                ringFrames, ringMs, latBuf, (mResRatio - 1.0) * 1e6,
+                inLatBuf, outLatBuf,
                 jsonEsc(err).c_str());
 
   return std::string(head) + diagJsonLocked() + ",\"sweep\":" + sweepJsonLocked() + "}";

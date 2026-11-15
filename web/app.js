@@ -7872,6 +7872,7 @@ function karNativePaint() {
       if (st.source) {
         txt += st.inApi && st.inApi !== st.api ? ` · ${st.source}/${st.inApi}` : ` · ${st.source}`;
       }
+      if (st.sharing === 'exclusive') txt += ' · 独占';
       if (st.ringMs != null) txt += ` · 环 ${Math.round(Number(st.ringMs) || 0)}ms`;
       // 平台侧链路拆分（P11.5）：采集腿/输出腿各占多少，归因用
       const ic = st.inCalcLatencyMs == null ? null : Math.round(Number(st.inCalcLatencyMs));
@@ -8378,6 +8379,36 @@ function karSetVocal(cancelOn) {
   }
 }
 
+/* —— 消原唱效果探针（beta14）：sing 期每 4s 比 cancel(L−R) 与 orig(全混合) 的
+   RMS——人声居中且消得动时比值 ≈ 0.1 以下；> 0.55 说明这首歌人声不在正中
+   或近单声道，L−R 消不动（此时用户听到的「伴唱」里原唱大头都在）。如实
+   提示一次并建议切原唱，不替用户改选择。场内只提示一次。 —— */
+function karVocalProbe() {
+  const P = KAR.vocalProbe;
+  if (!P || KAR.phase !== 'sing' || KAR.vocalProbeDone || KAR.vocalOff !== true) return;
+  const now = performance.now();
+  if (!P.t0) { P.t0 = now; return; }             // 首次只记起点（歌头/淡入不算）
+  if (now - P.t0 < 5000) return;
+  if (now - P.last < 4000) return;
+  P.last = now;
+  try {
+    P.c.getFloatTimeDomainData(P.bufs[0]);
+    P.o.getFloatTimeDomainData(P.bufs[1]);
+    let ec = 0, eo = 0;
+    for (let i = 0; i < P.bufs[0].length; i++) {
+      ec += P.bufs[0][i] * P.bufs[0][i];
+      eo += P.bufs[1][i] * P.bufs[1][i];
+    }
+    ec = Math.sqrt(ec / P.bufs[0].length);
+    eo = Math.sqrt(eo / P.bufs[1].length);
+    if (eo < 0.01) return;                       // 静音段不判
+    if (ec / Math.max(1e-6, eo) > 0.55) {
+      KAR.vocalProbeDone = true;
+      toast('这首歌的人声消不干净（人声不在正中/接近单声道），建议切「原唱」跟唱');
+    }
+  } catch (e) { /* analyser 不可用就静默 */ }
+}
+
 /** 混响预设：秒数 = 衰减长度，wet = 湿声占比。IR 全部程序生成
    （指数衰减白噪声 + 轻低通 + 8ms 预延迟），零外部资源。 */
 const KAR_REVERB = {
@@ -8581,6 +8612,16 @@ function karBuild(stream) {
       const echoGate = ctx.createGain(); echoGate.gain.value = KAR.echo ? 1 : 0;
       micBus.connect(echoGate); echoGate.connect(mon);   // 耳返（进监听限幅汇出）
 
+      /* 消原唱效果探针（beta14）：cancel/orig 后各挂一个不外放的 analyser，
+         karLoop 里节流比对能量——消不动的歌如实提示，见 karVocalProbe。 */
+      const anaC = ctx.createAnalyser(); anaC.fftSize = 1024;
+      const anaO = ctx.createAnalyser(); anaO.fftSize = 1024;
+      cancel.connect(anaC); orig.connect(anaO);
+      KAR.vocalProbe = { c: anaC, o: anaO,
+        bufs: [new Float32Array(anaC.fftSize), new Float32Array(anaO.fftSize)],
+        t0: 0, last: 0 };
+      KAR.vocalProbeDone = false;
+
       const rec = ctx.createScriptProcessor(4096, 2, 2);
       const sink = ctx.createGain(); sink.gain.value = 0;    // SP 必须连到 destination 才会跑
       const busLim = karLimiter(ctx);          // 录音总线限幅：伴奏+干+湿求和超 1 不切平顶
@@ -8699,6 +8740,7 @@ function karLoop() {
   KAR.raf = requestAnimationFrame(karLoop);
   if (KAR.phase !== 'sing' || !KAR.el) return;
   karNativePoll();        // 1s 节流；双采集抢麦/引擎退出在这里回退
+  karVocalProbe();        // 4s 节流；伴唱消不动时如实提示（beta14）
   // 变调路径没有元素时钟：用 AudioContext 时钟减起点（WSOLA 输出与原曲等长同轴）
   const pos = KAR.bufSrc
     ? Math.max(0, KAR.ctx.currentTime - KAR.bufT0)
