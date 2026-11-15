@@ -126,6 +126,7 @@ html[data-wc-api="on"] .wc-ctrls{display:flex}
   transition:background .12s ease,color .12s ease;
   -webkit-app-region:no-drag;app-region:no-drag;
 }
+.wc-ctrl svg{width:14px;height:14px;display:block}
 .wc-ctrl:hover{background:var(--hover-2)}
 .wc-ctrl[data-act="close"]:hover{background:#e81123;color:#fff}
 .wc-ctrl:focus-visible{outline:1px solid var(--accent);outline-offset:-3px}

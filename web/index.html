@@ -69,11 +69,11 @@
   <div class="wc-title">
     <div class="wc-brand"><img src="/logo.png" alt=""><span>ELYSIUM</span></div>
     <div class="wc-drag pywebview-drag-region"></div>
-    <div class="wc-path">LOSSLESS PLAYER</div>
+    <div class="wc-path" aria-hidden="true">LOSSLESS PLAYER</div>
     <div class="wc-ctrls">
-      <button class="wc-ctrl" data-act="min" title="最小化" aria-label="最小化">─</button>
-      <button class="wc-ctrl" data-act="max" title="最大化 / 还原" aria-label="最大化或还原">□</button>
-      <button class="wc-ctrl" data-act="close" title="关闭" aria-label="关闭">✕</button>
+      <button class="wc-ctrl" data-act="min" title="最小化" aria-label="最小化"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
+      <button class="wc-ctrl" data-act="max" title="最大化 / 还原" aria-label="最大化或还原"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>
+      <button class="wc-ctrl" data-act="close" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
     </div>
   </div>
 
@@ -82,7 +82,7 @@
       <div class="brand-mark"><img src="/logo.png" alt=""></div>
       <div class="brand-txt">
         <b>ELYSIUM</b>
-        <span>LOSSLESS PLAYER</span>
+        <span aria-hidden="true">LOSSLESS PLAYER</span>
       </div>
     </div>
 
@@ -124,7 +124,7 @@
         <div class="search-in">
           <svg class="sic"><use href="#i-search"/></svg>
           <input id="kw" type="text" placeholder="搜索歌曲、歌手、专辑，或粘贴链接"/>
-          <button type="button" class="sic-clear" id="kwClear" hidden><svg><use href="#i-close"/></svg></button>
+          <button type="button" class="sic-clear" id="kwClear" title="清除输入" aria-label="清除输入" hidden><svg><use href="#i-close"/></svg></button>
         </div>
       </form>
 
@@ -194,7 +194,7 @@
       <button class="dtab on" data-pt="queue">队列</button>
       <button class="dtab" data-pt="dl">下载 <em id="dlCount">0</em></button>
     </div>
-    <button class="ic" data-close="panelDrawer"><svg><use href="#i-close"/></svg></button>
+    <button class="ic" data-close="panelDrawer" title="关闭队列" aria-label="关闭队列"><svg><use href="#i-close"/></svg></button>
   </div>
   <div class="drawer-body">
     <div id="queuePane"></div>
@@ -256,7 +256,7 @@
 <aside class="drawer right wide" id="settingsDrawer" hidden>
   <div class="drawer-head">
     <div class="dtabs"><button class="dtab on">设置</button></div>
-    <button class="ic" data-close="settingsDrawer"><svg><use href="#i-close"/></svg></button>
+    <button class="ic" data-close="settingsDrawer" title="关闭设置" aria-label="关闭设置"><svg><use href="#i-close"/></svg></button>
   </div>
   <div class="drawer-body" id="settingsBody"></div>
 </aside>
@@ -264,7 +264,7 @@
 <aside class="drawer right xwide" id="importDrawer" hidden>
   <div class="drawer-head">
     <div class="dtabs"><button class="dtab on">导入歌单</button></div>
-    <button class="ic" data-close="importDrawer"><svg><use href="#i-close"/></svg></button>
+    <button class="ic" data-close="importDrawer" title="关闭导入歌单" aria-label="关闭导入歌单"><svg><use href="#i-close"/></svg></button>
   </div>
   <div class="drawer-body" id="importBody"></div>
 </aside>
@@ -273,7 +273,7 @@
 <aside class="drawer right xwide" id="syncDrawer" hidden>
   <div class="drawer-head">
     <div class="dtabs"><button class="dtab on">从远端拉取</button></div>
-    <button class="ic" data-close="syncDrawer"><svg><use href="#i-close"/></svg></button>
+    <button class="ic" data-close="syncDrawer" title="关闭从远端拉取" aria-label="关闭从远端拉取"><svg><use href="#i-close"/></svg></button>
   </div>
   <div class="drawer-body" id="syncBody"></div>
 </aside>
@@ -285,7 +285,7 @@
         <div class="kicker">LYRICS</div>
         <h3 id="lyricTitle">歌词</h3>
       </div>
-      <button class="ic" data-close="lyricLayer"><svg><use href="#i-close"/></svg></button>
+      <button class="ic" data-close="lyricLayer" title="关闭歌词" aria-label="关闭歌词"><svg><use href="#i-close"/></svg></button>
     </div>
     <div class="lyric-body" id="lyricBody"></div>
     <div class="lyric-foot lrc-tools">
@@ -352,6 +352,12 @@
           <label class="km-echo km-native" id="kNativeRow" hidden
                  title="原生低延迟耳返：人声走 AudioRecord→AudioTrack 直通，录音/混响仍在 WebAudio；有线耳机最佳">
             <input type="checkbox" class="switch" id="kNative" checked/>原生直通
+          </label>
+          <!-- 单采集实验（P11.5，仅 Android + 桥）：进 K 歌不申请 WebView 麦克风，
+               只有原生一路采集。无录音无音准，用于鉴别双采集并发延迟惩罚 -->
+          <label class="km-echo km-native" id="kSoloRow" hidden
+                 title="单采集实验：下一场 K 歌 WebView 不申请麦克风，只有原生耳返（无录音无音准）。用来对比双采集是否拖高延迟">
+            <input type="checkbox" class="switch" id="kSolo"/>单采集实验
           </label>
           <div class="km-native-info mono" id="kNativeInfo" hidden></div>
         </div>
