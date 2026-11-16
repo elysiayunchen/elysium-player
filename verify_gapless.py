@@ -221,9 +221,16 @@ def main():
               id: state.playing && state.playing.id,
               peak: __g.peak(),
               t: audio().currentTime,
-              live: ENG.els.filter(el => !el.paused).length,
               slot: ENG.slot,
             };
+            // G3 轮询等旧元素退场（≤2s）：runner VM 的 ended/pause 事件派发偏慢，
+            // 瞬时采样会撞上旧元素还没 pause 的瞬间（CI 二跑 G3 假红即此因，
+            // 本地两轮 16/16 无此象）。收敛到 1 才放行；真串音永远收不敛，照样红。
+            for (let i = 0; i < 20; i++) {
+              after.live = ENG.els.filter(el => !el.paused).length;
+              if (after.live === 1) break;
+              await new Promise(r => setTimeout(r, 100));
+            }
             await new Promise(r => setTimeout(r, 400));
             after.peak2 = __g.peak();
             after.t2 = audio().currentTime;
