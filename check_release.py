@@ -11,8 +11,9 @@
 用法：
     python check_release.py              # 检查工作区 + Git 历史
     python check_release.py --staged     # 只检查待提交的暂存内容
-    python check_release.py --no-history # 只查工作区，不扫历史 blob（CI 用：
-                                         # 历史里有挂账未重写的旧泄漏时跑全量必红）
+    python check_release.py --no-history # 只查工作区，不扫历史 blob
+                                         # （2026-11-17 历史清泄漏后 CI 已恢复
+                                         # 全量；此开关留作历史再挂账时的临时口子）
 """
 import os
 import re

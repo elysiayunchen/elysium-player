@@ -2,8 +2,7 @@
 # 上游强依赖的套件（verify_ui / verify_np / verify_walk / verify_drag / verify_stress /
 # verify_interact / verify_local 等）留在本地跑：上游波动会假红
 # （UI-REVIEW 2026-11-15 已两次被上游误判为回归，见该文档「回归」一节）。
-# check_release 用 --no-history：历史里有挂账未重写的旧泄漏 blob
-# （verify_diag / verify_mobile_play 的开发机路径），全量扫描在 CI 必红。
+# 2026-11-17 历史 filter-repo 清理完成后旧泄漏已清零，check_release 恢复全量扫描。
 name: verify
 
 on:
@@ -31,8 +30,8 @@ jobs:
           python-version: '3.11'
       - name: 安装 ffmpeg（合成测试音源）
         run: choco install ffmpeg -y --no-progress
-      - name: 发布自检（工作区 + 路径清单，跳历史）
-        run: python check_release.py --no-history
+      - name: 发布自检（工作区 + 全历史）
+        run: python check_release.py
       - name: verify_sync + verify_lib（本地扫描需 mutagen）
         run: python -m pip install mutagen && python verify_sync.py && python verify_lib.py
       - name: verify_audiophile（发烧客设置契约，纯离线）

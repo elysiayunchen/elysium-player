@@ -121,3 +121,14 @@ python verify_mobile_play.py all && python verify_ui.py && python check_release.
   交付：box 快隧道出不去（UDP DNS 不通），走 adb 通道装机。
 - 同步分支 build/beta13-sync（681df7c）比 box 树落后 cpp 的 3 行
   convertToText 修复（box 上直接改的）——beta14 同步时重新推快照覆盖。
+- **2026-11-17 历史重写（filter-repo，用户拍板强推）**：历史 blob 与 commit
+  消息里的开发机工作区路径（check_release.py 规则表同款）全部替换为
+  `<dev-root>`——涉 verify_diag 旧版 / verify_mobile_play 旧版 /
+  NATIVE-MON 旧版共 4 个 blob + 825ccdc（重写后 4c8c2f7）1 条消息。
+  v1.0.0–v1.6.0 四个 tag 不含泄漏祖先，SHA 原封未动；main 677bf02 →
+  **ccb80e0**、build/beta13-sync 0ad3cb4 → **6f53c81**（box 的 beta14
+  快照已随之改写）；本地 .git 75MB → 22MB（旧对象已剪）；全量
+  check_release（含历史）复核通过，CI 恢复全量扫描（不再 --no-history）。
+  旧历史备份 bundle 在开发机工作区根（Elysium-backup-pre-rewrite-20261116）。
+  **box 构建树注意**：远端 SHA 已全变、旧 SHA 一律失效，fetch 后按分支名
+  checkout 对齐即可（本分支通道约定不变）。
