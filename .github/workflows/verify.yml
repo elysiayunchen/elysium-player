@@ -1,0 +1,58 @@
+# 验收套件 CI —— 只收不依赖上游第三方接口的套件；浏览器套件用 runner 本地 Chrome。
+# 上游强依赖的套件（verify_ui / verify_np / verify_walk / verify_drag / verify_stress /
+# verify_interact / verify_local 等）留在本地跑：上游波动会假红
+# （UI-REVIEW 2026-11-15 已两次被上游误判为回归，见该文档「回归」一节）。
+# check_release 用 --no-history：历史里有挂账未重写的旧泄漏 blob
+# （verify_diag / verify_mobile_play 的开发机路径），全量扫描在 CI 必红。
+name: verify
+
+on:
+  push:
+    branches: [main, 'build/**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: 离线逻辑套件（无浏览器）
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 发布自检（工作区 + 路径清单，跳历史）
+        run: python check_release.py --no-history
+      - name: verify_sync + verify_lib（本地扫描需 mutagen）
+        run: python -m pip install mutagen && python verify_sync.py && python verify_lib.py
+      - name: verify_audiophile（发烧客设置契约，纯离线）
+        run: python verify_audiophile.py
+      - name: verify_edge（边界修复回归，纯离线）
+        run: python verify_edge.py
+
+  browser:
+    name: 音频引擎套件（本地 Chrome，零上游）
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 安装 selenium + mutagen
+        run: python -m pip install selenium mutagen
+      - name: verify_gapless → verify_eq → verify_pitch → verify_diag → verify_karaoke
+        run: >
+          python verify_gapless.py && python verify_eq.py && python verify_pitch.py &&
+          python verify_diag.py && python verify_karaoke.py

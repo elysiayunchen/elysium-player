@@ -1,5 +1,7 @@
 # Elysium
 
+[![verify](https://github.com/elysiayunchen/elysium-player/actions/workflows/verify.yml/badge.svg)](https://github.com/elysiayunchen/elysium-player/actions/workflows/verify.yml)
+
 一个本地优先的桌面音乐播放客户端（Windows）。前端是本地网页 UI，后端是本地 Python 服务，
 窗口用 WebView2 承载——这样既绕开了浏览器跨域限制，也能把界面做得顺手。
 

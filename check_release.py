@@ -9,8 +9,10 @@
   3. 打包产物（exe / apk）被提交进仓库
 
 用法：
-    python check_release.py            # 检查工作区 + Git 历史
-    python check_release.py --staged   # 只检查待提交的暂存内容
+    python check_release.py              # 检查工作区 + Git 历史
+    python check_release.py --staged     # 只检查待提交的暂存内容
+    python check_release.py --no-history # 只查工作区，不扫历史 blob（CI 用：
+                                         # 历史里有挂账未重写的旧泄漏时跑全量必红）
 """
 import os
 import re
@@ -78,6 +80,7 @@ def scan_text(text, where, hits):
 
 def main():
     staged = "--staged" in sys.argv
+    no_history = "--no-history" in sys.argv
     hits = []
 
     # 1) 工作区文件（只看会被跟踪的源码类型）
@@ -98,7 +101,7 @@ def main():
             pass
 
     # 2) Git 历史（所有 commit 的 blob 内容）
-    if not staged:
+    if not staged and not no_history:
         objs = sh("git", "rev-list", "--all", "--objects").split("\n")
         for line in objs:
             parts = line.split(None, 1)
@@ -148,7 +151,10 @@ def main():
         return 1
 
     print("✓ 发布自检通过：无个人数据、无本机路径、无构建产物入库。")
-    print("  已扫描：工作区源码 + Git 全历史 blob + 仓库路径清单")
+    if no_history:
+        print("  已扫描：工作区源码 + 仓库路径清单（--no-history，历史未扫）")
+    else:
+        print("  已扫描：工作区源码 + Git 全历史 blob + 仓库路径清单")
     return 0
 
 
