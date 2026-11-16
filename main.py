@@ -394,6 +394,16 @@ def _clean_bands(v, cap=10):
     return bands, dropped, truncated
 
 
+# K 歌原生直通的输入候选偏好标签（P11.5）：api/preset 组合或裸 preset。
+# 与 oboe_karaoke.cpp presetName / web 侧 karSweepZh 同一套词表。
+_KAR_NATIVE_PREFER_OK = {
+    *(f"{api}/{p}" for api in ("aaudio", "opensl")
+      for p in ("voice_performance", "voice_communication",
+                "unprocessed", "voice_recognition", "generic")),
+    *"voice_performance voice_communication unprocessed voice_recognition generic".split(),
+}
+
+
 def _clean_settings(payload):
     """settings 写入前的清洗：非 dict 拒绝，数值键转 int 并钳制，非法值丢弃。"""
     if payload is None:
@@ -465,6 +475,19 @@ def _clean_settings(payload):
             # 以前当脏数据丢弃会让前端清空后重启、旧型号又复活回 UI。
             if isinstance(v, str):
                 out[k] = v.strip()[:80]
+            continue
+        if k == "karaoke_native_prefer":
+            # K 歌原生耳返的采集源偏好（P11.5）：白名单外丢弃。空串合法
+            # （清除偏好回默认顺序），与 eq_headphone 同一个显式清空口径。
+            if isinstance(v, str):
+                s = v.strip()
+                if s == "" or s in _KAR_NATIVE_PREFER_OK:
+                    out[k] = s
+            continue
+        if k == "karaoke_solo_capture":
+            # 单采集实验开关（P11.5）：bool 硬校验，字符串 "true" 不收。
+            if isinstance(v, bool):
+                out[k] = v
             continue
         rule = _SETTING_NUM.get(k)
         if not rule:
@@ -5598,8 +5621,47 @@ if __name__ == "__main__":
     main()
 
 
+# 本进程已启动的 Android 服务端口；系统复用缓存进程再次走 onCreate 时，
+# 靠它识别「端口上就是自己之前起的服务」，直接复用而不是再起一个。
+_ANDROID_SERVER_PORT = None
+
+
 def serve_android(port=18810):
-    """Chaquopy 入口：Java 侧在后台线程调用，WebView 加载 http://127.0.0.1:<port>/"""
+    """Chaquopy 入口：Java 侧在后台线程调用，返回实际服务端口供 WebView 加载。
+
+    桌面 main() 的防双开（端口被占 → SystemExit(2)）搬到 Android 就是闪退：
+    系统回收旧进程有竞态，新进程 onCreate 可能赶在旧实例释放端口前绑定
+    （beta11 真机 22:34 实测：旧进程 hub.stop 还没做完，新进程 29ms 后就
+    以 PyException 收场）。所以这里不走 main()：等旧实例退场 → 进程内
+    复用 → 临时端口兜底，任何路径都把端口交回 Java，绝不抛 SystemExit。
+    """
+    global _ANDROID_SERVER_PORT
     os.environ["FLACMUSIC_PORT"] = str(port)
     sys.argv = ["main.py", "--serve"]
-    main()
+    if _ANDROID_SERVER_PORT is not None:
+        # 同进程重复 onCreate（App 侧端口恒为默认值，包括临时端口兜底后）：
+        # 复用本进程已起的服务，绝不再起第二个。
+        return _ANDROID_SERVER_PORT
+    # main() 的启动序列（importer 绑定 + 自动同步），保持同一口径
+    importer.bind(search_all=search_all, billed_as=_billed_as,
+                  fold_text=_fold_text, resource_dir=resource_dir)
+    sync_engine.start_auto()      # 自动模式默认关，开了才有活干（线程自己判断）
+    deadline = time.time() + 3.0
+    while True:
+        try:
+            httpd, actual = serve(port)
+            break
+        except OSError:
+            if time.time() >= deadline:
+                # 端口被无关进程长期占着：换临时端口兜底。Java 侧读返回值
+                # 加载 WebView，所以换端口也能正常打开页面。
+                httpd, actual = serve(0)
+                break
+            time.sleep(0.2)     # 旧实例死到一半：等它退场再绑
+    try:
+        with open(os.path.join(data_dir(), "port.txt"), "w", encoding="utf-8") as f:
+            f.write(str(actual))
+    except OSError:
+        pass
+    _ANDROID_SERVER_PORT = actual
+    return actual

@@ -57,11 +57,11 @@ html[data-theme="light"]{
   --ink:#0a0a0f;
   --ink-2:#3b3b45;
   --muted:#6e6e78;   /* 旧 #86868f 在白卡上 3.61:1 不达 AA；#6e6e78 全表面 ≥4.7 */
-  --accent:#f5325b;
-  --accent-2:#ff6b8a;
-  --accent-dim:rgba(245,50,91,.09);
-  --gold:#a9764a;
-  --gold-dim:rgba(169,118,74,.1);
+  --accent:#cf1e4d;   /* 旧 #f5325b：白字/淡底上 3.83/3.39 不达 AA；#cf1e4d：白字 5.32 / 白底 5.32 / dim 底 4.62 */
+  --accent-2:#c22550; /* 旧 #ff6b8a：白底 2.72；新值白底 5.72 / dim 底 5.06（Hi-Res 徽标小字） */
+  --accent-dim:rgba(207,30,77,.09);
+  --gold:#956030;     /* 旧 #a9764a：gold-dim 底上 3.48；#956030 ≥4.92（FLAC/无损徽标） */
+  --gold-dim:rgba(149,96,48,.1);
   --player:rgba(255,255,255,.86);
   --shadow:0 16px 40px rgba(15,15,25,.1);
   --shadow-s:0 1px 4px rgba(15,15,25,.07);
@@ -498,6 +498,13 @@ input::placeholder,textarea::placeholder{color:var(--muted);opacity:1}
   background:linear-gradient(150deg,var(--card-2),var(--card));
   display:grid;place-items:center;color:var(--muted);
   margin-bottom:9px;box-shadow:var(--shadow-s);
+}
+/* 封面加载失败兜底（artFail）：留一张淡音符，别静默蒸发成死黑块 */
+.no-art{position:relative}
+.no-art::after{
+  content:"";position:absolute;inset:0;margin:auto;width:38%;height:38%;max-width:64px;max-height:64px;
+  opacity:.6;
+  background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23a2a2ae' d='M9 18.5a2.5 2.5 0 1 1-2.5-2.5c.4 0 .8.1 1.1.2V5.6c0-.5.3-.9.8-1l7.3-1.6c.7-.2 1.3.3 1.3 1v10.9a2.5 2.5 0 1 1-1.6-2.3V6.2L9 7.5v11z'/%3E%3C/svg%3E") center/contain no-repeat;
 }
 .card-art img{width:100%;height:100%;object-fit:cover;display:block}
 .card-art svg{width:26px;height:26px;fill:currentColor}
@@ -1318,7 +1325,7 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
 .stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:2px 0 8px}
 .stat{background:var(--card-2);border:1px solid var(--line);border-radius:var(--radius);
   padding:12px 14px;display:flex;flex-direction:column;gap:2px;min-width:0}
-.stat b{font-size:20px;font-weight:600;color:var(--ink)}
+.stat b{font-size:20px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
 .stat span{font-size:12px;color:var(--muted)}
 .stats-body{display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start}
 .stats-block{flex:1 1 220px;min-width:190px}
@@ -1484,20 +1491,33 @@ html[data-theme="dark"] .vhead.taste-head{background-image:url(/art/taste_banner
 .stylecard-play svg{width:13px;height:13px}
 .stylecard-list{border-top:1px solid var(--line);padding-top:4px}
 .stylecard-row{
-  display:flex;align-items:center;gap:10px;padding:5px 4px;
+  display:flex;align-items:center;gap:9px;padding:5px 4px;
   border-radius:6px;cursor:pointer;font-size:12px;
 }
 .stylecard-row:hover{background:var(--hover)}
-.stylecard-row > span:first-child{flex:1 1 auto;min-width:0}
+.sca-cov{width:30px;height:30px;flex:0 0 30px;border-radius:6px;overflow:hidden;
+  background:var(--card-2);display:grid;place-items:center;color:var(--muted)}
+.sca-cov img{width:100%;height:100%;object-fit:cover;display:block}
+.sca-cov svg{width:14px;height:14px;fill:currentColor}
+.sca-name{flex:1 1 auto;min-width:0}
 .sca-artist{
-  flex:0 1 44%;max-width:44%;min-width:0;color:var(--muted);font-size:11px;text-align:right;
-}
+  flex:0 1 42%;max-width:42%;min-width:0;color:var(--muted);font-size:11px;text-align:right}
+/* 行级播放键：hover 浮现；触屏无 hover 则常显淡淡的 */
+.sca-play{flex:0 0 20px;width:20px;height:20px;color:var(--muted);opacity:0;
+  transition:opacity .13s,color .13s;display:grid;place-items:center}
+.sca-play svg{width:12px;height:12px;fill:currentColor}
+.stylecard-row:hover .sca-play{opacity:1;color:var(--accent)}
+@media (hover:none){.sca-play{opacity:.5}}
 .stylecard-skel{height:150px;border-radius:12px}
 @media(max-width:820px){
   .stylecards{grid-template-columns:1fr}
-  /* 窄屏：歌手名换到歌名下方，别被挤掉 */
-  .stylecard-row{flex-direction:column;align-items:flex-start;gap:1px}
-  .sca-artist{flex:1 1 auto;max-width:100%;text-align:left}
+  /* 窄屏：歌名/歌手上下两行，封面左侧跨两行，播放钮在右侧 */
+  .stylecard-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;
+    grid-template-areas:'cov name play' 'cov artist play';column-gap:9px;row-gap:0;align-items:center}
+  .sca-cov{grid-area:cov}
+  .sca-name{grid-area:name}
+  .sca-artist{grid-area:artist;flex:none;max-width:100%;text-align:left}
+  .sca-play{grid-area:play;opacity:.5}
 }
 
 @media(max-width:820px){
@@ -2165,12 +2185,17 @@ html[data-mini="on"] .pl-seek .mono{font-size:9.5px}
 .np-lyric .lyric-line:hover{opacity:1}
 .np-lyric .lyric-line .lt{display:block;font-size:.42em;font-weight:400;line-height:1.5;color:var(--muted);opacity:.85;margin-top:4px;letter-spacing:0}
 .np-lyric .lyric-plain{font-size:clamp(18px,1.8vw,24px);font-weight:500;line-height:2;opacity:.75}
-/* 加载/失败占位不继承歌词巨字（42px/700）：报错信息不该是一堵墙。
-   重试按钮复用 .btn ghost sm；错误后重试走 data-act="lrc-retry" */
+/* 加载/失败占位：不继承歌词巨字（42px/700，报错不该是一堵墙），
+   垂直居中在整个歌词区（不锚左上）；按钮 nowrap，
+   CJK 正文允许换行，容器允许 wrap —— 否则按钮被压成单字双行。 */
 .np-lyric > .muted,.lyric-body > .muted{
-  display:inline-flex;align-items:center;gap:12px;
+  display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;
+  align-content:center;   /* 必须显式写：默认 stretch 会把换的两行撑满整个高度 */
+  width:100%;min-height:100%;padding:0 12px;text-align:center;
+  white-space:normal;
   font-size:13.5px;font-weight:400;line-height:1.7;letter-spacing:0;opacity:1;
 }
+.np-lyric > .muted .btn,.lyric-body > .muted .btn{white-space:nowrap;flex:0 0 auto}
 
 .np-queue{flex:1 1 auto;min-height:0;overflow-y:auto;width:min(860px,100%);margin:0 auto;padding:20px 0 10px}
 .np-main .empty{margin:auto}
@@ -2338,4 +2363,13 @@ html[data-chrome="on"]:not([data-platform="android"]) .np-layer{top:var(--wc-tit
     transition-duration:.01ms !important;
     scroll-behavior:auto !important;
   }
+}
+
+/* ---------------------------------------------------------------- 窄屏曲目表（≤560px）
+   时长列让位给曲名：536px 窗口下标题硬截断是常态，去掉 40px+间距后
+   曲名能多放 ~5 个字；来源 chip 与音质徽标按此前级联保留。 */
+@media (max-width:560px){
+  .thead .th-dur,.tr-dur{display:none}
+  .tr{gap:9px;padding:6px 10px}
+  .thead{gap:9px;padding:6px 10px}
 }

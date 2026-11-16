@@ -8,8 +8,10 @@ B 组（后端，纯标准库 urllib）
   B9  export 不含 works                          B10 /api/store 非法 id 不入库
   B11 删除后列表空、文件清干净                    B12 重复删除幂等
   B13 karaoke_native_mon 落盘 round-trip
+  B14 karaoke_native_prefer 白名单 + 显式清空     B15 karaoke_solo_capture bool 硬校验
 
-N 组（Android UA + CDP 注入假 ElysiumAndroid 桥；原生直通 2026-11-14）
+N 组（Android UA + CDP 注入假 ElysiumAndroid 桥；原生直通 2026-11-14；
+      P11.5 压延迟 2026-11-16）
   N1  桌面/无桥：原生行不出现、WebView 耳返链路不变
   N2  Android + 桥：原生行显示且默认开
   N3  开唱调 start：gain/toneDb/muted 正确 + WebView 耳返静音
@@ -19,6 +21,10 @@ N 组（Android UA + CDP 注入假 ElysiumAndroid 桥；原生直通 2026-11-14�
   N7  引擎停止：看门狗回退并恢复 WebView 耳返
   N8  karStop 停原生：回顾页不再监听
   N9  返回键关 K 歌并停原生
+  N10 prefer 设置透传 start 配置
+  N11 输入通路扫描：sweep 表渲染 + 应用最优落盘
+  N12 单采集实验：跳过 WebView 麦、原生照常、看门狗不误回退
+  N13 读数拆分：腿延迟与输入 API 上屏
 
 U 组（Chrome 假麦端到端）
   U1  K 歌层 CSS：fixed / z-index 70 / 铺满视口 / 默认 hidden
@@ -788,6 +794,117 @@ def main():
               "ok=%s gate=%.3f reason=%s" % (ok7, n7["gate"], n7["reason"]))
         dn.execute_script("karClose();")
 
+        # —— N10 prefer 偏好：设置键透传进 start 配置（P11.5）
+        dn.get(base + "/")
+        time.sleep(2.0)
+        dn.execute_script(
+            "state.settings.karaoke_native_prefer = 'opensl/voice_communication';"
+            "window.__fakeNative.calls = [];")
+        open_res = native_open(dn, wid)
+        phase = native_begin(dn)
+        wait_js(dn, "KAR.native.on === true ? true : null", timeout=5)
+        n10 = native_state(dn)
+        starts10 = [c for c in n10["calls"] if c[0] == "start"]
+        pref_ok = bool(starts10) and \
+            starts10[0][1].get("prefer") == ["opensl/voice_communication"]
+        check("N10 prefer 设置透传 start 配置",
+              phase == "sing" and pref_ok and n10["on"],
+              "phase=%s start=%s" % (phase, starts10[:1] if starts10 else None))
+        dn.execute_script("karClose();")
+        time.sleep(0.3)
+
+        # —— N11 输入通路扫描：sweep 表渲染 + 应用最优落盘（P11.5）
+        dn.get(base + "/")
+        time.sleep(2.0)
+        dn.execute_script(r"""
+        window.__fakeNative.diagResp = {ok:true, running:true, sweep:true};
+        window.__fakeNative.statusResp.sweep = {running:false, done:true, error:'',
+          current:'',
+          results:[
+            {label:'aaudio/voice_performance', ok:true, rttMs:105, minMs:100,
+             maxMs:110, hits:4, inBurst:256, inCap:512, inLatencyMs:80,
+             outLatencyMs:20, xruns:0},
+            {label:'opensl/voice_communication', ok:true, rttMs:70, minMs:66,
+             maxMs:75, hits:4, inBurst:128, inCap:256, inLatencyMs:50,
+             outLatencyMs:18, xruns:0},
+            {label:'aaudio/generic', ok:false, rttMs:null, minMs:null,
+             maxMs:null, hits:0, inBurst:0, inCap:0, inLatencyMs:null,
+             outLatencyMs:null, xruns:0, error:'open failed'}
+          ]};
+        openSettings();
+        """)
+        time.sleep(0.6)
+        sweep_row = dn.execute_script(
+            "const r = document.getElementById('diagSweepRow');"
+            "return {hidden: r ? r.hidden : null};")
+        dn.execute_script("document.getElementById('diagSweepBtn').click();")
+        ok11 = wait_js(dn, "document.getElementById('diagSweepApply') ? true : null",
+                       timeout=8)
+        dn.execute_script("document.getElementById('diagSweepApply').click();")
+        time.sleep(0.8)
+        cfg = req(base, "/api/store").get("settings") or {}
+        check("N11 输入通路扫描：表格渲染 + 应用最优落盘",
+              sweep_row.get("hidden") is False and bool(ok11)
+              and cfg.get("karaoke_native_prefer") == "opensl/voice_communication",
+              "row=%s apply=%s prefer=%s"
+              % (sweep_row, ok11, cfg.get("karaoke_native_prefer")))
+        dn.execute_script(
+            "state.settings.karaoke_native_prefer = '';"
+            "const el = document.getElementById('settingsBtn');"
+            "if (el) el.click();")   # 关抽屉，别让下一场被面板挡住
+        time.sleep(0.3)
+
+        # —— N12 单采集实验：WebView 不申请麦、原生照常起、badWeb 看门狗退场（P11.5）
+        # 注意：测试曲只有 3 秒，先等进 sing 再暂停 <audio>，不然 ended→karStop 会
+        # 把原生正常停掉，测成「歌放完了」而不是看门狗。
+        dn.get(base + "/")
+        time.sleep(2.0)
+        dn.execute_script(
+            "window.__fakeNative.calls = [];"
+            "state.settings.karaoke_solo_capture = true;")
+        native_open(dn, wid)
+        n12a = dn.execute_script(
+            "return {noMic: KAR.noMic, solo: KAR.solo, reason: KAR.noMicReason,"
+            " micStream: !!KAR.micStream};")
+        phase = native_begin(dn)
+        wait_js(dn, "KAR.phase === 'sing' ? true : null", timeout=10)
+        dn.execute_script(
+            "const a = document.getElementById('kAudio');"
+            " if (a && !a.paused) a.pause();")
+        wait_js(dn, "KAR.native.on === true ? true : null", timeout=5)
+        time.sleep(3.5)    # 覆盖 3 次看门狗轮询：badWeb 若未豁免必已回退
+        n12b = native_state(dn)
+        check("N12 单采集实验：跳过 WebView 麦、原生照常、看门狗不误回退",
+              bool(n12a["solo"]) and n12a["noMic"] and not n12a["micStream"]
+              and "单采集" in (n12a["reason"] or "")
+              and phase == "sing" and n12b["on"],
+              "open=%s phase=%s on=%s failed=%s reason=%s"
+              % (n12a, phase, n12b["on"], n12b["failed"], n12b["reason"]))
+        dn.execute_script("karClose();")
+        time.sleep(0.3)
+
+        # —— N13 读数拆分：采集/输出腿延迟与输入 API 上屏（P11.5）
+        dn.get(base + "/")
+        time.sleep(2.0)
+        dn.execute_script(
+            "window.__fakeNative.statusResp.engine = 'oboe';"
+            "window.__fakeNative.statusResp.recordBufMs = 11;"
+            "window.__fakeNative.statusResp.trackBufMs = 3;"
+            "window.__fakeNative.statusResp.ringMs = 6;"
+            "window.__fakeNative.statusResp.inApi = 'aaudio';"
+            "window.__fakeNative.statusResp.inCalcLatencyMs = 82.5;"
+            "window.__fakeNative.statusResp.outCalcLatencyMs = 14.2;")
+        native_open(dn, wid)
+        phase = native_begin(dn)
+        wait_js(dn, "KAR.native.on === true ? true : null", timeout=5)
+        time.sleep(1.2)    # 等一次看门狗轮询刷读数
+        n13 = native_state(dn)
+        check("N13 读数拆分：腿延迟与输入 API 上屏",
+              phase == "sing" and n13["on"]
+              and "链 83/14ms" in n13["info"] and "/aaudio" in n13["info"],
+              "phase=%s info=%s" % (phase, n13["info"]))
+        dn.execute_script("karClose();")
+
         # ---------------------------------------------------------- 收尾清理
         for w in [x["id"] for x in new_rows] + [wid]:
             jpost(base, "/api/works/delete", {"id": w})
@@ -811,6 +928,44 @@ def main():
         on_ok = cfg.get("karaoke_native_mon") is True
         check("B13 karaoke_native_mon 落盘 round-trip", off_ok and on_ok,
               "off=%s on=%s" % (off_ok, on_ok))
+
+        # P11.5：采集源偏好是白名单字符串（空串=显式清除）；非法值不落盘保留原值。
+        jpost(base, "/api/store",
+              {"op": "settings",
+               "payload": {"karaoke_native_prefer": "opensl/voice_communication"}})
+        cfg = req(base, "/api/store").get("settings") or {}
+        ok_pref = cfg.get("karaoke_native_prefer") == "opensl/voice_communication"
+        jpost(base, "/api/store",
+              {"op": "settings",
+               "payload": {"karaoke_native_prefer": "drop/invalid; DROP TABLE"}})
+        cfg = req(base, "/api/store").get("settings") or {}
+        bad_pref = cfg.get("karaoke_native_prefer")
+        jpost(base, "/api/store",
+              {"op": "settings", "payload": {"karaoke_native_prefer": ""}})
+        cfg = req(base, "/api/store").get("settings") or {}
+        check("B14 karaoke_native_prefer 白名单 + 显式清空",
+              ok_pref and bad_pref == "opensl/voice_communication"
+              and cfg.get("karaoke_native_prefer") == "",
+              "ok=%s bad=%r clear=%r" % (ok_pref, bad_pref,
+                                         cfg.get("karaoke_native_prefer")))
+
+        # P11.5：单采集实验开关 bool 硬校验，字符串 "true" 不收。
+        jpost(base, "/api/store",
+              {"op": "settings", "payload": {"karaoke_solo_capture": True}})
+        cfg = req(base, "/api/store").get("settings") or {}
+        ok_solo = cfg.get("karaoke_solo_capture") is True
+        jpost(base, "/api/store",
+              {"op": "settings", "payload": {"karaoke_solo_capture": "true"}})
+        cfg = req(base, "/api/store").get("settings") or {}
+        str_solo = cfg.get("karaoke_solo_capture")
+        jpost(base, "/api/store",
+              {"op": "settings", "payload": {"karaoke_solo_capture": False}})
+        cfg = req(base, "/api/store").get("settings") or {}
+        check("B15 karaoke_solo_capture bool 硬校验",
+              ok_solo and str_solo is True
+              and cfg.get("karaoke_solo_capture") is False,
+              "on=%s str=%r off=%s" % (ok_solo, str_solo,
+                                       cfg.get("karaoke_solo_capture")))
 
     finally:
         for drv in (d, dn):

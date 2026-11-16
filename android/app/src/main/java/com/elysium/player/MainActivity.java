@@ -41,6 +41,10 @@ import java.lang.ref.WeakReference;
 public class MainActivity extends Activity {
 
     private static final int PORT = 18810;
+    /** serve_android 返回的实际服务端口；18810 被占换临时端口时会变。 */
+    private static volatile int sServerPort = PORT;
+    /** Python 侧已上报端口（成功绑定或复用）；上报前 waitAndLoad 不得 loadUrl。 */
+    private static volatile boolean sServerPortReady = false;
     private static final int REQ_RECORD_AUDIO = 7102;
     private static WeakReference<MainActivity> ref = new WeakReference<>(null);
     private WebView web;
@@ -248,9 +252,27 @@ public class MainActivity extends Activity {
         if (!Python.isStarted()) {
             Python.start(new AndroidPlatform(getApplicationContext()));
         }
-        // serve_android 会阻塞（服务循环），必须放后台线程
-        new Thread(() ->
-                Python.getInstance().getModule("main").callAttr("serve_android")).start();
+        // serve_android 现在启动完服务就返回实际端口（服务线程是 daemon）。
+        // 放后台线程跑；返回值写进 sServerPort 供 waitAndLoad 使用。任何
+        // Python 异常都吞掉记日志：崩溃交给 waitAndLoad 的 30s 轮询兜白屏，
+        // 不能再让 PyException 直接杀进程（beta11 真机 22:34 闪退实测）。
+        new Thread(() -> {
+            try {
+                Object r = Python.getInstance().getModule("main").callAttr("serve_android");
+                if (r != null) {
+                    // callAttr 回来的是 PyObject（包着 Python int），不能直接
+                    // (Number) 强转——真机 beta12 首测 ClassCastException 实锤。
+                    // Python int 的 toString 就是十进制字符串，解析它最稳。
+                    sServerPort = Integer.parseInt(r.toString().trim());
+                }
+                sServerPortReady = true;
+            } catch (Exception e) {
+                // Python 起不来：退回默认端口走旧轮询（端口真被占时白屏，
+                // 不会再崩）；报进 CrashLog 供自检面板定位。
+                CrashLog.log("serve_android failed: " + e);
+                sServerPortReady = true;
+            }
+        }).start();
 
         web = new WebView(this);
         web.setBackgroundColor(Color.parseColor("#08080b"));
@@ -446,13 +468,25 @@ public class MainActivity extends Activity {
         super.onDestroy();
     }
 
-    /** 轮询本地端口，服务起来才 loadUrl，避免白屏 404。 */
+    /** 轮询本地端口，服务起来才 loadUrl，避免白屏 404。端口以 serve_android
+     * 返回的 sServerPort 为准（18810 被占换临时端口时照样能打开页面）。 */
     private void waitAndLoad() {
-        final String url = "http://127.0.0.1:" + PORT + "/";
         new Thread(() -> {
             for (int i = 0; i < 150; i++) {
-                try (java.net.Socket s = new java.net.Socket("127.0.0.1", PORT)) {
-                    runOnUiThread(() -> web.loadUrl(url));
+                // 先等 Python 侧上报端口再连：18810 若被无关进程占着，
+                // 「TCP 可连」不代表「Elysium 就绪」（beta12 真机 nc 占口
+                // 实测 WebView 抢跑加载到占用者上，ERR_SOCKET_NOT_CONNECTED）。
+                if (!sServerPortReady) {
+                    try {
+                        Thread.sleep(200);
+                    } catch (InterruptedException ie) {
+                        return;
+                    }
+                    continue;
+                }
+                int port = sServerPort;
+                try (java.net.Socket s = new java.net.Socket("127.0.0.1", port)) {
+                    runOnUiThread(() -> web.loadUrl("http://127.0.0.1:" + port + "/"));
                     return;
                 } catch (Exception e) {
                     try {

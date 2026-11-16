@@ -2140,7 +2140,7 @@ function postLyricNow() {
 function paintPlayer(item) {
   const art = $('#plArt');
   art.innerHTML =
-    (item.cover ? `<img src="${esc(item.cover)}" alt="" onerror="this.remove()">` : phImg('song')) +
+    (item.cover ? `<img src="${esc(item.cover)}" alt="" onerror="artFail(this)">` : phImg('song')) +
     '<span class="spin" id="buffering" hidden></span>';
   $('#plTitle').textContent = item.name || '';
   $('#plSub').textContent = [item.artist, item.album_name].filter(Boolean).join(' · ');
@@ -2457,6 +2457,18 @@ function restoreLast() {
         $('#seekDot').style.left = (r * 100).toFixed(2) + '%';
         seekAria($('#seekBar'), pos, dur);
       }
+      /* NP 展开层同一份数据：恢复态下 <audio> 没加载，paintSeek 读不到 duration，
+         不补这段的话全屏页进度恒显 0:00/0:00（比迷你条少一拍） */
+      const nc = $('#npCurTime'), na = $('#npAllTime');
+      if (nc) nc.textContent = fmtTime(pos);
+      if (dur > pos) {
+        if (na) na.textContent = fmtTime(dur);
+        const r = Math.min(1, pos / dur);
+        const nf = $('#npSeekFill'), nd = $('#npSeekDot');
+        if (nf) nf.style.width = (r * 100).toFixed(2) + '%';
+        if (nd) nd.style.left = (r * 100).toFixed(2) + '%';
+        seekAria($('#npSeekBar'), pos, dur);
+      }
     }
     toast(`上次听到「${item.name}」，按播放接着听`);
   }
@@ -2506,6 +2518,14 @@ function eqHtml() {
 }
 
 /* ------------------------------------------------------------------ 美术占位 */
+/* 封面加载失败兜底：换成淡音符占位（.no-art::after），别静默蒸发成死黑块。
+   内联 onerror 调用，必须挂到 window。 */
+window.artFail = function (img) {
+  const host = img.closest('.card-art,.tr-cover,.pl-art,.np-art,.hero-art,.taste-av,.stats-art,.stylecard-art,.sca-cov,.k-ready-art,.q-art');
+  img.remove();
+  if (host) host.classList.add('no-art');
+};
+
 /* 上游没给封面时才用；空状态按当前主题取对应插画，避免浅底上出现深色方块 */
 function phImg(kind) {
   /* 空状态用 CSS 背景：队列/下载抽屉只在 boot 渲染一次，靠 DOM 切主题会漏掉 */
@@ -2518,7 +2538,7 @@ function phImg(kind) {
 
 function coverHtml(url, shape) {
   const inner = url
-    ? `<img src="${esc(url)}" alt="" loading="lazy" onerror="this.remove()">`
+    ? `<img src="${esc(url)}" alt="" loading="lazy" onerror="artFail(this)">`
     : phImg('song');
   return `<div class="tr-cover">${inner}</div>`;
 }
@@ -2597,7 +2617,7 @@ const parseAlts = (s) => String(s || '').split(',').map((x) => {
 
 function albumCardHtml(a) {
   return `<button class="card" data-act="album" data-id="${esc(a.id)}" data-platform="${esc(a.platform)}" data-alts="${esc(altsAttr(a))}">
-    <div class="card-art">${a.cover ? `<img src="${esc(a.cover)}" alt="" loading="lazy" onerror="this.remove()">` : phImg('album')}
+    <div class="card-art">${a.cover ? `<img src="${esc(a.cover)}" alt="" loading="lazy" onerror="artFail(this)">` : phImg('album')}
       <span class="cplay" data-act="album-play" data-id="${esc(a.id)}" data-platform="${esc(a.platform)}">${icon('play')}</span>
     </div>
     <div class="card-name">${esc(a.name || '未知专辑')}</div>
@@ -2620,7 +2640,7 @@ function artistCardHtml(a, hideFav = false) {
   const fav = isFav('artist', a.name, a.platform);
   const aid = String(a.artist_id || '').trim();
   const inner = a.cover
-    ? `<img src="${esc(a.cover)}" alt="" loading="lazy" onerror="this.remove()">`
+    ? `<img src="${esc(a.cover)}" alt="" loading="lazy" onerror="artFail(this)">`
     : phImg('artist');
   /* 搜索结果卡（带 platforms）不标曲目数：搜索命中的只是零头，标上去是假情报。
      收藏歌手卡的 count 是歌手页双源抓全后存下的真实总数，照标。 */
@@ -2647,7 +2667,7 @@ const losslessCount = (items) => (items || [])
 
 function songCardHtml(s) {
   return `<button class="card" data-act="card-play" data-id="${esc(s.id)}" data-platform="${esc(s.platform)}">
-    <div class="card-art">${s.cover ? `<img src="${esc(s.cover)}" alt="" loading="lazy" onerror="this.remove()">` : phImg('song')}
+    <div class="card-art">${s.cover ? `<img src="${esc(s.cover)}" alt="" loading="lazy" onerror="artFail(this)">` : phImg('song')}
       <span class="cplay">${icon('play')}</span>
     </div>
     <div class="card-name">${esc(s.name)}</div>
@@ -2750,16 +2770,9 @@ function statsShelfHtml() {
   }
   const maxN = Math.max(1, ...s.by_day.map((d) => d.n));
   const maxH = Math.max(1, ...s.hours);
-  return `<section class="shelf" id="shelfStats">
-    <div class="shelf-head"><h2>我的统计</h2></div>
-    <div class="stats-grid">
-      <div class="stat"><b class="mono">${s.plays_7d}</b><span>近 7 天收听</span></div>
-      <div class="stat"><b class="mono">${fmtHours(s.total_seconds)}</b><span>累计时长</span></div>
-      <div class="stat"><b class="mono">${s.listening_days}</b><span>累计天数</span></div>
-      <div class="stat"><b class="mono">${s.favorites}</b><span>收藏</span></div>
-    </div>
-    <div class="stats-body">
-      <div class="stats-block">
+  // 全 0 的柱子画出来只是两条红 slivers（观感像坏了）；全 0 时整块换空态文案
+  const hasActivity = s.by_day.some((d) => d.n > 0) || s.hours.some((n) => n > 0);
+  const chartsHtml = hasActivity ? `<div class="stats-block">
         <div class="stats-cap">近 30 天</div>
         <div class="stats-bars">${s.by_day.map((d) =>
           `<i style="height:${Math.max(3, Math.round((d.n / maxN) * 100))}%" title="${d.date} · ${d.n} 次"></i>`).join('')}</div>
@@ -2768,12 +2781,26 @@ function statsShelfHtml() {
         <div class="stats-cap">时段分布</div>
         <div class="stats-bars">${s.hours.map((n, h) =>
           `<i style="height:${Math.max(3, Math.round((n / maxH) * 100))}%" title="${String(h).padStart(2, '0')}:00 · ${n} 次"></i>`).join('')}</div>
-      </div>
+      </div>`
+    : `<div class="stats-block">
+        <div class="stats-cap">近 30 天 · 时段分布</div>
+        <div class="stats-empty">还没有曲线 · 听满几首歌，这里就有了</div>
+      </div>`;
+  return `<section class="shelf" id="shelfStats">
+    <div class="shelf-head"><h2>我的统计</h2></div>
+    <div class="stats-grid">
+      <div class="stat"><b>${s.plays_7d}</b><span>近 7 天收听</span></div>
+      <div class="stat"><b>${fmtHours(s.total_seconds)}</b><span>累计时长</span></div>
+      <div class="stat"><b>${s.listening_days}</b><span>累计天数</span></div>
+      <div class="stat"><b>${s.favorites}</b><span>收藏</span></div>
+    </div>
+    <div class="stats-body">
+      ${chartsHtml}
       ${s.top_artists.length ? `<div class="stats-block">
         <div class="stats-cap">最常听</div>
         <div class="stats-arts">${s.top_artists.slice(0, 8).map((a) =>
           `<button class="stats-art" data-act="artist" data-name="${esc(a.name)}" title="${esc(a.name)} · ${a.plays} 次">
-            ${a.cover ? `<img src="${esc(a.cover)}" alt="" loading="lazy" onerror="this.remove()">` : ''}
+            ${a.cover ? `<img src="${esc(a.cover)}" alt="" loading="lazy" onerror="artFail(this)">` : ''}
             <span class="ell">${esc(a.name)}</span></button>`).join('')}</div>
       </div>` : ''}
     </div>
@@ -2798,7 +2825,7 @@ function recoCardHtml(it, i) {
   return `<div class="card reco" role="button" tabindex="0" data-act="reco-play" data-i="${i}"
       data-pk="${esc(pk(it))}" data-pk-i="${i}" title="播放 ${esc(it.name || '')}">
     <div class="card-art">
-      ${it.cover ? `<img src="${esc(it.cover)}" alt="" loading="lazy" onerror="this.remove()">` : phImg('song')}
+      ${it.cover ? `<img src="${esc(it.cover)}" alt="" loading="lazy" onerror="artFail(this)">` : phImg('song')}
       <div class="racts">
         <button data-act="reco-play" data-i="${i}" title="播放" aria-label="播放">${icon('play')}</button>
         <button data-act="reco-add" data-i="${i}" title="加入播放队列" aria-label="加入播放队列">${icon('queue')}</button>
@@ -2955,7 +2982,7 @@ function styleCardHtml(c) {
   return `<section class="stylecard" data-act="style-play" data-g="${esc(c.genre)}">
     <div class="stylecard-top">
       <span class="stylecard-art">${cover
-        ? `<img src="${esc(cover)}" alt="" loading="lazy" onerror="this.remove()">` : phImg('album')}</span>
+        ? `<img src="${esc(cover)}" alt="" loading="lazy" onerror="artFail(this)">` : phImg('album')}</span>
       <div class="stylecard-meta">
         <div class="stylecard-name">${esc(c.name)}</div>
         <div class="stylecard-en">${esc(c.en)} · ${esc(c.group)}</div>
@@ -2963,10 +2990,14 @@ function styleCardHtml(c) {
       </div>
       <button class="stylecard-play" data-act="style-play" data-g="${esc(c.genre)}" title="播放这一组" aria-label="播放这一组">${icon('play')}</button>
     </div>
-    <div class="stylecard-list">${list.map((it) => `
-      <div class="stylecard-row" data-act="style-one" data-g="${esc(c.genre)}" data-i="${list.indexOf(it)}">
-        <span class="ell">${esc(it.name || '')}</span>
+    <div class="stylecard-list">${list.map((it, i) => `
+      <div class="stylecard-row" data-act="style-one" data-g="${esc(c.genre)}" data-i="${i}"
+           role="button" tabindex="0" aria-label="播放 ${esc(it.name || '')}${it.artist ? ' · ' + esc(it.artist) : ''}">
+        <span class="sca-cov">${it.cover
+          ? `<img src="${esc(it.cover)}" alt="" loading="lazy" onerror="artFail(this)">` : icon('note')}</span>
+        <span class="ell sca-name">${esc(it.name || '')}</span>
         <span class="ell sca-artist">${esc(it.artist || '')}</span>
+        <span class="sca-play" aria-hidden="true">${icon('play')}</span>
       </div>`).join('')}</div>
   </section>`;
 }
@@ -2992,7 +3023,7 @@ function styleGridInner() {
 function viewStyles() {
   return `<div class="page">
     <div class="vhead taste-head">
-      <div class="kicker">ALL STYLES · LOCAL ONLY</div>
+      <div class="kicker">STYLE RADIO · LOCAL ONLY</div>
       <h1>风格电台</h1>
       <p class="sub">每个卡片是一种风格 · 卡片按你的口味加权、每天轮换</p>
     </div>
@@ -3075,11 +3106,14 @@ function genrePickerHtml() {
 function viewTaste() {
   const t = state.taste || {};
   const arts = t.artists || [];
-  // 条形按真实收听次数画；没听过但收藏过的歌手不占条，排在后面
-  const max = Math.max(1, ...arts.map((a) => Number(a.plays) || 0));
+  // 只列听过的（plays>0）：收藏过但没听过的占着榜单把「常听」注水成 0
+  const played = arts.filter((a) => (Number(a.plays) || 0) > 0);
+  const unplayed = arts.length - played.length;
+  // 条形按真实收听次数画
+  const max = Math.max(1, ...played.map((a) => Number(a.plays) || 0));
   // 只列前 10 位：画像里能有几十个歌手，全铺出来这张卡会长到离谱，
   // 右边的风格选择器反而看不见了。剩下的给一行说明。
-  const top = arts.slice(0, 10);
+  const top = played.slice(0, 10);
   // taste_profile 一定会带 listened —— 没有这个键说明还没取回来。
   // 不然首次进页面会先摆一屏「还没有口味信号」，再换成真数据。
   const loaded = 'listened' in t;
@@ -3089,15 +3123,17 @@ function viewTaste() {
     <div class="taste-artist">
       <span class="taste-rank mono">${pad(i + 1)}</span>
       <span class="taste-av round">${a.cover
-        ? `<img src="${esc(a.cover)}" alt="" onerror="this.remove()">` : phImg('artist')}</span>
+        ? `<img src="${esc(a.cover)}" alt="" onerror="artFail(this)">` : phImg('artist')}</span>
       <span class="taste-an ell">${esc(a.name || '')}</span>
       <span class="taste-bar"><i style="width:${Math.round((Number(a.plays) || 0) / max * 100)}%"></i></span>
       <span class="mono taste-score">${a.plays || 0}</span>
     </div>`).join('')
-    : '<div class="reco-off">还没有口味信号 · 多听几首、收藏几个歌手就有了</div>';
+    : arts.length
+      ? '<div class="reco-off">还没有听过的歌手 · 收藏过不算常听，多听几首再回来</div>'
+      : '<div class="reco-off">还没有口味信号 · 多听几首、收藏几个歌手就有了</div>';
 
   const picked = (t.genres || []).length;
-  const more = Math.max(0, arts.length - top.length);
+  const more = Math.max(0, played.length - top.length);
 
   return `<div class="page">
     <div class="vhead taste-head">
@@ -3108,10 +3144,11 @@ function viewTaste() {
     <div class="taste-grid">
       <section class="taste-card">
         <div class="taste-head"><h2>常听歌手</h2>
-          <span class="cnt">${pad(arts.length)}</span></div>
+          <span class="cnt">${pad(played.length)}</span></div>
         <p class="rule-note">数字是听完的次数 · 换音质不重复计</p>
         ${rows}
         ${more ? `<p class="taste-more">还有 ${more} 位没列出来</p>` : ''}
+        ${unplayed ? `<p class="taste-more">另有 ${unplayed} 位收藏过但还没听过</p>` : ''}
         <div class="taste-stats">
           <span><b class="mono">${t.listened || 0}</b>次收听</span>
           <span><b class="mono">${t.songs || 0}</b>首曲目</span>
@@ -3183,7 +3220,7 @@ function viewHome() {
     const pct = dur ? Math.min(100, (pos / dur) * 100) : 0;
     parts.push(`<div class="cont">
       <div class="cont-art">${it.cover
-        ? `<img src="${esc(it.cover)}" alt="" onerror="this.remove()">` : phImg('song')}</div>
+        ? `<img src="${esc(it.cover)}" alt="" onerror="artFail(this)">` : phImg('song')}</div>
       <div class="cont-main">
         <div class="kicker">CONTINUE</div>
         <div class="cont-name">${esc(it.name || '')}</div>
@@ -3497,7 +3534,7 @@ function viewArtist() {
 
   const hero = `<div class="hero">
     <div class="hero-art round">${cover
-      ? `<img src="${esc(cover)}" alt="" onerror="this.remove()">`
+      ? `<img src="${esc(cover)}" alt="" onerror="artFail(this)">`
       : phImg('artist')}</div>
     <div class="hero-meta">
       <div class="kicker">ARTIST</div>
@@ -3558,7 +3595,7 @@ function viewAlbum() {
   const total = list.reduce((n, it) => n + (it.duration || 0), 0);
 
   const hero = `<div class="hero">
-    <div class="hero-art">${cover ? `<img src="${esc(cover)}" alt="" onerror="this.remove()">` : phImg('album')}</div>
+    <div class="hero-art">${cover ? `<img src="${esc(cover)}" alt="" onerror="artFail(this)">` : phImg('album')}</div>
     <div class="hero-meta">
       <div class="kicker">ALBUM</div>
       <h1>${esc(info.name || '专辑')}</h1>
@@ -4159,7 +4196,7 @@ function syncNpHead() {
   const art = $('#npArt');
   if (!art) return;
   art.innerHTML = it
-    ? (it.cover ? `<img src="${esc(it.cover)}" alt="" onerror="this.remove()">` : phImg('song'))
+    ? (it.cover ? `<img src="${esc(it.cover)}" alt="" onerror="artFail(this)">` : phImg('song'))
     : phImg('song');
   const t = $('#npTitle'), sub = $('#npSub');
   if (t) t.textContent = it ? (it.name || '') : '未在播放';
@@ -5329,6 +5366,12 @@ function viewSettings() {
         <button class="btn sm ghost" id="diagCrashBtn">崩溃日志</button>
       </div>
     </div>
+    <div class="field" id="diagSweepRow" hidden>
+      <div><label>输入通路扫描</label><p class="tip">把 AAudio / OpenSL × 5 种采集源逐个开一遍、各发 4 发脉冲量延迟（约 30 秒，有线耳机戴上测，声学回路才走真实演唱路径）。测完挑最小的应用，之后开唱按它起流</p></div>
+      <div class="field-acts">
+        <button class="btn sm" id="diagSweepBtn">扫描采集源</button>
+      </div>
+    </div>
     <div id="diagOut"></div>
   </div>
 
@@ -5721,6 +5764,8 @@ function bindSettings() {
   // 原生直通自检只在 Android + 桥可用时出现；桌面/旧 APK 整行退场
   const dnr = $('#diagNativeRow');
   if (dnr) dnr.hidden = !karNativeBridge();
+  const dsr = $('#diagSweepRow');
+  if (dsr) dsr.hidden = !karNativeBridge();
 
   on('#setQuality', 'change', (e) => { state.quality = e.target.value; save('quality', e.target.value); });
   on('#setPlayQuality', 'change', (e) => { save('play_quality', e.target.value); toast('下次播放起生效，当前曲目可在播放条直接切'); });
@@ -6038,6 +6083,128 @@ function bindSettings() {
       setTimeout(poll, 400);
     };
     setTimeout(poll, 400);
+  });
+
+  /* ---- 输入通路扫描（P11.5）：AAudio/OpenSL × 5 采集源逐个量 RTT ----
+     结果从 status().sweep 轮询（原生逐候选开流，约 30 秒）；挑中位 RTT 最小且
+     命中 ≥3 的应用为 karaoke_native_prefer，之后开唱 start 带回原生排候选。 */
+  const KAR_PRESET_ZH = {
+    voice_performance: '性能优先', voice_communication: '通话（可能带 AEC/NS 染色）',
+    unprocessed: '未处理', voice_recognition: '识别', generic: '通用',
+  };
+  const karSweepZh = (label) => label.replace(/^(opensl|aaudio)\/(\w+)$/,
+    (m, api, p) => (api === 'opensl' ? 'OpenSL' : 'AAudio') + ' · ' + (KAR_PRESET_ZH[p] || p));
+  on('#diagSweepBtn', 'click', () => {
+    const b = karNativeBridge();
+    const btn = $('#diagSweepBtn'), out = $('#diagOut');
+    if (!b || typeof b.startKaraokeMonitorDiag !== 'function') {
+      toast('这个版本没有原生直通', 'err');
+      return;
+    }
+    if (KAR.open) { toast('先退出 K 歌再扫描', 'err'); return; }
+    const a = audio();
+    if (state.playing && a.src && !a.paused) {
+      toast('测量需要安静环境：先暂停播放再扫描', 'err');
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = '扫描中…';
+    out.innerHTML = '<div class="diag-detail dim">输入通路扫描：每发脉冲会响一下（约 30 秒），'
+      + '保持安静…</div>';
+    let res = null;
+    try { res = JSON.parse(b.startKaraokeMonitorDiag('{"sweep":true}') || '{}'); }
+    catch (e) { res = null; }
+    if (!res || !res.ok) {
+      btn.disabled = false;
+      btn.textContent = '扫描采集源';
+      out.innerHTML = '<div class="diag-detail bad">扫描启动失败：'
+        + esc((res && (res.error || res.detail)) || '未知错误') + '</div>';
+      return;
+    }
+    const t0 = Date.now();
+    const poll = () => {
+      let st = null;
+      try { st = JSON.parse(b.karaokeMonitorStatus() || '{}'); } catch (e) { st = null; }
+      const s = st && st.sweep;
+      if (!s) {
+        if (Date.now() - t0 > 60000) {
+          btn.disabled = false;
+          btn.textContent = '扫描采集源';
+          out.innerHTML = '<div class="diag-detail bad">扫描状态读取超时（60s）</div>';
+          return;
+        }
+        setTimeout(poll, 500);
+        return;
+      }
+      if (s.running) {
+        if (s.current) {
+          out.innerHTML = '<div class="diag-detail dim">扫描中… 当前：'
+            + esc(karSweepZh(s.current)) + '</div>';
+        }
+        if (Date.now() - t0 > 90000) {
+          btn.disabled = false;
+          btn.textContent = '扫描采集源';
+          out.innerHTML = '<div class="diag-detail bad">扫描超时（90s），可用「崩溃日志」看断点</div>';
+          return;
+        }
+        setTimeout(poll, 500);
+        return;
+      }
+      btn.disabled = false;
+      btn.textContent = '扫描采集源';
+      if (s.error) {
+        out.innerHTML = '<div class="diag-detail bad">扫描失败：' + esc(s.error) + '</div>';
+        return;
+      }
+      const rows = Array.isArray(s.results) ? s.results : [];
+      const okRows = rows.filter((r) => r.ok && Number.isFinite(Number(r.rttMs)));
+      const best = okRows.slice().sort((x, y) => Number(x.rttMs) - Number(y.rttMs))[0] || null;
+      const cur = String(state.settings.karaoke_native_prefer || '').trim();
+      const line = (r) => {
+        const rtt = r.ok ? Math.round(Number(r.rttMs)) : null;
+        const mark = best && r.label === best.label ? '★' : ' ';
+        const zh = esc(karSweepZh(r.label));
+        return '<div class="diag-row"><span class="diag-mark">' + mark + '</span>'
+          + '<span class="diag-name">' + zh + (r.ok ? '' : ' · ' + esc(r.error || '不可用')) + '</span>'
+          + '<span class="mono diag-ms">'
+          + (rtt === null ? '—' : rtt + ' ms · ' + (r.hits || 0) + ' 发'
+            + (r.inBurst ? ' · burst ' + r.inBurst : '')) + '</span></div>';
+      };
+      let html = rows.map(line).join('')
+        + '<div class="diag-detail ' + (best ? 'dim' : 'bad') + '">'
+        + (best
+          ? '最优：' + esc(karSweepZh(best.label)) + ' ' + Math.round(Number(best.rttMs)) + 'ms'
+            + '（中位；数字只在该源实际可用时可信，人耳复核染色后再定）'
+          : '没有候选测到足够脉冲：媒体音量最大、离扬声器/耳机近一点再扫一次') + '</div>';
+      if (cur) {
+        html += '<div class="diag-detail dim">当前应用：' + esc(karSweepZh(cur)) + '</div>';
+      }
+      if (best) {
+        html += '<div class="field-acts" style="margin-top:6px">'
+          + '<button class="btn sm" id="diagSweepApply">应用最优（'
+          + esc(karSweepZh(best.label)) + '）</button>'
+          + (cur ? '<button class="btn sm ghost" id="diagSweepClear">清除偏好</button>' : '')
+          + '</div>';
+      }
+      out.innerHTML = html;
+      const ap = $('#diagSweepApply');
+      if (ap) {
+        ap.onclick = () => {
+          save('karaoke_native_prefer', best.label);
+          toast('已应用：' + karSweepZh(best.label) + ' · 下次开唱生效');
+          ap.disabled = true;
+        };
+      }
+      const cl = $('#diagSweepClear');
+      if (cl) {
+        cl.onclick = () => {
+          save('karaoke_native_prefer', '');
+          toast('已清除采集源偏好 · 回默认顺序');
+          cl.disabled = true;
+        };
+      }
+    };
+    setTimeout(poll, 500);
   });
 
   /* ---- 崩溃/桥面包屑：闪退后打开这里，最后一条就是断点（beta10） ---- */
@@ -7491,6 +7658,7 @@ const KAR = {
   pitchAcc: null,                                  // 当前行 {sum, n} |cents| 累计
   pitchRows: [],                                   // 结算 [{ok, avg}]
   echo: true, reverb: 'studio',
+  solo: false,                                     // 单采集实验（P11.5）：WebView 不申请麦克风
   noMic: false,                                    // 听唱模式：麦克风权限未授予 / 设备无麦克风
   noMicReason: '',                                 // 具体原因（NotAllowedError / NotFoundError…）
   pendingStream: null,                             // 进层先申请的麦：开唱时直接接上，不二次弹窗
@@ -7533,6 +7701,14 @@ function karNativeWanted() {
   return !(v === false || v === 'false' || v === 0 || v === '0');
 }
 
+/** 单采集实验（P11.5）：开 K 歌不申请 WebView 麦克风，只有原生一路采集。
+    用于鉴别「双采集并发是否把输入压到 legacy 路径」——没有录音/音准，
+    纯测量场，跑输入通路扫描 + 体感对比用。 */
+function karSoloCapture() {
+  return state.settings.karaoke_solo_capture === true
+    && karNativeWanted() && !!karNativeBridge();
+}
+
 function karNativeSetWebEcho(on) {
   if (!KAR.echoGate || !KAR.ctx) return;
   try {
@@ -7560,12 +7736,18 @@ function karNativeStart() {
   N.supported = !!b;
   if (!b || N.wanted === false || N.failed) { karNativePaint(); return false; }
   if (!KAR.echo) { karNativePaint(); return false; }   // 耳返关着就不开原生麦
-  if (N.on || KAR.noMic || !KAR.ctx || !KAR.micStream) return false;
+  if (N.on || !KAR.ctx) return false;
+  // 单采集实验：WebView 没申请麦克风（micStream 为空）也照常起原生；
+  // 正常场没有麦（noMic）就不起，没有耳返对象。
+  if (!KAR.solo && (KAR.noMic || !KAR.micStream)) return false;
   const cfg = {
     gain: Number(KAR.micVol) || 1,
     toneDb: Number(state.settings.karaoke_voice_tone ?? 0) || 0,
     muted: !KAR.echo,
   };
+  // 输入候选偏好（输入通路扫描应用的最优源，空 = 默认顺序）
+  const prefer = String(state.settings.karaoke_native_prefer || '').trim();
+  if (prefer) cfg.prefer = [prefer];
   let res = null;
   try { res = JSON.parse(b.startKaraokeMonitor(JSON.stringify(cfg)) || '{}'); }
   catch (e) { res = null; }
@@ -7652,22 +7834,27 @@ function karNativePoll() {
   } else {
     N.badNative = 0;
   }
-  if (lvl < 0.002 && inRms > 0.01) {
-    N.badWeb = (N.badWeb || 0) + 1;
-    if (N.badWeb >= 3) { karNativeFallback('原生采集影响了 WebView 录音'); return; }
-  } else {
-    N.badWeb = 0;
+  // 单采集实验没有 WebView 侧电平，badWeb 判定退场（否则必误判抢麦回退）
+  if (!KAR.solo) {
+    if (lvl < 0.002 && inRms > 0.01) {
+      N.badWeb = (N.badWeb || 0) + 1;
+      if (N.badWeb >= 3) { karNativeFallback('原生采集影响了 WebView 录音'); return; }
+    } else {
+      N.badWeb = 0;
+    }
   }
   karNativePaint();
 }
 
 function karNativePaint() {
   const row = $('#kNativeRow'), info = $('#kNativeInfo'), box = $('#kNative');
+  const srow = $('#kSoloRow'), sbox = $('#kSolo');
   const supported = !!karNativeBridge();
   KAR.native.supported = supported;
   if (!row || !info) return;
   row.hidden = !supported;
   info.hidden = !supported;
+  if (srow) srow.hidden = !supported;   // 单采集实验只在 Android + 桥可用时出现
   if (!supported) return;
   if (box) box.checked = KAR.native.wanted !== false;
   const N = KAR.native;
@@ -7682,11 +7869,19 @@ function karNativePaint() {
     txt = `原生直通${eng ? ' · ' + eng : ''} · ${rate} · 缓冲 ${rb}/${tb}ms`;
     if (st.engine === 'java') { txt += ' · 回退 Java'; warn = true; }
     if (st.engine === 'oboe') {
-      if (st.source) txt += ` · ${st.source}`;
+      if (st.source) {
+        txt += st.inApi && st.inApi !== st.api ? ` · ${st.source}/${st.inApi}` : ` · ${st.source}`;
+      }
+      if (st.sharing === 'exclusive') txt += ' · 独占';
       if (st.ringMs != null) txt += ` · 环 ${Math.round(Number(st.ringMs) || 0)}ms`;
+      // 平台侧链路拆分（P11.5）：采集腿/输出腿各占多少，归因用
+      const ic = st.inCalcLatencyMs == null ? null : Math.round(Number(st.inCalcLatencyMs));
+      const oc = st.outCalcLatencyMs == null ? null : Math.round(Number(st.outCalcLatencyMs));
+      if (ic !== null || oc !== null) txt += ` · 链 ${ic ?? '—'}/${oc ?? '—'}ms`;
       const u = Number(st.underruns) || 0, o = Number(st.overruns) || 0;
       if (u || o) { txt += ` · xrun ${u}/${o}`; warn = true; }
     }
+    if (KAR.solo) txt += ' · 单采集实验';
     if (st.route === 'bluetooth' || st.route === 'ble_headset') {
       txt += ' · 蓝牙延迟不可控，建议有线';
       warn = true;
@@ -7696,6 +7891,7 @@ function karNativePaint() {
     }
   } else if (N.failed) {
     txt = '原生直通不可用 · ' + (N.reason || '已回退 WebView 耳返');
+    if (KAR.solo) txt += ' · 单采集模式下无耳返无录音';
     warn = true;
   } else if (N.wanted === false) {
     txt = '已关闭 · 走 WebView 耳返';
@@ -7714,6 +7910,18 @@ function karLineAt(t) {
     if (ls[mid].t <= t) { ans = mid; lo = mid + 1; } else hi = mid - 1;
   }
   return ans;
+}
+
+/** 麦克风错误 → 用户能懂的话。原始 e.name/e.message 只进 console，绝不糊到 UI 上 */
+function micFailReason(e) {
+  const n = (e && e.name) || '';
+  const msg = (e && e.message) || '';
+  const t = n + ' ' + msg;
+  if (/NotAllowedError|denied|permission|not allowed/i.test(t)) return '系统设置里没允许麦克风';
+  if (/NotFoundError|OverconstrainedError|no .*device|not found/i.test(t)) return '没找到麦克风设备';
+  if (/NotReadableError|TrackStartError|in use|readable|busy/i.test(t)) return '麦克风被别的程序占着';
+  if (/SecurityError/i.test(t)) return '这个页面来源不被允许用麦克风';
+  return '麦克风权限没拿到';
 }
 
 async function karaokeStart(item) {
@@ -7762,6 +7970,13 @@ async function karaokeStart(item) {
   KAR.native.badNative = 0;
   KAR.native.badWeb = 0;
   KAR.native.lastPoll = 0;
+  // 单采集实验（P11.5）：不申请 WebView 麦克风，只有原生一路采集。
+  // 复用 noMic 降级（不录音/不音准/控件退场），reason 写明是实验不是故障。
+  KAR.solo = karSoloCapture();
+  if (KAR.solo) {
+    KAR.noMic = true;
+    KAR.noMicReason = '单采集实验模式（设置里开启）：WebView 不申请麦克风，只有原生耳返，无录音无音准';
+  }
   KAR.pitchBuf = null;                         // 换歌必须重算变调
   $('#singLayer').hidden = false;
   $('#singLayer').classList.remove('is-review', 'counting');
@@ -7842,11 +8057,12 @@ function karRequestMic(gen) {
       KAR.pendingStream = stream;
     } catch (e) {
       if (!KAR.open || KAR.gen !== gen) return;
+      console.warn('[kar] 麦克风申请失败：', e);
       KAR.noMic = true;
-      KAR.noMicReason = (e && (e.name || e.message)) || '权限未授予';
+      KAR.noMicReason = micFailReason(e);
       karNoMicUI();
       if (IS_ANDROID) {
-        toast('麦克风没打开（' + KAR.noMicReason + '）· 已转听唱模式；在系统设置里允许 Elysium 使用麦克风后重进');
+        toast('麦克风没打开：' + KAR.noMicReason + ' · 已转听唱模式；在系统设置里允许 Elysium 使用麦克风后重进');
       }
     }
     if (KAR.phase === 'ready') karPaintReady();   // 拿到麦 / 失败：听唱提示刷新
@@ -7892,10 +8108,11 @@ function karPaintReady() {
         <div class="k-analyze" id="kPitchProg"></div>
       </div>
       <div class="k-hint">${KAR.noMic
-        ? (`麦克风没打开${KAR.noMicReason ? '（' + esc(KAR.noMicReason) + '）' : ''}：`
-          + '到系统设置里允许 Elysium 使用麦克风，再重新进入 K 歌')
+        ? (KAR.solo
+          ? esc(KAR.noMicReason)
+          : `麦克风没打开：${esc(KAR.noMicReason || '权限没拿到')}。到系统设置里允许 Elysium 使用麦克风，再重新进入 K 歌`)
         : '全程录音只保存在本机，唱完由你决定保存或丢弃'}</div>
-      ${KAR.noMic && IS_ANDROID
+      ${KAR.noMic && IS_ANDROID && !KAR.solo
         ? '<button class="btn ghost sm" data-act="k-mic-settings">去系统设置允许麦克风</button>'
         : ''}
     </div>`;
@@ -7997,6 +8214,22 @@ function karBindOnce() {
       }
       karNativePaint();
       toast(want ? '原生直通已开（有线耳机最佳）' : '已切回 WebView 耳返');
+    };
+  }
+  /* 单采集实验开关（P11.5，仅 Android + 桥显示）：本就只在进层前生效——
+     唱到一半切只会提示下场生效，避免半场拆采集把录音搞哑。 */
+  const st0 = $('#kSolo');
+  if (st0) {
+    st0.checked = state.settings.karaoke_solo_capture === true;
+    st0.onchange = () => {
+      const want = !!st0.checked;
+      state.settings.karaoke_solo_capture = want;
+      postSettings({ karaoke_solo_capture: want });
+      KAR.solo = want && karNativeWanted() && !!karNativeBridge();
+      karNativePaint();
+      toast(want
+        ? '单采集实验已开：下一场 K 歌生效（无录音/无音准，仅原生耳返）'
+        : '单采集实验已关：下一场 K 歌恢复录音');
     };
   }
   const pk = $('#kPitch');
@@ -8144,6 +8377,36 @@ function karSetVocal(cancelOn) {
     KAR.cancel.gain.value = cancelOn ? 1 : 0;
     KAR.orig.gain.value = cancelOn ? 0 : 1;
   }
+}
+
+/* —— 消原唱效果探针（beta14）：sing 期每 4s 比 cancel(L−R) 与 orig(全混合) 的
+   RMS——人声居中且消得动时比值 ≈ 0.1 以下；> 0.55 说明这首歌人声不在正中
+   或近单声道，L−R 消不动（此时用户听到的「伴唱」里原唱大头都在）。如实
+   提示一次并建议切原唱，不替用户改选择。场内只提示一次。 —— */
+function karVocalProbe() {
+  const P = KAR.vocalProbe;
+  if (!P || KAR.phase !== 'sing' || KAR.vocalProbeDone || KAR.vocalOff !== true) return;
+  const now = performance.now();
+  if (!P.t0) { P.t0 = now; return; }             // 首次只记起点（歌头/淡入不算）
+  if (now - P.t0 < 5000) return;
+  if (now - P.last < 4000) return;
+  P.last = now;
+  try {
+    P.c.getFloatTimeDomainData(P.bufs[0]);
+    P.o.getFloatTimeDomainData(P.bufs[1]);
+    let ec = 0, eo = 0;
+    for (let i = 0; i < P.bufs[0].length; i++) {
+      ec += P.bufs[0][i] * P.bufs[0][i];
+      eo += P.bufs[1][i] * P.bufs[1][i];
+    }
+    ec = Math.sqrt(ec / P.bufs[0].length);
+    eo = Math.sqrt(eo / P.bufs[1].length);
+    if (eo < 0.01) return;                       // 静音段不判
+    if (ec / Math.max(1e-6, eo) > 0.55) {
+      KAR.vocalProbeDone = true;
+      toast('这首歌的人声消不干净（人声不在正中/接近单声道），建议切「原唱」跟唱');
+    }
+  } catch (e) { /* analyser 不可用就静默 */ }
 }
 
 /** 混响预设：秒数 = 衰减长度，wet = 湿声占比。IR 全部程序生成
@@ -8349,6 +8612,16 @@ function karBuild(stream) {
       const echoGate = ctx.createGain(); echoGate.gain.value = KAR.echo ? 1 : 0;
       micBus.connect(echoGate); echoGate.connect(mon);   // 耳返（进监听限幅汇出）
 
+      /* 消原唱效果探针（beta14）：cancel/orig 后各挂一个不外放的 analyser，
+         karLoop 里节流比对能量——消不动的歌如实提示，见 karVocalProbe。 */
+      const anaC = ctx.createAnalyser(); anaC.fftSize = 1024;
+      const anaO = ctx.createAnalyser(); anaO.fftSize = 1024;
+      cancel.connect(anaC); orig.connect(anaO);
+      KAR.vocalProbe = { c: anaC, o: anaO,
+        bufs: [new Float32Array(anaC.fftSize), new Float32Array(anaO.fftSize)],
+        t0: 0, last: 0 };
+      KAR.vocalProbeDone = false;
+
       const rec = ctx.createScriptProcessor(4096, 2, 2);
       const sink = ctx.createGain(); sink.gain.value = 0;    // SP 必须连到 destination 才会跑
       const busLim = karLimiter(ctx);          // 录音总线限幅：伴奏+干+湿求和超 1 不切平顶
@@ -8399,14 +8672,15 @@ async function karaokeBegin() {
           audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
         });
       } catch (e) {
+        console.warn('[kar] 麦克风申请失败：', e);
         if (!IS_ANDROID) {
-          toast('拿不到麦克风：' + (e && (e.name || e.message) || '权限被拒绝'), 'err');
+          toast('拿不到麦克风：' + micFailReason(e), 'err');
           return;
         }
         KAR.noMic = true;               // 权限被拒 / 无设备：不白来一趟，转听唱模式
-        KAR.noMicReason = (e && (e.name || e.message)) || '权限未授予';
+        KAR.noMicReason = micFailReason(e);
         karNoMicUI();
-        toast('麦克风没打开（' + KAR.noMicReason + '），已转为听唱模式（伴奏 + 歌词 + 变调，不录音）');
+        toast('麦克风没打开：' + KAR.noMicReason + '，已转为听唱模式（伴奏 + 歌词 + 变调，不录音）');
       }
     }
     if (!karBuild(stream)) {
@@ -8466,6 +8740,7 @@ function karLoop() {
   KAR.raf = requestAnimationFrame(karLoop);
   if (KAR.phase !== 'sing' || !KAR.el) return;
   karNativePoll();        // 1s 节流；双采集抢麦/引擎退出在这里回退
+  karVocalProbe();        // 4s 节流；伴唱消不动时如实提示（beta14）
   // 变调路径没有元素时钟：用 AudioContext 时钟减起点（WSOLA 输出与原曲等长同轴）
   const pos = KAR.bufSrc
     ? Math.max(0, KAR.ctx.currentTime - KAR.bufT0)
@@ -9212,7 +9487,8 @@ async function karpAnalyze(item, gen) {
     w.postMessage({ type: 'analyze', l: L.buffer, r: R.buffer, rate: 8000, windows: wins },
       [L.buffer, R.buffer]);
   } catch (e) {
-    karSetAnalyze('原唱解析失败（' + (e.message || e) + '）· 纯伴奏模式');
+    console.warn('[kar] 原唱解析失败：', e);
+    karSetAnalyze('原唱数据没取到 · 先以纯伴奏练手');
   }
 }
 
@@ -9414,7 +9690,7 @@ function viewWorks() {
     body = `<div class="cards">${works.map((w) => `
       <div class="card wcard">
         <div class="card-art">${w.cover
-          ? `<img src="${esc(w.cover)}" alt="" onerror="this.remove()">` : phImg('song')}
+          ? `<img src="${esc(w.cover)}" alt="" onerror="artFail(this)">` : phImg('song')}
           <button class="card-play" data-act="w-play" data-id="${esc(w.id)}" title="播放" aria-label="播放">${icon('play')}</button>
         </div>
         <div class="card-name ell">${esc(w.name || '未命名作品')}</div>

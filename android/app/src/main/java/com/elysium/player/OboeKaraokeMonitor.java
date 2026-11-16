@@ -81,7 +81,9 @@ public final class OboeKaraokeMonitor {
         }
     }
 
-    /** 启动干声直通；失败返回 {ok:false,error,detail}，由 Hub 回退旧引擎。 */
+    /** 启动干声直通；失败返回 {ok:false,error,detail}，由 Hub 回退旧引擎。
+        cfg 可带 prefer 数组（beta12→13）：输入候选顺序，如
+        ["opensl/voice_communication","voice_performance"]；缺省 = 默认顺序。 */
     public String start(Context ctx, String json) {
         if (!LIB_OK) return err("oboe_unavailable", "native library not loaded");
         if (ctx != null) appCtx = ctx.getApplicationContext();
@@ -90,6 +92,8 @@ public final class OboeKaraokeMonitor {
         lastGain = clamp(cfg.optDouble("gain", lastGain), 0, 4);
         lastToneDb = clamp(cfg.optDouble("toneDb", lastToneDb), -12, 12);
         lastMuted = cfg.optBoolean("muted", lastMuted);
+        org.json.JSONArray pref = cfg.optJSONArray("prefer");
+        nativeSetPrefer(pref == null ? null : pref.toString());
         int r = nativeStart(lastGain, lastToneDb, lastMuted);
         if (r != 0) return err("oboe_start", nativeLastError());
         return status();
@@ -124,13 +128,16 @@ public final class OboeKaraokeMonitor {
         if (LIB_OK) nativeStop();
     }
 
+    /** 自检：json 带 {"sweep":true} 时跑输入候选矩阵扫描（beta12→13），
+        结果经 status().sweep 轮询；否则跑常规 8 发脉冲自检。 */
     public String startDiag(Context ctx, String json) {
         if (!LIB_OK) return err("oboe_unavailable", "native library not loaded");
         if (ctx != null) appCtx = ctx.getApplicationContext();
         setLogDir(ctx);
-        int r = nativeStartDiag();
+        boolean sweep = parse(json).optBoolean("sweep", false);
+        int r = sweep ? nativeStartSweep() : nativeStartDiag();
         if (r != 0) return err("oboe_diag", nativeLastError());
-        return "{\"ok\":true,\"running\":true}";
+        return "{\"ok\":true,\"running\":true,\"sweep\":" + sweep + "}";
     }
 
     public void stopDiag() {
@@ -210,5 +217,7 @@ public final class OboeKaraokeMonitor {
     private native String nativeLastError();
     private native int nativeStartDiag();
     private native void nativeStopDiag();
+    private native int nativeStartSweep();
+    private native void nativeSetPrefer(String json);
     private native void nativeSetLogPath(String path);
 }
