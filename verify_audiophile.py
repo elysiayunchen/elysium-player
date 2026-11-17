@@ -16,6 +16,7 @@
   J 参数 EQ 预设库存取：eqpreset_set/eqpreset_del、NaN 硬墙、name 规整、
     preamp 钳制、上限裁剪、落盘往返
   K HTTP 端到端：/api/eq/parse 好/坏文本 + /api/store 预设与设置全链路
+  Q 连续质量分选档：非二元格式进池、中间档位落位、显式选档/降级/Hi-Res 语义
 
 用法：
     python verify_audiophile.py            # 全部
@@ -832,6 +833,80 @@ def report(elapsed):
     return "\n".join(lines) + "\n"
 
 
+def group_Q():
+    """连续质量分选档：非二元格式不被丢、中间档位正确落位、显式选档与降级语义。"""
+    g = "Q"
+    import main
+
+    def fmtseq(minfo, want):
+        return [m["format"] + ":" + str(m["bitrate"])
+                for m in main.quality_candidates({"minfo": minfo}, want)]
+
+    mid = [{"format": "wav", "bitrate": "1411"},
+           {"format": "mp3", "bitrate": "128"},
+           {"format": "mp3", "bitrate": "320"},
+           {"format": "flac", "bitrate": "900"},
+           {"format": "aac", "bitrate": "256"}]
+
+    # Q1 wav 1411 不再被二元 filter 丢掉，best 时是无损里的最高档
+    got = fmtseq(mid, "best")
+    ok(g, "Q1 wav 无损不被丢弃且居顶", got[0] == "wav:1411", "wav:1411 居首", got)
+
+    # Q2 中间档位：aac256(332) 落在 flac 之上、mp3320 之下
+    got = fmtseq(mid, "best")
+    ok(g, "Q2 中间档位正确落位",
+       got.index("flac:900") < got.index("aac:256") < got.index("mp3:320"),
+       "flac > aac256 > mp3320", got)
+
+    # Q3 显式 320 精确命中 mp3:320，且无损全部垫底（选 MP3 不下无损）
+    got = fmtseq(mid, "320")
+    ok(g, "Q3 显式320精确命中且无损垫底",
+       got[0] == "mp3:320" and got.index("mp3:320") < got.index("wav:1411"),
+       "mp3:320 居首、无损在后", got)
+
+    # Q4 显式 128 精确命中 mp3:128
+    got = fmtseq(mid, "128")
+    ok(g, "Q4 显式128精确命中", got[0] == "mp3:128", "mp3:128 居首", got)
+
+    # Q5 菜单 format:bitrate 任意格式（aac:256）精确命中
+    got = fmtseq(mid, "aac:256")
+    ok(g, "Q5 菜单任意格式精确命中", got[0] == "aac:256", "aac:256 居首", got)
+
+    # Q6 降级：目标档不可用时按质量分依次试，仍保留全部候选
+    only = [{"format": "mp3", "bitrate": "128"}, {"format": "aac", "bitrate": "256"},
+            {"format": "flac", "bitrate": "900"}, {"format": "wav", "bitrate": "1411"}]
+    got = fmtseq(only, "best")
+    ok(g, "Q6 降级按质量分全序",
+       got == ["wav:1411", "flac:900", "aac:256", "mp3:128"],
+       "wav>flac>aac>mp3", got)
+
+    # Q7 Hi-Res 加权：24bit/96k 的 FLAC 排在 16bit 同码率 FLAC 之前
+    hi = [{"format": "flac", "bitrate": "900"},
+          {"format": "flac", "bitrate": "900", "sample_rate": 96000, "bit_depth": 24}]
+    got = main.quality_candidates({"minfo": hi}, "best")
+    ok(g, "Q7 Hi-Res 加权优先",
+       got[0].get("sample_rate") == 96000, "24bit/96k 居首",
+       [(m.get("sample_rate"), m.get("bit_depth")) for m in got])
+
+    # Q8 minfo 缺失（歌单条目）时 synth 兜底仍按分给出最佳
+    got = fmtseq([], "best")
+    ok(g, "Q8 无 minfo 兜底按分", got[0] == "flac:2000", "flac:2000 居首", got)
+
+    # Q9 无损族全覆盖：ape/opus 也进池，opus(高码率) 仍低于任何无损
+    mix = [{"format": "opus", "bitrate": "512"}, {"format": "ape", "bitrate": "800"},
+           {"format": "mp3", "bitrate": "320"}]
+    got = fmtseq(mix, "best")
+    ok(g, "Q9 ape/opus 进池且无损恒压有损",
+       got == ["ape:800", "opus:512", "mp3:320"], "ape>opus>mp3", got)
+
+    # Q10 编码效率：同码率 aac/opus 排在 mp3 之前
+    same = [{"format": "mp3", "bitrate": "256"}, {"format": "aac", "bitrate": "256"},
+            {"format": "opus", "bitrate": "256"}]
+    got = fmtseq(same, "best")
+    ok(g, "Q10 同码率按编码效率排序",
+       got == ["opus:256", "aac:256", "mp3:256"], "opus>aac>mp3", got)
+
+
 def main(argv=None):
     global TMP_ROOT
     ap = argparse.ArgumentParser()
@@ -852,6 +927,8 @@ def main(argv=None):
     try:
         if want("A"):
             group_A()
+        if want("Q"):
+            group_Q()
         if want("B"):
             group_B()
         if want("C"):

@@ -2345,8 +2345,25 @@ def recommend_candidates(limit=12, fresh=False):
 
 
 # --------------------------------------------------------------------------
-# 音质挑选（含降级顺序）
+# 音质挑选（连续质量分 + 降级顺序）
 # --------------------------------------------------------------------------
+# 旧模型只认 flac/mp3 两个 format、降序排成 flac→320→128 三级阶梯，
+# 把 wav/ape/aac/opus 等直接丢掉——「比 mp3 好、够不上 flac」的中间档位
+# 根本没有位置（真实上游给过 wav 1411 + mp3 128，旧逻辑只会选 128）。
+# 新模型给每个候选算一个质量分，所有格式进同一个池按分排序：
+#   无损段（flac/wav/ape/alac/wv/tta/aiff/dsf…）基础 100 万，恒压任何有损，
+#     段内按码率排序、有 Hi-Res 采样率/位深再加权；
+#   有损段 = 码率 × 编码效率（mp3 1.0 / aac,m4a 1.3 / ogg 1.15 / opus 1.5 / wma 0.9），
+#     aac 256≈332 落在 mp3 320=320 之上、无损之下，中间档位终于有正确位置。
+# 前端 app.js 的 qScore 是同一套口径，改动必须两边同步。
+_LOSSLESS_FORMATS = frozenset(
+    {"flac", "wav", "ape", "alac", "wv", "tta", "aiff", "aif", "dsf", "dff", "pcm"})
+_LOSSY_EFF = {"mp3": 1.0, "m4a": 1.3, "aac": 1.3, "ogg": 1.15,
+              "vorbis": 1.15, "opus": 1.5, "wma": 0.9}
+_LOSSLESS_BASE = 1_000_000
+_PREFER_BOOST = 10_000_000             # 显式选档时压过无损基础段的加权
+
+
 def _ibr(m):
     try:
         return int(m.get("bitrate") or 0)
@@ -2354,46 +2371,78 @@ def _ibr(m):
         return 0
 
 
-def quality_candidates(item, want):
-    """返回按优先级排列的候选音质列表；目标缺失时依次降级。
+def _fmt_of(m):
+    return str((m or {}).get("format") or "").strip().lower()
 
-    want 兼容两种写法：设置里的「320」和音质菜单传来的「mp3:320」/「flac:999」。
-    之前菜单的 format:bitrate 写法不匹配任何分支，落进 else 变成 FLAC 优先 ——
-    用户显式选 MP3 却下回无损，体积差 3~5 倍。
+
+def is_lossless_fmt(fmt):
+    return str(fmt or "").lower() in _LOSSLESS_FORMATS
+
+
+def quality_score(m):
+    """连续质量分：无损恒高于有损；段内按码率/编码效率细分。"""
+    fmt, br = _fmt_of(m), _ibr(m)
+    if fmt in _LOSSLESS_FORMATS:
+        try:
+            sr = int(m.get("sample_rate") or 0)
+        except (TypeError, ValueError):
+            sr = 0
+        try:
+            bd = int(m.get("bit_depth") or 0)
+        except (TypeError, ValueError):
+            bd = 0
+        hires = 200_000 if (sr > 48000 or bd > 16) else 0
+        return _LOSSLESS_BASE + hires + min(br, 8000)
+    return int(br * _LOSSY_EFF.get(fmt, 1.0))
+
+
+def quality_candidates(item, want):
+    """返回按质量分从高到低排列的候选；目标缺失时依次降级。
+
+    want 兼容：设置里的 best/320/128/2000/646，音质菜单的 format:bitrate
+    （任意格式，如 wav:1411 / aac:256）。所有格式进同一池，非二元不再被丢弃。
     """
     want = str(want or "").strip().lower()
-    if ":" in want:                      # 前端音质菜单的 format:bitrate 写法
-        fmt, _, br = want.partition(":")
-        if fmt in ("mp3", "flac"):
-            want = br
     minfo = item.get("minfo") or []
     if not minfo:
-        # 歌单条目落盘时裁掉了 minfo（pl_item_of 只留展示字段）：按标准档位给一条
-        # 降级顺序兜底，getUrl 解析不出的档位会在 _resolve 里自动落到下一个。
-        synth = [{"format": "flac", "bitrate": "2000"},
+        # 歌单条目落盘时裁掉了 minfo（pl_item_of 只留展示字段）：按标准档位兜底，
+        # getUrl 解析不出的档位会在 _resolve 里自动落到下一个。
+        minfo = [{"format": "flac", "bitrate": "2000"},
                  {"format": "mp3", "bitrate": "320"},
                  {"format": "mp3", "bitrate": "128"}]
-        if want in ("320", "128"):
-            n = int(want)
-            synth.sort(key=lambda m: (m["format"] != "mp3", abs(int(m["bitrate"]) - n)))
-        return synth
-    flacs = sorted((m for m in minfo if m.get("format") == "flac"), key=_ibr, reverse=True)
-    mp3s = sorted((m for m in minfo if m.get("format") == "mp3"), key=_ibr, reverse=True)
 
-    if want in (None, "", "best", "flac"):
-        first = flacs or mp3s
-    elif want in ("2000", "646"):
-        hit = [m for m in flacs if _ibr(m) == int(want)]
-        first = hit or flacs or mp3s
-    elif want in ("320", "128"):
-        hit = [m for m in mp3s if _ibr(m) == int(want)]
-        first = hit or [m for m in mp3s if _ibr(m) <= int(want)] or mp3s or flacs
-    else:
-        first = flacs or mp3s
+    # 解析偏好：显式选档时加权，避免「选了 MP3 却降级下无损」体积暴增
+    prefer = None                       # lossless / lossy / None(全部按分)
+    target_fmt = target_br = None
+    if ":" in want:                     # 菜单 format:bitrate（任意格式）
+        target_fmt, _, target_br = want.partition(":")
+        prefer = "lossless" if is_lossless_fmt(target_fmt) else "lossy"
+    elif want in ("320", "128"):        # 设置里的 MP3 档：精确命中该码率
+        prefer, target_fmt, target_br = "lossy", "mp3", want
+    elif want in ("2000", "646"):       # 历史无损码率档
+        prefer, target_fmt, target_br = "lossless", "flac", want
+    elif want == "flac":                # 无损优先（wav/ape 等同样算无损）
+        prefer = "lossless"
+
+    def sk(m):
+        s = quality_score(m)
+        if prefer == "lossy" and not is_lossless_fmt(_fmt_of(m)):
+            s += _PREFER_BOOST
+        elif prefer == "lossless" and is_lossless_fmt(_fmt_of(m)):
+            s += _PREFER_BOOST
+        return -s
+
+    ranked = sorted(minfo, key=sk)
+    if target_fmt:                      # 菜单点名的档位提到最前
+        def is_exact(m):
+            return _fmt_of(m) == target_fmt and (
+                target_br is None or str(m.get("bitrate")) == target_br)
+        exact = [m for m in ranked if is_exact(m)]
+        ranked = exact + [m for m in ranked if not is_exact(m)]
 
     ordered, seen = [], set()
-    for m in list(first) + flacs + mp3s:
-        key = (m.get("format"), str(m.get("bitrate")))
+    for m in ranked:
+        key = (_fmt_of(m), str(m.get("bitrate")))
         if key not in seen:
             seen.add(key)
             ordered.append(m)
@@ -2980,6 +3029,13 @@ def probe_one(platform, sid, fmt, br, sign_time=None, sign=None, duration=0, nam
                 out["mismatch"] = (out["declared"] == "flac" and fmt2 not in ("flac", ""))
                 if fmt2 == "flac":
                     out["hires"] = _flac_hires(url, head)
+                    # STREAMINFO 白捡的真时长：上游没给 duration 时顺手把码率算出来
+                    # （大小和时长都是实测值，符合「只认实测」口径）
+                    if out["hires"] and out["hires"].get("duration") and size and not out["kbps"]:
+                        try:
+                            out["kbps"] = int(round(size * 8 / float(out["hires"]["duration"]) / 1000))
+                        except Exception:
+                            pass
     except Exception as e:  # noqa: BLE001
         out["reason"] = "不可达: %s" % e
     with _PROBE_LOCK:

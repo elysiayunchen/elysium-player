@@ -137,11 +137,38 @@ let lastSaveAt = 0;
 const LS_LAST = 'elysium.lastTrack';
 
 /* ------------------------------------------------------------------ 提示 */
+/* 原始错误 → 口语一句话。只认熟面孔（HTTP 码 / 英文 Error 名 / 机读串），
+   认不出的原样保留 —— 后端不少错误文案本来就是给人看的中文，别改坏。
+   带「前缀：」的（播放失败：…）把前缀留下，失败的是哪一步还在。 */
+const _ERR_RULES = [
+  [/接口异常|HTTP \d{3}|Bad Gateway|Internal Server|Service Unavailable|Gateway Time/i,
+    '音源服务这会儿不稳定 · 稍后再试'],
+  [/Failed to fetch|NetworkError|ERR_CONNECTION|ERR_INTERNET|ERR_NAME|DNS/i,
+    '网络连不上 · 检查网络后再试'],
+  [/timeout|timed?[\s_-]?out|AbortError|aborted/i, '请求超时了 · 稍后再试'],
+  [/signature|签名|请求已过期|凭证过期/i, '音源凭证过期了 · 过会儿再试'],
+  [/不是 JSON|Unexpected token|JSON/i, '音源返回了异常数据 · 稍后再试'],
+  [/NotAllowedError|NotReadableError|NotFoundError|SecurityError|PermissionDenied/i,
+    '设备或浏览器没放行 · 检查权限后重试'],
+];
+function humanizeErr(msg) {
+  const s = String(msg || '').trim();
+  if (!s) return s;
+  for (const [re, txt] of _ERR_RULES) {
+    if (re.test(s)) {
+      const i = s.indexOf('：');
+      const pre = i > 0 && i <= 12 ? s.slice(0, i) : '';
+      return pre ? pre + ' · ' + txt : txt;
+    }
+  }
+  return s;
+}
+
 function toast(msg, kind = '') {
   const box = $('#toasts');
   const el = document.createElement('div');
   el.className = 'toast' + (kind === 'err' ? ' err' : '');
-  el.textContent = msg;
+  el.textContent = kind === 'err' ? humanizeErr(msg) : msg;
   box.appendChild(el);
   setTimeout(() => {
     el.style.transition = 'opacity .25s,transform .25s';
@@ -224,15 +251,46 @@ function srcBadge(it, idx) {
   return `<span class="src src-${s.cls}" title="来源：${s.label}">${s.label}</span>`;
 }
 
-const qKey = (m) => (m.format === 'flac' ? 'flac' : String(m.bitrate));
+const qKey = (m) => (isLosslessFmt(m.format) ? 'lossless:' + _fmtOf(m) : String(m.bitrate));
 /* 采样率 kHz 文案：96k → '96'，96.5k → '96.5' */
 const srKHz = (sr) => {
   const n = Number(sr) || 0;
   return n % 1000 === 0 ? String(n / 1000) : (n / 1000).toFixed(1);
 };
-const qName = (m) => (m.format === 'flac' ? 'FLAC' : m.bitrate + 'K');
+
+/* ---- 连续质量分：与后端 main.py 的 quality_score 同一套口径，改动必须两边同步 ----
+   旧模型只认 flac/mp3，wav/ape/aac/opus 全被丢掉。新模型每个候选算一个分：
+   无损段（flac/wav/ape/alac/wv/tta/aiff/dsf…）基础 100 万恒压有损，段内按码率、
+   Hi-Res 采样率/位深加权；有损段 = 码率 × 编码效率（mp3 1 / aac 1.3 / opus 1.5 …）。
+   这样 aac256≈332 落在 mp3320 之上、无损之下——中间档位有正确位置。 */
+const LOSSLESS_FMT = new Set(['flac', 'wav', 'ape', 'alac', 'wv', 'tta', 'aiff', 'aif', 'dsf', 'dff', 'pcm']);
+const LOSSY_EFF = { mp3: 1.0, m4a: 1.3, aac: 1.3, ogg: 1.15, vorbis: 1.15, opus: 1.5, wma: 0.9 };
+const isLosslessFmt = (f) => LOSSLESS_FMT.has(String(f || '').toLowerCase());
+const _fmtOf = (m) => String((m && m.format) || '').trim().toLowerCase();
+const qScore = (m) => {
+  const fmt = _fmtOf(m), br = _br(m);
+  if (isLosslessFmt(fmt)) {
+    const sr = Number(m.sample_rate) || 0, bd = Number(m.bit_depth) || 0;
+    const hires = (sr > 48000 || bd > 16) ? 200000 : 0;
+    return 1000000 + hires + Math.min(br, 8000);
+  }
+  return Math.floor(br * (LOSSY_EFF[fmt] || 1.0));   // 与后端 int() 对齐（正数截断）
+};
+const qSort = (list) => (list || []).slice().sort((a, b) => qScore(b) - qScore(a) || _br(b) - _br(a));
+
+/* 音质档文案：无损显示大写格式名 + 规格，有损显示 格式名+码率（不再只有 FLAC/MP3 两种） */
+const qLabel = (m) => {
+  const f = _fmtOf(m) || '音轨';
+  const up = f.toUpperCase();
+  if (isLosslessFmt(f)) {
+    const sr = Number(m.sample_rate) || 0, bd = Number(m.bit_depth) || 0;
+    return (sr > 48000 || bd > 16) ? `无损 ${up} ${srKHz(sr)}kHz/${bd}bit` : `无损 ${up}`;
+  }
+  return `${up} ${m.bitrate}k`;
+};
+const qName = (m) => (isLosslessFmt(m.format) ? _fmtOf(m).toUpperCase() : m.bitrate + 'K');
 const qChip = (m) => {
-  const cls = m.format === 'flac' ? 'flac' : Number(m.bitrate) >= 320 ? 'hi' : 'lo';
+  const cls = isLosslessFmt(m.format) ? 'flac' : Number(m.bitrate) >= 320 ? 'hi' : 'lo';
   return `<span class="chip ${cls}">${qName(m)}</span>`;
 };
 const _br = (m) => Number(m.bitrate) || 0;
@@ -241,25 +299,46 @@ const _br = (m) => Number(m.bitrate) || 0;
 const PROBE = new Map();
 const pk = (it) => `${it.platform}:${it.id}`;
 
+/* 播放实测的时长：plat:id -> 秒。上游搜索常不给时长（行里 0:00 赖着），
+   探针只拉 256B 头也算不出时长 —— 只有真播起来 audio 才知道真值。
+   播到就记下并回填行内格子，跟「实测规格」同一口径：只认实测。
+   顺带兜底：折叠进 alts 的同曲条目常有一个带时长的（±4s 同曲口径），拿来补位。 */
+const DUR = new Map();
+const knownDur = (it) => (it && it.duration) || DUR.get(pk(it)) || 0;
+const altDur = (it) => ((it && it.alts) || []).reduce(
+  (d, a) => d || (a && a.duration) || 0, 0);
+/* loadedmetadata 里调：真时长到手，记下并就地改可见行的格子（不重排） */
+function rememberDur() {
+  const it = state.playing;
+  const a = audio();
+  const d = a && isFinite(a.duration) ? Math.round(a.duration) : 0;
+  if (!it || !d) return;
+  const k = pk(it);
+  if (DUR.get(k) === d) return;
+  DUR.set(k, d);
+  const cell = document.querySelector(`[data-pk="${CSS.escape(k)}"] .tr-dur`);
+  if (cell) cell.textContent = fmtTime(d);
+}
+
 /* 列表里的音质格子：只认实测结果，上游声称不算数。
    idx 有两个用途：探测徽标的波浪错峰（animation-delay）+ 失效行的「换源」钮
    （data-i 指向 state.items 下标）。给没有 data-row 的容器（推荐卡）传 idx 时
    必须同时传 noSwap —— 换源钮的下标语义在那种容器里是错的。 */
 function qualityChip(it, idx, noSwap) {
   if (it.platform === 'local') {            // 本地文件：mutagen 读出的就是真实值
-    const fmt = (it.format === 'flac' ? 'FLAC' : String(it.format || '').toUpperCase());
+    const fmt = _fmtOf(it).toUpperCase();
     const br = it.bitrate ? ' ' + it.bitrate + 'k' : '';
     const h = it.hires || null;
     const isHi = h && (Number(h.sample_rate) > 48000 || Number(h.bit_depth) > 16);
     const spec = isHi ? `${srKHz(h.sample_rate)}kHz/${Number(h.bit_depth)}bit` : '';
     const tip = isHi ? `本地文件 · Hi-Res ${spec} · ${esc(it.id)}` : `本地文件 · ${esc(it.id)}`;
-    return `<span class="chip ${it.format === 'flac' ? 'flac' : (it.bitrate || 0) >= 192 ? 'hi' : 'lo'}${isHi ? ' hi-res' : ''}"
+    return `<span class="chip ${isLosslessFmt(it.format) ? 'flac' : (it.bitrate || 0) >= 192 ? 'hi' : 'lo'}${isHi ? ' hi-res' : ''}"
       title="${esc(tip)}">${esc(fmt || '音轨')}${spec ? ' ' + spec : br}</span>`;
   }
   const p = PROBE.get(pk(it));
   if (!p) {
     const q = bestQuality(it);
-    const tip = q ? `正在实测真实格式与码率（上游声称 ${q.format === 'flac' ? 'FLAC' : q.bitrate + 'K'}）` : '正在实测';
+    const tip = q ? `正在实测真实格式与码率（上游声称 ${qLabel(q)}）` : '正在实测';
     /* 负延迟按行错开：整列不再同步呼吸（25 枚徽标一起闪是视觉噪音），呈波浪扫过 */
     const dl = idx == null ? '' : ` style="animation-delay:-${((idx % 10) * 0.22).toFixed(2)}s"`;
     return `<span class="chip probing"${dl} title="${esc(tip)}">检测中</span>`;
@@ -275,12 +354,12 @@ function qualityChip(it, idx, noSwap) {
   }
   let label = '音轨';
   let cls = 'hi';
-  if (p.fmt === 'flac') { label = 'FLAC'; cls = 'flac'; }
-  else if (p.fmt === 'mp3') { label = 'MP3'; cls = p.kbps >= 192 ? 'hi' : 'lo'; }
+  if (isLosslessFmt(p.fmt)) { label = _fmtOf(p).toUpperCase(); cls = 'flac'; }
+  else if (_fmtOf(p) === 'mp3') { label = 'MP3'; cls = p.kbps >= 192 ? 'hi' : 'lo'; }
   else { label = String(p.label || p.fmt || '').toUpperCase() || '音轨'; cls = 'hi'; }
   const br = p.kbps ? ' ' + p.kbps + 'k' : '';
   const flag = p.mismatch ? ' flag' : '';
-  const tip = p.mismatch ? '上游标称无损，实测并非 FLAC' : '';
+  const tip = p.mismatch ? '上游标称无损，实测并非无损格式' : '';
   return `<span class="chip ${cls}${flag}"${tip ? ` title="${esc(tip)}"` : ''}>${label}${br}</span>`;
 }
 
@@ -306,6 +385,13 @@ function paintProbeCells(items) {
     /* 大小格子跟着实测一起回填（大小只有探测回来才知道） */
     const szCell = row.querySelector('.tr-size');
     if (szCell) szCell.textContent = p.size ? fmtSize(p.size) : (it && it.size ? fmtSize(it.size) : '');
+    /* FLAC 实测里白捡的真时长（STREAMINFO）：有就顺手回填时长列，
+       0:00 不用等这首歌真被播过才消失。 */
+    const durCell = row.querySelector('.tr-dur');
+    if (durCell && p.valid && p.hires && p.hires.duration) {
+      const d = Math.round(p.hires.duration);
+      if (DUR.get(k) !== d) { DUR.set(k, d); durCell.textContent = fmtTime(d); }
+    }
     row.classList.toggle('dead', !p.valid && !p.unresolved);
   });
 }
@@ -349,31 +435,35 @@ async function probeRows(items) {
   }
 }
 
-/* 在线播放音质档位排序：auto=mp3 优先（起播快/省流量）、best/flac=无损优先、
-   320/128=指定档优先；数组里保留其余档位用于失败自动降级。 */
+/* 在线播放音质档位排序：与后端 quality_candidates 同一套质量分口径。
+   auto=有损优先（起播快/省流量）、best/flac=无损优先、320/128=指定档优先；
+   数组里保留其余档位，按分从高到低用于失败自动降级。 */
 function qualityRank(item, want) {
   const minfo = item.minfo || [];
-  const mp3 = minfo.filter((m) => m.format === 'mp3').sort((a, b) => _br(b) - _br(a));
-  const flac = minfo.filter((m) => m.format === 'flac').sort((a, b) => _br(b) - _br(a));
+  if (!minfo.length) return [];
   const w = want || state.settings.play_quality || 'auto';
-  if (w === 'best' || w === 'flac') return [...flac, ...mp3];
+  const ranked = qSort(minfo);
+  if (w === 'best' || w === 'flac') return ranked;
   if (w === '320' || w === '128') {
+    // 显式 MP3 档：命中的排最前，其余有损按分降级，无损垫底（别把 320 下成无损）
     const n = Number(w);
-    return [...mp3.filter((m) => _br(m) === n), ...mp3.filter((m) => _br(m) !== n), ...flac];
+    const hit = ranked.filter((m) => _fmtOf(m) === 'mp3' && _br(m) === n);
+    const lossy = ranked.filter((m) => !isLosslessFmt(_fmtOf(m)) && !(hit.includes(m)));
+    const lossless = ranked.filter((m) => isLosslessFmt(_fmtOf(m)));
+    return [...hit, ...lossy, ...lossless];
   }
-  return [...mp3, ...flac];
+  // auto：有损在前（起播快），无损垫底；各自内部按质量分
+  const lossy = ranked.filter((m) => !isLosslessFmt(_fmtOf(m)));
+  const lossless = ranked.filter((m) => isLosslessFmt(_fmtOf(m)));
+  return [...lossy, ...lossless];
 }
 
 function bestFor(item, mode) {
   const minfo = item.minfo || [];
   if (!minfo.length) return null;
   if (mode === 'play') return qualityRank(item)[0] || minfo[0];
-  const flac = minfo.filter((m) => m.format === 'flac').sort((a, b) => _br(b) - _br(a));
-  const mp3 = minfo.filter((m) => m.format === 'mp3').sort((a, b) => _br(b) - _br(a));
-  const want = state.quality;                    // 下载音质，与在线播放分开
-  if (want === '320') return mp3.find((m) => _br(m) === 320) || mp3[0] || flac[0];
-  if (want === '128') return mp3.find((m) => _br(m) === 128) || mp3[mp3.length - 1] || flac[0];
-  return flac[0] || mp3[0] || minfo[0];
+  // 下载：与后端 quality_candidates(best/320/128) 同口径
+  return qualityRank(item, state.quality)[0] || qSort(minfo)[0];
 }
 
 function playCandidates(item) {
@@ -1892,7 +1982,7 @@ function bindAudioEl(a) {
   a.addEventListener('playing', () => { if (mine()) setBuffering(false); });
   a.addEventListener('loadedmetadata', () => {
     if (!mine()) return;
-    setBuffering(false); paintSeek(); mediaPushTick(true);
+    setBuffering(false); rememberDur(); paintSeek(); mediaPushTick(true);
   });
   a.addEventListener('seeked', () => {
     if (!mine()) return;
@@ -2222,7 +2312,7 @@ function paintSpec() {
     return;
   }
   const base = (state.playing && state.playing.platform === 'work') ? '作品 · WAV'
-    : (q.format === 'flac' ? 'FLAC' : 'MP3') + ' · ' + q.bitrate + 'k';
+    : qLabel(q);
   const hr = hiresTag(state.playing);
   const txt = base + (hr ? ' · ' + hr : '');
   if (el) el.textContent = txt;
@@ -2543,13 +2633,11 @@ function coverHtml(url, shape) {
   return `<div class="tr-cover">${inner}</div>`;
 }
 
-/** 可下载的最高音质（FLAC 优先），用于规格列展示 */
+/** 最高音质档（按质量分），用于探测选档与规格列展示 */
 function bestQuality(item) {
   const minfo = (item && item.minfo) || [];
   if (!minfo.length) return null;
-  const flac = minfo.filter((m) => m.format === 'flac').sort((a, b) => _br(b) - _br(a));
-  const mp3 = minfo.filter((m) => m.format === 'mp3').sort((a, b) => _br(b) - _br(a));
-  return flac[0] || mp3[0] || minfo[0];
+  return qSort(minfo)[0];
 }
 
 function rowHtml(it, i, opt = {}) {
@@ -2580,7 +2668,7 @@ function rowHtml(it, i, opt = {}) {
     ${albumCell}
     <div class="tr-spec">${spec}</div>
     <div class="tr-size">${pr && pr.size ? fmtSize(pr.size) : (it.size ? fmtSize(it.size) : '')}</div>
-    <div class="tr-dur mono">${fmtTime(it.duration)}</div>
+    <div class="tr-dur mono">${fmtTime(knownDur(it) || altDur(it))}</div>
     <div class="tr-act">
       <button class="ic tr-kar" data-act="tr-karaoke" data-i="${i}" title="K歌这一首" aria-label="K歌这一首">${icon('mic')}</button>
       <button class="ic${fav ? ' on' : ''}" data-act="fav" data-kind="song" data-i="${i}" title="收藏" aria-label="收藏">${icon(fav ? 'heart' : 'heart-o')}</button>
@@ -2663,7 +2751,7 @@ function initial(name) {
 }
 
 const losslessCount = (items) => (items || [])
-  .filter((it) => (it.minfo || []).some((m) => m.format === 'flac')).length;
+  .filter((it) => (it.minfo || []).some((m) => isLosslessFmt(m.format))).length;
 
 function songCardHtml(s) {
   return `<button class="card" data-act="card-play" data-id="${esc(s.id)}" data-platform="${esc(s.platform)}">
@@ -4349,10 +4437,30 @@ function updateLyricTick() {
   });
 }
 
+/* 歌词占位（加载/失败）画进两个容器：NP 层与歌词放大层都可能单独可见，
+   只画 NP 那份时，放大层里点「重试」会像没反应（成功路径本来就两份都画，
+   这里对齐）。 */
+const LYRIC_LOADING_HTML = '<span class="muted">正在取歌词…</span>';
+const LYRIC_ERR_HTML = `<span class="muted">歌词没取到——可能是网络波动或上游限制，点重试再试一次`
+  + `<button class="btn ghost sm" data-act="lrc-retry" title="重新取歌词">重试</button></span>`;
+function paintLyricState(html) {
+  const np = $('#npLyricBody');
+  if (np) np.innerHTML = html;
+  const lb = $('#lyricBody');
+  if (lb && !$('#lyricLayer').hidden) lb.innerHTML = html;
+}
+let _lyricSeq = 0;
+/* 快速失败也要让「正在取」被看见：不足 450ms 补齐再落错误占位，
+   不然点了重试页面纹丝不动，像没点过。 */
+async function lyricMinWait(t0) {
+  const wait = 450 - (performance.now() - t0);
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+}
+
 async function loadNpLyric(it) {
-  const box = $('#npLyricBody');
-  if (!box) return;
-  box.innerHTML = '<span class="muted">正在取歌词…</span>';
+  const seq = ++_lyricSeq;
+  const t0 = performance.now();
+  paintLyricState(LYRIC_LOADING_HTML);
   lyricLines = []; lyricIdx = -1;
   try {
     const d = await rpc('getlyric', {
@@ -4362,15 +4470,16 @@ async function loadNpLyric(it) {
     const raw = (d && (d.lyric || d.lrc || d.text || (typeof d === 'string' ? d : ''))) || '';
     const trans = (d && typeof d === 'object' && (d.tlyric || d.tLyric || d.trans)) || '';
     currentLyric = raw;
-    if (!state.playing || pk(state.playing) !== pk(it)) return;
+    if (!state.playing || pk(state.playing) !== pk(it) || seq !== _lyricSeq) return;
     lyricLines = parseLrc(raw, trans);
     renderLyricLines($('#npLyricBody'), false);
     if (!$('#lyricLayer').hidden) renderLyricLines($('#lyricBody'), true);
   } catch (e) {
     console.warn('[lyric] 取词失败：', e);
-    const el = $('#npLyricBody');
-    if (el) el.innerHTML = `<span class="muted">歌词没取到——可能是网络波动或上游限制，点重试再试一次`
-      + `<button class="btn ghost sm" data-act="lrc-retry" title="重新取歌词">重试</button></span>`;
+    if (seq !== _lyricSeq) return;        // 已有新一轮取词在跑，别拿旧失败改新占位
+    await lyricMinWait(t0);
+    if (seq !== _lyricSeq) return;
+    paintLyricState(LYRIC_ERR_HTML);
   }
 }
 
@@ -4465,12 +4574,12 @@ function positionMenu(menu, anchor) {
 
 function openQualityMenu(anchor, items) {
   const menu = $('#qmenu');
-  // 用第一首的可用音质做选项，其余按同规则降级
+  // 用第一首的可用音质做选项，按质量分从高到低；其余曲目按同规则降级
   const first = items[0];
-  const minfo = (first.minfo || []).slice().sort((a, b) => _br(b) - _br(a));
+  const minfo = qSort(first.minfo || []);
   if (!minfo.length) { toast('这首没有可用音质', 'err'); return; }
   const opts = minfo.map((m) => `<button data-act="pick-q" data-q="${m.format}:${m.bitrate}">
-      <span>${m.format === 'flac' ? '无损 FLAC' : 'MP3 ' + m.bitrate + 'k'}</span>
+      <span>${qLabel(m)}</span>
     </button>`).join('');
   menu.innerHTML = `<div class="qm-t">选择下载音质${items.length > 1 ? ` · ${items.length} 首` : ''}</div>${opts}`;
   positionMenu(menu, anchor);
@@ -4489,9 +4598,8 @@ function openPlayQualityMenu(anchor) {
   const cur = state.currentQuality || {};
   const opts = list.map((q) => {
     const on = q.format === cur.format && String(q.bitrate) === String(cur.bitrate);
-    const label = q.format === 'flac' ? '无损 FLAC' : 'MP3 ' + q.bitrate + 'k';
     return `<button data-act="pick-q" data-q="${q.format}:${q.bitrate}"${on ? ' class="on"' : ''}>
-      <span>${label}${on ? ' · 当前' : ''}</span>
+      <span>${qLabel(q)}${on ? ' · 当前' : ''}</span>
     </button>`;
   }).join('');
   menu.innerHTML = `<div class="qm-t">播放音质 · ${esc(it.name || '')}</div>${opts}`;
@@ -4515,15 +4623,15 @@ async function switchQuality(q) {
     { keepPaused: wasPaused, keepCounted: true });
   lastCountedKey = counted;
   let pref = 'auto';
-  if (exact.format === 'flac') pref = 'best';
-  else if (_br(exact) >= 320) pref = '320';
+  if (isLosslessFmt(exact.format)) pref = 'best';
+  else if (_br(exact) >= 320 || qScore(exact) >= 400) pref = '320';
   else pref = '128';
   state.settings.play_quality = pref;
   post('/api/store', { op: 'settings', payload: { play_quality: pref } }).catch(() => {});
   const sel = $('#setPlayQuality');
   if (sel) sel.value = pref;
   paintSpec();
-  toast(`已切到 ${exact.format === 'flac' ? '无损 FLAC' : 'MP3 ' + exact.bitrate + 'k'}`);
+  toast(`已切到 ${qLabel(exact)}`);
 }
 
 function closeQualityMenu() { $('#qmenu').hidden = true; }
@@ -6317,9 +6425,10 @@ async function showLyric() {
   const item = state.playing;
   if (!item) { toast('还没有播放的歌曲'); return; }
   $('#lyricTitle').textContent = `${item.name} — ${item.artist || ''}`;
-  $('#lyricBody').innerHTML = '<span class="muted">正在取歌词…</span>';
+  $('#lyricBody').innerHTML = LYRIC_LOADING_HTML;
   $('#lyricLayer').hidden = false;
   lyricLines = []; lyricIdx = -1;
+  const t0 = performance.now();
   try {
     const d = await rpc('getlyric', {
       platform: item.platform, id: item.id, time: item.time, sign: item.sign,
@@ -6334,8 +6443,9 @@ async function showLyric() {
     renderLyricLines($('#lyricBody'), true);
   } catch (e) {
     console.warn('[lyric] 取词失败：', e);
-    $('#lyricBody').innerHTML = `<span class="muted">歌词没取到——可能是网络波动或上游限制，点重试再试一次`
-      + `<button class="btn ghost sm" data-act="lrc-retry" title="重新取歌词">重试</button></span>`;
+    await lyricMinWait(t0);              // 与 NP 层同款：快速失败别闪一下就装没发生
+    if ($('#lyricLayer').hidden) return;  // 层已关，占位留给下次打开时重取
+    $('#lyricBody').innerHTML = LYRIC_ERR_HTML;
   }
 }
 
