@@ -10,7 +10,7 @@
 ; 构建：ISCC.exe installer\elysium.iss   （产物在 dist\Elysium-setup.exe）
 
 #define AppName "Elysium"
-#define AppVersion "2.2.0-beta2"
+#define AppVersion "2.3.0"
 #define AppExe "Elysium.exe"
 
 [Setup]
