@@ -208,7 +208,7 @@ function resolveTheme(mode) {
   return mode === 'light' ? 'light' : 'dark';
 }
 function applyTheme(mode) {
-  const real = resolveTheme(mode || 'dark');
+  const real = resolveTheme(mode || 'light');
   document.documentElement.dataset.theme = real;
   const btn = $('#themeBtn');
   if (btn) btn.innerHTML = real === 'dark' ? icon('sun') : icon('moon');
@@ -222,7 +222,7 @@ function applyTheme(mode) {
   }
 }
 mqLight.addEventListener('change', () => {
-  if ((state.settings.theme || 'dark') === 'auto') applyTheme('auto');
+  if ((state.settings.theme || 'light') === 'auto') applyTheme('auto');
 });
 
 /* ------------------------------------------------------ 来源 / 音质（实测） */
@@ -5766,7 +5766,7 @@ function fillSettings() {
   const set = (id, v) => { const el = $(id); if (el) el.value = v; };
   set('#setQuality', s.quality || 'best');
   set('#setPlayQuality', s.play_quality || 'auto');
-  set('#setTheme', s.theme || 'dark');
+  set('#setTheme', s.theme || 'light');
   set('#setConc', String(s.concurrency || 2));
   set('#setDup', s.dup_policy || 'rename');
   set('#setTpl', s.name_template || '{name} - {artist}');
@@ -7742,7 +7742,7 @@ async function refreshStore() {
     state.platform = state.settings.platform || 'kuwo';
     state.quality = state.settings.quality || 'best';
     state.mode = state.settings.mode || 'order';
-    applyTheme(state.settings.theme || 'dark');
+    applyTheme(state.settings.theme || 'light');
     $('#vol').value = state.settings.volume ?? 80;
     engVolume((Number(state.settings.volume ?? 80)) / 100);
     const m = MODES.find((x) => x.key === state.mode) || MODES[0];

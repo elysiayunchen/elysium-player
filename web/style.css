@@ -9,9 +9,11 @@
 /* ---------------------------------------------------------------- 主题 · 深色 */
 html[data-theme="dark"]{
   --bg:#08080b;
-  --bg-soft:#0c0c11;
-  --side:#0a0a0f;
-  --bar:rgba(10,10,15,.82);
+  /* 2026-11-19 用户口径：暗色实心统一近黑 —— 主背景/侧栏/顶栏/播放条/抽屉同值，
+     任何壁纸、任何系统设置下都是一整块黑；卡片 --card 保留为层级 elevation */
+  --bg-soft:#08080b;
+  --side:#08080b;
+  --bar:#08080b;
   --card:#12121a;
   --card-2:#17171f;
   --hover:rgba(255,255,255,.055);
@@ -26,7 +28,7 @@ html[data-theme="dark"]{
   --accent-dim:rgba(245,50,91,.13);
   --gold:#e6b48a;
   --gold-dim:rgba(230,180,138,.12);
-  --player:rgba(9,9,14,.9);
+  --player:#08080b;
   --shadow:0 18px 44px rgba(0,0,0,.55);
   --shadow-s:0 2px 10px rgba(0,0,0,.4);
   /* h1/radius/seek-h 双主题等值：旧值深 34/10/14/3、浅 42/11/16/4 各搞一套，
@@ -204,9 +206,9 @@ a{color:inherit;text-decoration:none}
 }
 
 /* ---------------------------------------------------------------- 主舞台 */
-/* 背景必须自带不透明底色：L3 Acrylic 下 body 是 72% 半透明，
-   若 .stage/.view 透明，主区会直接透出桌面壁纸变成中灰，而 .side/.player
-   各有不透明背景仍保持近黑 —— 同一窗口被劈成灰/黑两套。 */
+/* 主区自带不透明底色：2026-11-19 起亚克力默认关闭、暗色强制实心，
+   但显式 ELYSIUM_WINDOW_MATERIAL=on 的试验环境里 body 仍可能半透明，
+   .stage 自带 --bg 可保住主区不被劈成壁纸灰。 */
 .stage{grid-column:2;grid-row:1;display:flex;flex-direction:column;min-height:0;min-width:0;background:var(--bg)}
 
 .bar{

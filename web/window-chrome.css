@@ -25,7 +25,7 @@
 
    任何一级失败都不会白屏、不会阻塞播放：DWM 调用在 Python 侧全部 try/except，
    前端只按 win_material_state() 的返回值决定是否启用 L3。
-   环境变量 ELYSIUM_WINDOW_MATERIAL=off 可一键回退到 L2，便于发布排查。
+    2026-11-19 起默认不透明（=off/未设置都不透明）；ELYSIUM_WINDOW_MATERIAL=on 显式打开亚克力试验。
 
    ── 平台隔离（后续 APK）───────────────────────────────────────────────
    desktop  全套窗口壳（默认；JS 未执行时也是它，保证 frameless 窗口有关闭入口）
@@ -99,6 +99,9 @@ html[data-chrome="on"]:not([data-platform="android"]) .drawer{top:var(--wc-title
 @supports not (color:color-mix(in srgb,red,blue)){
   .wc-title{background:var(--bg)}
 }
+/* 暗色实心统一（2026-11-19 用户口径）：标题栏与 --bg 同色同值，
+   任何壁纸/DWM Acrylic/系统模式下都是一整块黑，与侧栏、内容区无色差 */
+html[data-theme="dark"] .wc-title{background:var(--bg)}
 /* Android 宿主没有窗口按钮和拖拽区，假标题栏任何宽度下都退场——
    留着只会在 .shell 网格里抢一格（真机实测：和品牌区叠成重影）。 */
 html[data-platform="android"] .wc-title{display:none}
@@ -133,15 +136,18 @@ html[data-wc-api="on"] .wc-ctrls{display:flex}
 
 /* ---------------------------------------------------------------- 材质
    L3：系统 Acrylic 可用 → 让主题底色半透明，材质从窗口后面透出来。
-   Acrylic 本身已由 DWM 模糊桌面，这里不再叠 backdrop-filter（否则会二次糊）。 */
-html[data-chrome="on"][data-wc-material="on"] body{
+   Acrylic 本身已由 DWM 模糊桌面，这里不再叠 backdrop-filter（否则会二次糊）。
+   2026-11-19：暗色一律实心（用户口径：暗色统一近黑），即使显式打开
+   亚克力实验开关，暗色 body 也是 --bg 实色；亚克力仅对浅色主题生效。 */
+html[data-chrome="on"][data-wc-material="on"]:not([data-theme="dark"]) body{
   background:color-mix(in srgb,var(--bg) 72%,transparent);
 }
 @supports not (color:color-mix(in srgb,red,blue)){
-  html[data-chrome="on"][data-wc-material="on"] body{background:var(--bg)}
+  html[data-chrome="on"][data-wc-material="on"]:not([data-theme="dark"]) body{background:var(--bg)}
 }
-/* L2：没有系统材质时给标题栏一层极淡的玻璃高光，保留「浮起」感。 */
-html[data-chrome="on"]:not([data-wc-material="on"]):not([data-platform="android"]) .wc-title{
+/* L2：没有系统材质时给标题栏一层极淡的玻璃高光，保留「浮起」感。
+   暗色不要这层高光 —— 顶部 5% 墨色渐变会让标题栏比正文亮一截（2026-11-19） */
+html[data-chrome="on"]:not([data-wc-material="on"]):not([data-platform="android"]):not([data-theme="dark"]) .wc-title{
   background-image:linear-gradient(180deg,color-mix(in srgb,var(--ink) 5%,transparent),transparent);
 }
 

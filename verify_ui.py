@@ -366,13 +366,14 @@ def main():
                 time.sleep(2.5)
                 fresh_theme = js(d5, "return document.documentElement.dataset.theme")
                 fresh_bg = js(d5, "return getComputedStyle(document.body).backgroundColor")
-                check("T7 全新安装默认深色", fresh_theme == "dark",
+                check("T7 全新安装默认浅色", fresh_theme == "light",
                       "theme=%s bg=%s" % (fresh_theme, fresh_bg))
-                # 首屏必须直接是深色底，不能是浅色或透明（浅色即闪一下）
+                # 首屏必须直接浅色（防止默认值改了但 html 首屏底还写死深色，
+                # 深色闪现一帧）
                 nums = fresh_bg[fresh_bg.find("(") + 1: fresh_bg.find(")")].split(",")
                 bg_rgb = [int(float(x)) for x in nums[:3]]
-                check("T7 首屏即深色底、无浅色闪现", sum(bg_rgb) < 120,
-                      "body 背景=%s（深色应接近 rgb(8,8,11)）" % fresh_bg)
+                check("T7 首屏即浅色底、无深色闪现", sum(bg_rgb) > 600,
+                      "body 背景=%s（浅色应接近 rgb(251,251,253)）" % fresh_bg)
 
                 # T9 货架横向滚动条必须是自绘的 6px。
                 # 一旦 .shelf-row 上出现 scrollbar-width / scrollbar-color，

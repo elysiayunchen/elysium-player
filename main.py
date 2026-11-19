@@ -107,7 +107,7 @@ DEFAULT_STORE = {
         "write_tags": True,
         "save_lyric": False,
         "auto_check_update": True,  # 自动追踪新版本：只提醒，不下载
-        "theme": "dark",            # light / dark / auto（默认深色）
+        "theme": "light",            # light / dark / auto（默认浅色，2026-11-19 用户口径）
         "volume": 80,
         "cache_limit_mb": 2048,     # 试听缓存上限（当天）
         "cache_min_plays": 2,       # 当天听满几次进当天缓存
@@ -5931,7 +5931,7 @@ def startup_bg():
     写死浅色的话，深色主题用户每次启动都会先闪一下白底 —— 打包成 exe 后特别明显。
     跟随系统（auto）时读注册表里的 AppsUseLightTheme。
     """
-    theme = (STORE.data.get("settings") or {}).get("theme") or "dark"
+    theme = (STORE.data.get("settings") or {}).get("theme") or "light"
     if theme == "auto":
         try:
             import winreg
@@ -5940,7 +5940,7 @@ def startup_bg():
                     r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
                 theme = "light" if winreg.QueryValueEx(k, "AppsUseLightTheme")[0] else "dark"
         except OSError:
-            theme = "dark"
+            theme = "light"
     return "#fbfbfd" if theme == "light" else "#08080b"
 
 
@@ -6130,12 +6130,14 @@ def _apply_window_chrome(win=None):
     hwnd = _chrome_hwnd()
     if not hwnd:
         return
-    _CHROME_STATE["acrylic"] = _dwm_set(hwnd, 38, 3)
+    # 2026-11-19：亚克力默认关闭（实心统一）；=on 才打开（仅浅色半透明，暗色 CSS 强制实心）。
+    if os.environ.get("ELYSIUM_WINDOW_MATERIAL") == "on":
+        _CHROME_STATE["acrylic"] = _dwm_set(hwnd, 38, 3)
+    else:
+        _dwm_set(hwnd, 38, 1)          # DWMSBT_NONE：显式关掉系统背景，永远实心
+        _CHROME_STATE["acrylic"] = False
     _dwm_set(hwnd, 33, 2)
     _dwm_set(hwnd, 20, 0 if startup_bg() == "#fbfbfd" else 1)
-    if os.environ.get("ELYSIUM_WINDOW_MATERIAL") == "off":
-        _dwm_set(hwnd, 38, 1)          # DWMSBT_NONE：一键回退，便于发布排查
-        _CHROME_STATE["acrylic"] = False
     _CHROME_STATE["material"] = bool(_CHROME_STATE["acrylic"])
     if _CHROME_STATE["material"]:
         # transparent=True 时 pywebview 跳过自己的 shadow 分支，这里补上
@@ -6200,8 +6202,9 @@ def main():
     # easy_drag=False 是关键：开启后 pywebview 会给整个窗口加 mousedown，
     # 列表拖拽、进度条、文本选择会被窗口移动吞掉；改由标题栏的
     # .pywebview-drag-region 精确承担拖拽（等价于 ZCode 的 app-region:drag）。
-    # ELYSIUM_WINDOW_MATERIAL=off 可一键回到不透明窗口，便于发布排查。
-    material_on = os.environ.get("ELYSIUM_WINDOW_MATERIAL") != "off"
+    # 2026-11-19：默认不透明实心窗口（用户口径：暗色实心统一近黑）；
+    # ELYSIUM_WINDOW_MATERIAL=on 才打开实验性亚克力（暗色 CSS 强制实心，仅浅色走半透）。
+    material_on = os.environ.get("ELYSIUM_WINDOW_MATERIAL") == "on"
     webview.create_window(APP_TITLE, url, width=1240, height=820,
                           min_size=(960, 640), background_color=startup_bg(),
                           js_api=Bridge(), text_select=True,
