@@ -19,7 +19,7 @@
   V10 /api/diag 七跳含「站点池」跳且全 ok
 
 用法：python verify_upstream_pool.py
-依赖：仅标准库（stub 全本地）
+依赖：仅标准库（stub 全本地）；自包含，不 import 浏览器套件 —— core job 没有 selenium
 """
 import hashlib
 import json
@@ -35,11 +35,27 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import verify_gapless as _vg  # noqa: E402
-from verify_gapless import REPO, PY, check, note, _free_port  # noqa: E402
+REPO = os.path.dirname(os.path.abspath(__file__))
+PY = sys.executable
+RESULTS = []
 
-RESULTS = _vg.RESULTS          # check() 写入 verify_gapless 的全局列表
+
+def check(name, ok, detail=""):
+    RESULTS.append((name, bool(ok), detail))
+    print(("[PASS] " if ok else "[FAIL] ") + name + (("  -> " + str(detail)) if detail else ""))
+    return bool(ok)
+
+
+def note(text):
+    print("      · " + text)
+
+
+def _free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
 
 
 def rpc(base, fn, params=None, timeout=15):
