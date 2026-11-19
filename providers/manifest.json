@@ -8,5 +8,6 @@
   ],
   "check_on_start": false,
   "providers": ["netease", "qqmusic", "kugou"],
-  "_note": "update_url 指向仓库 main 分支的 manifest（jsDelivr 分发，缓存约 12h，发版后需 purge）；主址不通时按 mirrors 顺序兜底。仍是 notify-only：只比对 rules_version 点亮提示，绝不自动下载或替换任何文件。"
+  "stations": [],
+  "_note": "update_url 指向仓库 main 分支的 manifest（jsDelivr 分发，缓存约 12h，发版后需 purge）；主址不通时按 mirrors 顺序兜底。规则与应用更新仍是 notify-only：只比对版本号点亮提示，绝不自动下载或替换任何文件。唯一例外是 stations（上游站点路由表）：主程序按严格 schema 校验后只应用到内存，仅接受 kind:\"hi\" 的自家镜像，用于主站失联时热切换路由（改这里 + purge 即生效，不用发版）。"
 }

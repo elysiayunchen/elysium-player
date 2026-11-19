@@ -59,6 +59,9 @@ DEFAULT_MANIFEST = {
     "update_url_mirrors": [],
     "check_on_start": False,
     "providers": ["netease", "qqmusic", "kugou"],
+    # 站点路由表（仅 kind:"hi" 的自家镜像可配，主程序侧严格校验后内存应用）。
+    # 空列表 = 用代码内置站点。
+    "stations": [],
 }
 
 DEFAULT_RULES = {

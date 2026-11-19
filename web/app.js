@@ -74,6 +74,7 @@ const ARTIST_ALBUM_PAGE = 30;
 const state = {
   settings: {},
   version: '',                     // 后端 /api/store 带来的 _version，设置页展示用
+  hasUndo: false,                  // 是否存在「上一次删除」的撤销快照（data.json.undo）
   update: null,                    // /api/update/status 的缓存：{latest, has_update, url, error…}
   updateDl: null,                  // /api/update/download 的进度：{state, url, path, got, total, speed, verified…}
   _updToastShown: false,           // 本次运行只弹一次新版本 toast，之后只靠红点
@@ -5428,6 +5429,10 @@ function viewSettings() {
       <button class="btn sm danger" data-act="data-clear" data-what="downloads_clear">清除下载记录</button>
       <button class="btn sm danger" data-act="data-clear" data-what="favorites_clear">清空收藏</button>
     </div>
+    <div class="set-actions" style="margin-top:8px">
+      <button class="btn sm" data-act="data-undo" id="dataUndo" ${state.hasUndo ? '' : 'disabled title="暂无可撤销的删除"'}>撤销上次删除</button>
+      <p class="tip">误清空收藏 / 删错歌单可一键恢复；仅保留最近一次删除前的快照，新删除会覆盖旧的。</p>
+    </div>
   </div>
 
   <div class="set-sec">
@@ -7692,7 +7697,19 @@ document.addEventListener('click', async (e) => {
         await refreshStore();
         renderSide();
         render();
-        toast('已清除');
+        toast('已清除 · 如误删可点「撤销上次删除」恢复');
+      } catch (err) { toast(err.message, 'err'); }
+      break;
+    }
+    case 'data-undo': {
+      if (!confirm('撤销上一次删除？当前数据会被那次删除前的快照替换。')) break;
+      try {
+        const r = await post('/api/store', { op: 'undo', payload: {} });
+        if (!r.ok) { toast(r.error || '没有可撤销的删除', 'err'); break; }
+        await refreshStore();
+        renderSide();
+        render();
+        toast('已恢复');
       } catch (err) { toast(err.message, 'err'); }
       break;
     }
@@ -7715,6 +7732,7 @@ async function refreshStore() {
     migrateEqToBands();                      // 图形推子 → 参数段（一次性，双二次等价）
     LRC_OFF = (Number(state.settings.lrc_offset_ms) || 0) / 1000;
     state.version = d._version || '';    // 单一来源：别在前端再写死一份版本号
+    state.hasUndo = !!d._has_undo;       // 撤销按钮的显示依据
     state.favs = d.favorites || [];
     state.playlists = d.playlists || [];
     state.recent = d.recent || [];

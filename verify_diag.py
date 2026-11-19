@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""网络自检面板验收：/api/diag 六跳 + /api/diag/tone 测试音 + 设置抽屉按钮交互。
+"""网络自检面板验收：/api/diag 七跳 + /api/diag/tone 测试音 + 设置抽屉按钮交互。
 
 背景：真机 beta2 报「播放不了音频」。桌面侧全链路已验证健康（见
 verify_mobile_play.py），问题只能在手机环境（网络/WebView/焦点）。这组接口把
 手机变成自己的诊断仪：逐跳指认断点 + 本地测试音分流「网络问题 vs 本地音频链路」。
 
 断言：
-  A1 /api/diag 六跳全部 ok（真实网络）
+  A1 /api/diag 七跳全部 ok（真实网络；站点池跳离线也能过，只看池快照）
   A2 /api/diag/tone 是 3 秒 WAV（RIFF 头 + 时长）
   A3 设置抽屉两个按钮存在且可点
-  A4 「开始自检」渲染逐跳结果（≥6 行 ✓）
+  A4 「开始自检」渲染逐跳结果（≥7 行 ✓）
   A5 「播放测试音」主 <audio> 真实推进（currentTime>1s, duration≈3s）
   A6 手机 390 视口同样全绿
   A7 无未捕获严重异常
@@ -59,7 +59,7 @@ const done = arguments[arguments.length - 1];
   const t0 = Date.now();
   while (Date.now() - t0 < 60000) {
     const rows = document.querySelectorAll('#diagOut .diag-row');
-    if (rows.length >= 6 && document.getElementById('diagCopy')) break;
+    if (rows.length >= 7 && document.getElementById('diagCopy')) break;
     await new Promise(r => setTimeout(r, 400));
   }
   out.rows = Array.from(document.querySelectorAll('#diagOut .diag-row')).map(el => ({
@@ -90,13 +90,13 @@ def main():
     proc = None
     try:
         proc, base, home = spawn(bd)
-        # A1: /api/diag 六跳
+        # A1: /api/diag 七跳
         with urllib.request.urlopen(base + "/api/diag", timeout=90) as r:
             data = json.loads(r.read().decode())
         hops = data["data"]["hops"]
         for h in hops:
             print("  hop %-28s %s %5dms %s" % (h["name"], "OK " if h["ok"] else "BAD", h["ms"], h["detail"][:70]))
-        check("A1 /api/diag 六跳全部 ok", len(hops) == 6 and all(h["ok"] for h in hops),
+        check("A1 /api/diag 七跳全部 ok", len(hops) == 7 and all(h["ok"] for h in hops),
               "; ".join("%s:%s" % (h["name"], h["detail"][:40]) for h in hops if not h["ok"]))
         # A2: /api/diag/tone
         with urllib.request.urlopen(base + "/api/diag/tone", timeout=10) as r:
@@ -137,7 +137,7 @@ def main():
             pre = "A3-6" if android else "桌面"
             check("%s 设置抽屉按钮齐全" % tag, res.get("btns", {}).get("diag") and res.get("btns", {}).get("tone"))
             rows = res.get("rows") or []
-            check("%s 自检渲染六跳全绿" % tag, len(rows) == 6 and not any(x["bad"] for x in rows),
+            check("%s 自检渲染七跳全绿" % tag, len(rows) == 7 and not any(x["bad"] for x in rows),
                   json.dumps([x for x in rows if x["bad"]], ensure_ascii=False)[:200])
             t = res.get("tone") or {}
             check("%s 测试音真实推进（%s）" % (tag, "主<audio>"),

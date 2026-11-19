@@ -5,19 +5,21 @@ FlacMusic - 无损音乐桌面客户端
 架构：
     本地 ThreadingHTTPServer（127.0.0.1 随机端口）
         /                  静态前端（web/）
-        /api/rpc           转发到 flac.music.hi.cn/ajax.php（绕开 CORS）
+        /api/rpc           内部 RPC（搜索 / 播放 / 歌词，经上游站点池转发）
         /api/store         本地用户数据（收藏 / 历史 / 下载记录 / 设置）
         /api/eq/parse      AutoEq APO 文本解析（发烧客参数 EQ 导入，只解析不落盘）
         /api/downloads*    下载队列（并发、速度、取消、重试、自动降级）
         /api/save-lyric    保存 .lrc
     pywebview 开窗指向本地服务。
 
-用户数据：%APPDATA%\\FlacMusic\\data.json
+用户数据：%APPDATA%\\Elysium\\data.json
 """
 
+import ast
 import collections
 import concurrent.futures as _cf
 import hashlib
+import html as _html
 import http.client
 import importer                      # 歌单导入（规则外置 + 三桶判定），见 providers/
 import sync_engine                   # 多端同步（用户自己的 WebDAV）
@@ -44,13 +46,12 @@ VERSION = "2.3.0"
 _BASE_URL = ""            # main() 里落值；桌面歌词小窗据此建页
 _LYRIC_WIN = None         # 桌面歌词小窗句柄（pywebview window 或 None）
 LEGACY_NAME = "FlacMusic"
-UPSTREAM = "https://flac.music.hi.cn/"
-API_URL = UPSTREAM + "ajax.php?act="
+UPSTREAM = "https://flac.music.hi.cn/"    # 内置主站；运行期以站点池 _POOL_STATIONS 为准
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+      "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36")
 PLATFORMS = ("kuwo", "wyy")
 UPSTREAM_HOST = "flac.music.hi.cn"
-_TLS = threading.local()          # 每线程一条上游长连接
+_TLS = threading.local()          # 每线程按 host 各持一条上游长连接（.conns = {host: conn}）
 
 
 # --------------------------------------------------------------------------
@@ -64,6 +65,12 @@ def resource_dir():
 
 
 def data_dir():
+    # 桌面：ELYSIUM_HOME（测试 / 便携部署）→ APPDATA → 用户主目录。
+    # Android：没有 APPDATA，回落到 expanduser("~")，Chaquopy 下即应用私有目录。
+    #   注意：应用私有目录在卸载 APK 时会被系统清除 —— 这是 Android 沙箱的既有行为，
+    #   与所有 app 一致，不是本应用的数据丢失 bug。想跨卸载保留数据，走内置 WebDAV
+    #   同步（收藏 / 歌单 / 播放进度）；本地曲目本就是本机路径，换机无意义、不同步。
+    #   不改用公共存储目录：那要运行时存储权限 + 分区存储适配，代价远超收益。
     root = os.environ.get("ELYSIUM_HOME") or os.environ.get("APPDATA") or os.path.expanduser("~")
     d = os.path.join(root, APP_NAME)
     os.makedirs(d, exist_ok=True)
@@ -613,6 +620,14 @@ STORE_OPS = frozenset((
     "eqpreset_set", "eqpreset_del",
 ))
 
+# 破坏性操作：执行前留一份完整数据到 data.json.undo，供「撤销上次删除」回滚。
+# 只收真正不可逆的清空 / 删除；fav_toggle、rename、add、set 都可自行改回，不占快照。
+DESTRUCTIVE_OPS = frozenset((
+    "history_clear", "fav_remove", "downloads_clear", "favorites_clear",
+    "recent_clear", "feedback_clear", "playlist_delete", "playlist_remove",
+    "work_remove", "eqpreset_del",
+))
+
 # 响度扫描结果条数上限：一首一条，正常人几千首也用不满；
 # 超限按扫描时间淘汰最旧的，data.json 不许无限长。
 LOUDNESS_MAX = 5000
@@ -637,8 +652,34 @@ def _loudness_prune(d):
 class Store:
     def __init__(self, path):
         self.path = path
+        self.good_path = path + ".good"     # 最近一次成功保存的健康完整快照（扛文件损坏）
+        self.undo_path = path + ".undo"     # 破坏性操作前的快照（扛误删）
         self.lock = threading.RLock()
         self.data = self._load()
+        # 老版本升级上来时还没有 .good 镜像：第一次启动就补一份，
+        # 免得「升级后、首次写入前」这段窗口里主文件损坏无从恢复。
+        if self._read_dict(self.good_path) is None:
+            try:
+                self._atomic_dump(self.good_path, self.data)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _atomic_dump(path, data):
+        """tmp+replace 原子写一份 JSON，写到一半断电/强杀不会留下半截文件。"""
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                # allow_nan=False：宁可这次写入失败（HTTP 层回 ok:false），
+                # 也不把 NaN/Infinity 写进文件让下次启动解析报废。
+                json.dump(data, f, ensure_ascii=False, indent=2, allow_nan=False)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
 
     def _quarantine(self):
         """把读不动的 data.json 另存一份 .bak。
@@ -653,23 +694,21 @@ class Store:
         except OSError:
             pass
 
-    def _load(self):
-        if not os.path.isfile(self.path):
-            return json.loads(json.dumps(DEFAULT_STORE))
+    @staticmethod
+    def _read_dict(path):
+        """读一份 JSON 文件；健康 dict 返回 dict，读不动/类型错返回 None。
+        utf-8-sig 兼容带 BOM 的同步盘 / 记事本写出。"""
         try:
-            # utf-8-sig：带 BOM 的文件（记事本 / 部分同步盘写出）以前会解析失败，
-            # 整份数据被当成损坏回落默认值 —— 用户的收藏就这样无声消失。
-            with open(self.path, "r", encoding="utf-8-sig") as f:
+            if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+                return None
+            with open(path, "r", encoding="utf-8-sig") as f:
                 raw = json.load(f)
+            return raw if isinstance(raw, dict) else None
         except Exception:
-            self._quarantine()
-            return json.loads(json.dumps(DEFAULT_STORE))
-        if not isinstance(raw, dict):
-            # 被同步盘 / 编辑器写成一截字符串、数组或数字时，旧代码会直接在
-            # `(raw or {}).items()` 上抛 AttributeError —— 进程启动即死，用户
-            # 连设置页都打不开。类型不对一律按损坏处理，回落默认值。
-            self._quarantine()
-            return json.loads(json.dumps(DEFAULT_STORE))
+            return None
+
+    def _merge(self, raw):
+        """把一份健康数据并进默认骨架：新版本字段不丢，旧数据按类型恢复。"""
         merged = json.loads(json.dumps(DEFAULT_STORE))
         for k, v in (raw or {}).items():
             if k == "settings" and isinstance(v, dict):
@@ -683,6 +722,26 @@ class Store:
         self._fix_paths(merged)
         merged = _json_safe(merged)
         return merged if isinstance(merged, dict) else json.loads(json.dumps(DEFAULT_STORE))
+
+    def _load(self):
+        raw = self._read_dict(self.path)
+        restored = False
+        if raw is None:
+            # 主文件损坏 / 缺失：坏件隔离留证，再从健康镜像恢复，而不是直接清空用户数据。
+            self._quarantine()
+            raw = self._read_dict(self.good_path)
+            restored = raw is not None
+            if raw is None:
+                return json.loads(json.dumps(DEFAULT_STORE))
+        merged = self._merge(raw)
+        if restored:
+            # 镜像救回后立刻重建主文件与镜像，避免下次启动再走恢复路径。
+            try:
+                self._atomic_dump(self.path, merged)
+                self._atomic_dump(self.good_path, merged)
+            except Exception:
+                pass
+        return merged
 
     def _fix_paths(self, data):
         """修正从别处带来的失效路径。
@@ -704,20 +763,32 @@ class Store:
 
     def save(self):
         with self.lock:
-            tmp = self.path + ".tmp"
+            self._atomic_dump(self.path, self.data)   # 失败照旧抛，HTTP 层回 ok:false
+            # 健康镜像：主文件写成功后再同步。镜像写失败绝不影响主数据落盘。
             try:
-                with open(tmp, "w", encoding="utf-8") as f:
-                    # allow_nan=False：宁可这次写入失败（HTTP 层回 ok:false），
-                    # 也不把 NaN/Infinity 写进 data.json 让下次启动解析报废。
-                    json.dump(self.data, f, ensure_ascii=False, indent=2,
-                              allow_nan=False)
-                os.replace(tmp, self.path)
+                self._atomic_dump(self.good_path, self.data)
             except Exception:
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
-                raise
+                pass
+
+    def snapshot_undo(self):
+        """破坏性操作前留一份当前完整数据到 .undo。失败不影响操作本身。"""
+        try:
+            self._atomic_dump(self.undo_path, self.data)
+        except Exception:
+            pass
+
+    def has_undo(self):
+        return self._read_dict(self.undo_path) is not None
+
+    def restore_undo(self):
+        """把撤销快照写回主数据；无可用快照返回 None。"""
+        raw = self._read_dict(self.undo_path)
+        if raw is None:
+            return None
+        with self.lock:
+            self.data = self._merge(raw)
+            self.save()
+            return self._snapshot(self.data)
 
     @staticmethod
     def _snapshot(v):
@@ -738,6 +809,10 @@ class Store:
         with self.lock:
             if op == "load":
                 return self._snapshot(self.data)
+            # 破坏性操作落地前先留一份完整快照：误点清空收藏 / 删歌单后还能撤销。
+            # 必须在改动 self.data 之前拍，fav_toggle 那种分支内自己 save 的也覆盖到。
+            if op in DESTRUCTIVE_OPS:
+                self.snapshot_undo()
             if op == "settings":
                 self.data["settings"].update(_clean_settings(payload))
             elif op == "history_add":
@@ -1011,11 +1086,178 @@ sync_engine.bind(STORE, VERSION)
 # --------------------------------------------------------------------------
 # 上游接口
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# 上游站点池：有序站点表 + 网络级熔断 + manifest 热更新路由表
+#
+# 为什么是池：主站是社区单机（无 CF 无备援），随时可能整站失联；旧版逐层
+# 兜底只在 search 两处接过，其他调用点全都直连单站。池把「故障转移 + 熔断
+# + 健康探测」收敛到 upstream() / search_any 两个咽喉，站点表可经
+# providers/manifest.json 的 update_url 通道热替换（只在内存，绝不写盘）。
+#
+# notify-only 边界：规则与应用更新仍只比对版本号、绝不自动替换 —— 唯独
+# 站点路由表允许自动应用：主站死了靠提示让用户自救不成立，而路由表是非
+# 可执行配置，且远端只允许配置自家 kind:"hi" 镜像（校验见 _valid_hi_entry）。
+# --------------------------------------------------------------------------
+class UpstreamNetError(RuntimeError):
+    """网络层失败（连接 / DNS / 超时 / HTTP 非 200）。计入熔断连败。"""
+
+
+class UpstreamBizError(RuntimeError):
+    """业务层失败（code != 0 / 返回非 JSON）。站点本身健康，不参与熔断。"""
+
+
+# 有序站点表，前者优先。hi = 无损音乐下载站系 ajax.php；gd = GD 备用站
+# api.php（仅网易）；direct_* = 平台公开搜索接口（只搜不放，直链仍走主链路）。
+STATIONS_DEFAULT = [
+    {"id": "hi", "name": "主站", "kind": "hi", "host": "flac.music.hi.cn",
+     "base": "https://flac.music.hi.cn/"},
+    {"id": "gd", "name": "备用站", "kind": "gd",
+     "base": "https://music-api.gdstudio.xyz/api.php"},
+    {"id": "dne", "name": "网易直连", "kind": "direct_netease", "base": "https://music.163.com"},
+    {"id": "dkw", "name": "酷我直连", "kind": "direct_kuwo", "base": "https://search.kuwo.cn"},
+]
+POOL_TRIP_AFTER = max(1, int(os.environ.get("ELYSIUM_POOL_TRIP") or 2))      # 连败几次熔断
+POOL_COOLDOWN = max(1, int(os.environ.get("ELYSIUM_POOL_COOLDOWN") or 300))  # 熔断冷却秒数
+POOL_PERIOD = 600                  # 巡检周期（拉远端路由表 + 逐站探测）
+
+_POOL_LOCK = threading.Lock()
+_POOL_STATE = {}                   # id -> {"fail", "trip_until", "ok_at", "lat", "err"}
+_POOL_REMOTE = None                # 最近一次远端路由表应用记录（诊断用）
+
+
+def _valid_hi_entry(s):
+    """远端/manifest 站点条目校验：只放行 kind:"hi" 的镜像。
+
+    路由表虽是非可执行配置，但错误的 host 会把搜索流量送到陌生站点，
+    所以 schema 从严：https 且 base 与 host 一致；唯一例外是回环地址
+    （127.0.0.1 / localhost / ::1）允许 http —— 测试与诊断 stub 专用。
+    """
+    if not isinstance(s, dict) or str(s.get("kind") or "") != "hi":
+        return False
+    sid = str(s.get("id") or "")
+    if not re.fullmatch(r"[a-z0-9_]{1,16}", sid):
+        return False
+    host = str(s.get("host") or "")
+    if not re.fullmatch(r"[A-Za-z0-9.:-]{1,120}", host) or "." not in host \
+            or host.endswith("."):
+        return False
+    base = str(s.get("base") or "")
+    try:
+        parsed = urllib.parse.urlparse(base)
+    except Exception:  # noqa: BLE001
+        return False
+    hostname = (parsed.hostname or "").lower()
+    host_l = host.lower()
+    if parsed.scheme == "https":
+        # host 字段允许带端口（127.0.0.1:8000 形态），比较时剥掉
+        if hostname != host_l and hostname != host_l.rsplit(":", 1)[0]:
+            return False
+    elif parsed.scheme == "http":
+        if hostname not in ("127.0.0.1", "localhost"):      # 回环 stub 专用
+            return False
+    else:
+        return False
+    return len(str(s.get("name") or sid)) <= 12
+
+
+def _stations_builtin():
+    """内置站点表 + 本地 providers/manifest.json 的 stations 覆盖（离线）。"""
+    sts = [dict(s) for s in STATIONS_DEFAULT]
+    try:
+        mst = ((importer.load_rules() or {}).get("manifest") or {}).get("stations")
+    except Exception:  # noqa: BLE001
+        mst = None
+    if isinstance(mst, list) and mst:
+        valid = [dict(s) for s in mst if _valid_hi_entry(s)]
+        if valid:                    # 本地 manifest 合法条目整表替换 hi 层
+            return valid + [s for s in sts if s.get("kind") != "hi"]
+    return sts
+
+
+def _stations_env():
+    """ELYSIUM_STATIONS 环境变量：整表替换站点池（测试 / 诊断逃生口）。"""
+    raw = os.environ.get("ELYSIUM_STATIONS")
+    if not raw:
+        return None
+    try:
+        arr = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(arr, list):
+        return None
+    out = [dict(s) for s in arr
+           if isinstance(s, dict) and s.get("id") and s.get("kind") and s.get("base")]
+    return out or None
+
+
+_POOL_STATIONS = _stations_env() or _stations_builtin()
+
+
+def _pool_list():
+    with _POOL_LOCK:
+        return [dict(s) for s in _POOL_STATIONS]
+
+
+def _pool_hi():
+    return [s for s in _pool_list() if s.get("kind") == "hi"]
+
+
+def _pool_tripped(st):
+    with _POOL_LOCK:
+        s = _POOL_STATE.get(st.get("id"))
+        return bool(s and time.time() < (s.get("trip_until") or 0))
+
+
+def _pool_record_ok(st, lat):
+    with _POOL_LOCK:
+        _POOL_STATE[st.get("id")] = {
+            "fail": 0, "trip_until": 0, "ok_at": time.time(),
+            "lat": int(lat), "err": ""}
+
+
+def _pool_record_fail(st, err):
+    """网络级失败：计连败，达 POOL_TRIP_AFTER 熔断（冷却期内请求跳过该站）。"""
+    with _POOL_LOCK:
+        s = _POOL_STATE.setdefault(st.get("id"), {})
+        s["err"] = str(err)[:160]
+        s["fail"] = int(s.get("fail") or 0) + 1
+        if s["fail"] >= POOL_TRIP_AFTER:
+            s["trip_until"] = time.time() + POOL_COOLDOWN
+            s["fail"] = 0
+
+
+def pool_snapshot():
+    """池快照：RPC stations 与诊断跳共用。"""
+    now = time.time()
+    with _POOL_LOCK:
+        out = []
+        for st in _POOL_STATIONS:
+            s = _POOL_STATE.get(st.get("id"), {})
+            out.append({
+                "id": st.get("id"), "name": st.get("name") or st.get("id"),
+                "kind": st.get("kind"), "host": st.get("host") or "",
+                "ok": bool(s.get("ok_at")),
+                "latency_ms": s.get("lat"),
+                "last_ok_at": s.get("ok_at"),
+                "tripped": now < (s.get("trip_until") or 0),
+                "trip_until": s.get("trip_until") or 0,
+                "last_err": s.get("err") or "",
+            })
+        return out
+
+
+def pool_active():
+    """当前优先应答的 hi 站 id（冷却中的跳过；全冷却则取首个做半开试探）。"""
+    hi = _pool_hi()
+    alive = [s for s in hi if not _pool_tripped(s)]
+    return (alive or hi or [{}])[0].get("id")
+
+
 def upstream_keepalive(act, params):
     """POST 一次 ajax.php，复用长连接。只给「同一关键词连续翻几十页」的场景用
     （歌手页）。上游首个请求要付 ~4s 的 TLS 握手，逐页新开连接时每页都重付
-    （实测 6.5s/页 → 复用后 1.4s/页）。线程本地各持一条连接：服务端是多线程的，
-    跨线程共用 socket 会串包。
+    （实测 6.5s/页 → 复用后 1.4s/页）。线程本地按 host 各持一条连接：服务端
+    是多线程的，跨线程共用 socket 会串包；站点池切换时旧 host 的连接自然废弃。
 
     零散请求走下面 upstream() 的进程级连接池（不再每次新开）：桌面实测
     握手 0.95s/次 → 复用后 0.22s/次，手机网络差距更大。
@@ -1023,67 +1265,98 @@ def upstream_keepalive(act, params):
     body = urllib.parse.urlencode(
         {k: "" if v is None else v for k, v in (params or {}).items()}).encode()
     path = "/ajax.php?act=" + act
-    headers = {
-        "User-Agent": UA,
-        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-        "Referer": UPSTREAM,
-        "Origin": UPSTREAM.rstrip("/"),
-        "Accept": "application/json, text/plain, */*",
-    }
-    conn = getattr(_TLS, "up", None)
-    for attempt in (0, 1):                       # 连接被对端关掉时重连一次
-        try:
-            if conn is None:
-                conn = http.client.HTTPSConnection(UPSTREAM_HOST, timeout=30)
-                _TLS.up = conn
-            conn.request("POST", path, body=body, headers=headers)
-            r = conn.getresponse()
-            raw = r.read()
-            if r.status != 200:
-                raise RuntimeError(f"上游 HTTP {r.status}")
-            payload = json.loads(raw.decode("utf-8", "replace"))
-            if payload.get("code") != 0:
-                raise RuntimeError(payload.get("msg") or f"接口错误 {payload.get('code')}")
-            return payload.get("data")
-        except RuntimeError:
-            raise
-        except (http.client.HTTPException, OSError, ValueError):
+    stations = [s for s in _pool_hi() if not _pool_tripped(s)] or _pool_hi()[:1]
+    last = None
+    for st in stations:
+        host = st.get("host")
+        headers = _up_headers(st)
+        conns = getattr(_TLS, "conns", None)
+        if conns is None:
+            conns = {}
+            _TLS.conns = conns
+        conn = conns.get(host)
+        for attempt in (0, 1):               # 连接被对端关掉时重连一次
+            t0 = time.time()
             try:
-                conn.close()
-            except Exception:                    # noqa: BLE001
-                pass
-            conn = None
-            _TLS.up = None
-            if attempt:
-                raise RuntimeError("上游连接失败")
-    raise RuntimeError("上游无响应")
+                if conn is None:
+                    conn = _conn_cls(st)(host, timeout=30)
+                conn.request("POST", path, body=body, headers=headers)
+                r = conn.getresponse()
+                raw = r.read()
+                conns[host] = conn
+                if r.status != 200:
+                    raise UpstreamNetError(f"上游 HTTP {r.status}({st.get('id')})")
+                try:
+                    payload = json.loads(raw.decode("utf-8", "replace"))
+                except ValueError:
+                    raise UpstreamBizError("上游返回不是 JSON")
+                if payload.get("code") != 0:
+                    raise UpstreamBizError(payload.get("msg") or f"接口错误 {payload.get('code')}")
+                _pool_record_ok(st, (time.time() - t0) * 1000)
+                data = payload.get("data")
+                if isinstance(data, dict):
+                    data["_served_by"] = st.get("id")
+                return data
+            except UpstreamBizError:
+                _pool_record_ok(st, (time.time() - t0) * 1000)
+                raise
+            except (http.client.HTTPException, OSError) as e:
+                try:
+                    conn.close()
+                except Exception:            # noqa: BLE001
+                    pass
+                conn = None
+                conns.pop(host, None)
+                if attempt:
+                    last = UpstreamNetError(f"上游连接失败({st.get('id')})")
+                    _pool_record_fail(st, last)
+                    break                    # 本站放弃，换下一站
+                continue
+    if last is None:
+        last = UpstreamNetError("上游无响应")
+    raise last
 
 
 # 上游连接池：urllib 每次请求都重开 TLS，移动网络上一首歌能连带付好几次
 # 握手钱（搜索 / 探测 / 取直链 / 歌词各一次）。HTTP/1.1 连接一次只借给一个
-# 线程用，用完归还；被对端静默关掉的旧连接靠首次 retry 自愈。
-_UP_IDLE = queue.LifoQueue(maxsize=8)
-_UP_HEADERS = {
-    "User-Agent": UA,
+# 线程用，用完归还；被对端静默关掉的旧连接靠首次 retry 自愈。按 host 分桶，
+# 站点池里每个站各养各的连接。
+_UP_IDLE = {}                      # host -> queue.LifoQueue(maxsize=8)
+_UP_HEADERS_COMMON = {
     "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-    "Referer": UPSTREAM,
-    "Origin": UPSTREAM.rstrip("/"),
     "Accept": "application/json, text/plain, */*",
 }
 
 
-def _up_checkout():
+def _up_headers(st):
+    return {
+        "User-Agent": UA,
+        "Referer": st.get("base") or UPSTREAM,
+        "Origin": (st.get("base") or UPSTREAM).rstrip("/"),
+        **_UP_HEADERS_COMMON,
+    }
+
+
+def _up_idle(host):
+    q = _UP_IDLE.get(host)
+    if q is None:
+        q = queue.LifoQueue(maxsize=8)
+        _UP_IDLE[host] = q
+    return q
+
+
+def _up_checkout(host):
     try:
-        return _UP_IDLE.get_nowait()
+        return _up_idle(host).get_nowait()
     except queue.Empty:
         return None
 
 
-def _up_checkin(conn):
+def _up_checkin(host, conn):
     if conn is None:
         return
     try:
-        _UP_IDLE.put_nowait(conn)
+        _up_idle(host).put_nowait(conn)
     except queue.Full:
         try:
             conn.close()
@@ -1091,59 +1364,117 @@ def _up_checkin(conn):
             pass
 
 
-def upstream(act, params):
-    body = urllib.parse.urlencode(
-        {k: "" if v is None else v for k, v in (params or {}).items()}).encode()
-    path = "/ajax.php?act=" + act
+def _conn_cls(st):
+    """站点协议：远端路由表只放 https（回环 stub 例外），按 base 选连接类。"""
+    return http.client.HTTPSConnection if str(st.get("base") or "").startswith("https") \
+        else http.client.HTTPConnection
+
+
+def _up_call(st, act, body, path):
+    """对单个 hi 站发一次 ajax.php。成功返回 (data, 延迟ms)；网络级失败抛
+    UpstreamNetError、业务级抛 UpstreamBizError（异常对象带 lat 属性）。"""
+    host = st.get("host")
+    headers = _up_headers(st)
+    lat = 0.0
     for attempt in (0, 1):                   # 池里的旧连接可能已被对端关掉：换新重试一次
-        conn = _up_checkout()
+        t0 = time.time()
+        conn = _up_checkout(host)
         if conn is None:
-            conn = http.client.HTTPSConnection(UPSTREAM_HOST, timeout=30)
+            conn = _conn_cls(st)(host, timeout=30)
         try:
-            conn.request("POST", path, body=body, headers=_UP_HEADERS)
+            conn.request("POST", path, body=body, headers=headers)
             r = conn.getresponse()
             raw, status = r.read(), r.status
-        except (http.client.HTTPException, OSError, ValueError):
+        except (http.client.HTTPException, OSError):
             try:
                 conn.close()
             except Exception:                # noqa: BLE001
                 pass
             if attempt:
-                raise RuntimeError("上游连接失败")
+                lat = (time.time() - t0) * 1000
+                e = UpstreamNetError(f"上游连接失败({st.get('id')})")
+                e.lat = lat
+                raise e
             continue
         # HTTP 层已完整收包：即使业务报错，连接本身还能接着用
-        _up_checkin(conn)
+        _up_checkin(host, conn)
+        lat = (time.time() - t0) * 1000
         if status != 200:
-            raise RuntimeError(f"上游 HTTP {status}")
+            e = UpstreamNetError(f"上游 HTTP {status}({st.get('id')})")
+            e.lat = lat
+            raise e
         try:
             payload = json.loads(raw.decode("utf-8", "replace"))
         except ValueError:
-            raise RuntimeError("上游返回不是 JSON")
+            e = UpstreamBizError("上游返回不是 JSON")
+            e.lat = lat
+            raise e
         if payload.get("code") != 0:
-            raise RuntimeError(payload.get("msg") or f"接口错误 {payload.get('code')}")
-        return payload.get("data")
-    raise RuntimeError("上游无响应")
+            e = UpstreamBizError(payload.get("msg") or f"接口错误 {payload.get('code')}")
+            e.lat = lat
+            raise e
+        return payload.get("data"), lat
+    e = UpstreamNetError(f"上游无响应({st.get('id')})")
+    e.lat = lat
+    raise e
+
+
+def upstream(act, params):
+    """主通道 ajax.php：按站点池顺序调用，网络级失败自动换站。
+
+    某站网络失败计连败，达 POOL_TRIP_AFTER 熔断（冷却期内跳过，到期后半开
+    放行试探）；业务级错误（签名过期等）说明站点健康，立即抛出不转移。
+    """
+    body = urllib.parse.urlencode(
+        {k: "" if v is None else v for k, v in (params or {}).items()}).encode()
+    path = "/ajax.php?act=" + act
+    stations = [s for s in _pool_hi() if not _pool_tripped(s)] or _pool_hi()[:1]
+    last = None
+    for st in stations:
+        try:
+            data, lat = _up_call(st, act, body, path)
+            _pool_record_ok(st, lat)
+            if isinstance(data, dict):
+                data["_served_by"] = st.get("id")   # search_any 据此给条目打站标
+            return data
+        except UpstreamBizError as e:
+            _pool_record_ok(st, getattr(e, "lat", 0))
+            raise
+        except UpstreamNetError as e:
+            _pool_record_fail(st, e)
+            last = e
+            continue
+    raise last or UpstreamNetError("上游无可用站点")
 
 
 # --------------------------------------------------------------------------
-# 第二通道（备用站）：只在主站失败/返回空时接手，目前仅覆盖网易云
+# 备用站（GD 音乐台）：主站失败/返回空时接手，仅覆盖网易云。它的直链不需要
+# 主站的 time/sign，按网易 id 直接解析，所以直连层搜到的无签条目也能放。
 # --------------------------------------------------------------------------
 GD_BASE = "https://music-api.gdstudio.xyz/api.php"
-STATION_NAME = {"hi": "主站", "gd": "备用站"}
 
 
-def gd_rpc(types, **kw):
+def _gd_base():
+    with _POOL_LOCK:
+        for s in _POOL_STATIONS:
+            if s.get("kind") == "gd":
+                return s.get("base") or GD_BASE
+    return GD_BASE
+
+
+def gd_rpc(types, base=None, **kw):
     qs = {"types": types}
     qs.update({k: v for k, v in kw.items() if v is not None})
-    url = GD_BASE + "?" + urllib.parse.urlencode(qs)
+    url = (base or _gd_base()) + "?" + urllib.parse.urlencode(qs)
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": "https://music.gdstudio.xyz/"})
     with urllib.request.urlopen(req, timeout=25) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
-def gd_search(keyword, page=1, size=20):
+def gd_search(keyword, page=1, size=20, base=None):
     """备用站搜索，结构对齐主站。它不给时长和封面，先留空由探测定夺。"""
-    arr = gd_rpc("search", source="netease", name=keyword, count=size, pages=page) or []
+    arr = gd_rpc("search", base=base, source="netease", name=keyword,
+                 count=size, pages=page) or []
     if not isinstance(arr, list):
         return {"list": [], "total": None}
     items = []
@@ -1161,35 +1492,216 @@ def gd_search(keyword, page=1, size=20):
                       {"format": "mp3", "bitrate": "128"}],
             "time": None,
             "sign": None,
-            "station": "gd",
         })
     return {"list": items, "total": None}
 
 
-def search_any(platform, keyword, page=1, size=20, keepalive=False):
-    """主站优先；主站报错或给空表时，网易云换备用站再试一次。
+# --------------------------------------------------------------------------
+# 直连搜索层：平台公开搜索接口，只搜不放（条目无 time/sign）。主站与备用
+# 站都给不出结果时保住「搜得到」——直链解析走既有的重搜换签 / gd 链，
+# 与备用站条目同款。
+# --------------------------------------------------------------------------
+def _direct_netease_search(base, keyword, page=1, size=20):
+    """网易 web 搜索直连：平台自家网页在用的公开端点，免登录，支持深翻页。"""
+    url = base.rstrip("/") + "/api/search/get/web?" + urllib.parse.urlencode(
+        {"s": keyword, "type": 1, "offset": max(0, page - 1) * size, "limit": size})
+    req = urllib.request.Request(url, headers={"User-Agent": UA,
+                                               "Referer": "https://music.163.com/"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        j = json.loads(r.read().decode("utf-8", "replace"))
+    res = j.get("result") or {}
+    items = []
+    for s in res.get("songs") or []:
+        album = s.get("album") or {}
+        artists = " / ".join(a.get("name") or "" for a in (s.get("artists") or [])
+                             if a.get("name"))
+        items.append({
+            "id": str(s.get("id") or ""), "name": s.get("name") or "",
+            "artist": artists, "album_name": album.get("name") or "",
+            "album_id": str(album.get("id") or ""),
+            "duration": int((s.get("duration") or 0) / 1000), "cover": "",
+            "minfo": [{"format": "flac", "bitrate": "999"},
+                      {"format": "mp3", "bitrate": "320"},
+                      {"format": "mp3", "bitrate": "128"}],
+            "time": None, "sign": None,
+        })
+    return {"list": items, "total": res.get("songCount")}
 
-    keepalive=True 用于歌手页那种「一个词连翻几十页」的连续请求。
+
+def _direct_kuwo_search(base, keyword, page=1, size=20):
+    """酷我 r.s 老接口直连。返回单引号 JSON，ast 解析；SONGNAME 带 &nbsp;
+    之类 HTML 实体，需 unescape。"""
+    url = base.rstrip("/") + "/r.s?" + urllib.parse.urlencode(
+        {"all": keyword, "ft": "music", "itemset": "web_2018", "client": "mp3",
+         "rformat": "json", "encoding": "utf8", "pn": max(0, page - 1), "rn": size})
+    req = urllib.request.Request(url, headers={"User-Agent": UA,
+                                               "Referer": "https://www.kuwo.cn/"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        raw = r.read().decode("utf-8", "replace")
+    data = ast.literal_eval(raw.strip().rstrip(";"))
+    rows = (data.get("abslist") if isinstance(data, dict) else data) or []
+    items = []
+    for s in rows:
+        rid = str(s.get("DC_TARGETID") or s.get("MUSICRID") or "")
+        if rid.startswith("MUSIC_"):
+            rid = rid[len("MUSIC_"):]
+        items.append({
+            "id": rid, "name": _html.unescape(str(s.get("SONGNAME") or "")),
+            "artist": _html.unescape(str(s.get("ARTIST") or "")),
+            "album_name": _html.unescape(str(s.get("ALBUMNAME") or "")),
+            "album_id": str(s.get("ALBUMID") or ""),
+            "duration": int(s.get("DURATION") or 0), "cover": "",
+            "minfo": [{"format": "flac", "bitrate": "999"},
+                      {"format": "mp3", "bitrate": "320"},
+                      {"format": "mp3", "bitrate": "128"}],
+            "time": None, "sign": None,
+        })
+    total = data.get("TOTAL") if isinstance(data, dict) else None
+    return {"list": items, "total": int(total) if str(total or "").isdigit() else None}
+
+
+def _station_serves(st, platform):
+    """该站能否服务这个平台。gd / 网易直连只覆盖 wyy，酷我直连只覆盖 kuwo。"""
+    kind = st.get("kind")
+    if kind == "hi":
+        return platform in PLATFORMS
+    if kind == "gd":
+        return platform == "wyy"
+    if kind == "direct_netease":
+        return platform == "wyy"
+    if kind == "direct_kuwo":
+        return platform == "kuwo"
+    return False
+
+
+def search_any(platform, keyword, page=1, size=20, keepalive=False):
+    """站点池逐层搜索：hi → gd（仅网易）→ 平台直连层，某层给到非空即收。
+
+    熔断中的站直接跳过；keepalive=True 只对 hi 层生效（歌手页那种「一个词
+    连翻几十页」的连续请求）。直连层与备用站条目都无 time/sign：播放走
+    _resolve_play_url 的重搜换签 / gd 直链老路。
     """
-    call = upstream_keepalive if keepalive else upstream
-    try:
-        data = call("search", {"platform": platform, "keyword": keyword,
-                               "page": page, "size": size})
+    for st in [s for s in _pool_list()
+               if _station_serves(s, platform) and not _pool_tripped(s)]:
+        kind = st.get("kind")
+        data = None
+        try:
+            if kind == "hi":
+                call = upstream_keepalive if keepalive else upstream
+                data = call("search", {"platform": platform, "keyword": keyword,
+                                       "page": page, "size": size})
+            elif kind == "gd":
+                data = gd_search(keyword, page, size, base=st.get("base"))
+            elif kind == "direct_netease":
+                # 60s 只打一次平台：直连层是末位兜底，别因为深翻页把它打疼
+                data = cached(("direct", st.get("id"), platform, keyword, page, size),
+                              60, lambda b=st.get("base"):
+                                  _direct_netease_search(b, keyword, page, size))
+            elif kind == "direct_kuwo":
+                data = cached(("direct", st.get("id"), platform, keyword, page, size),
+                              60, lambda b=st.get("base"):
+                                  _direct_kuwo_search(b, keyword, page, size))
+        except UpstreamBizError:
+            # 业务级空手（签名过期 / code!=0）：站点健康，换下一层继续
+            continue
+        except Exception as e:  # noqa: BLE001
+            _pool_record_fail(st, e)
+            continue
         lst = (data or {}).get("list") or []
         if lst:
+            # hi 层的站标来自 _served_by：upstream() 内部换站后，真正应答的
+            # 才是事实站点；其他层没有转移逻辑，直接用本层站点 id。
+            served = (data or {}).pop("_served_by", None) or st.get("id")
             for it in lst:
-                it["station"] = "hi"
+                it["station"] = served
+            if kind != "hi":             # hi 层的延迟已由 upstream() 记过账
+                _pool_record_ok(st, 0)
             return data
-    except Exception:  # noqa: BLE001
-        lst = []
-    if platform == "wyy":
-        try:
-            alt = gd_search(keyword, page, size)
-            if alt.get("list"):
-                return alt
-        except Exception:  # noqa: BLE001
-            pass
     return {"list": [], "total": None}
+
+
+def pool_probe_once():
+    """逐站廉价探测：搜一个词，能拿到业务响应即算健康。写 _POOL_STATE。
+
+    对 hi 站直接走 _up_call（绕开池的转移逻辑，才能探出每一站各自的死活）。
+    业务级错误（如 code!=0）说明站点响应正常，同样记 ok。
+    """
+    for st in _pool_list():
+        kind = st.get("kind")
+        t0 = time.time()
+        try:
+            if kind == "hi":
+                body = urllib.parse.urlencode(
+                    {"platform": "kuwo", "keyword": "晴天", "page": 1, "size": 1}).encode()
+                _up_call(st, "search", body, "/ajax.php?act=search")
+            elif kind == "gd":
+                gd_search("晴天", 1, 1, base=st.get("base"))
+            elif kind == "direct_netease":
+                _direct_netease_search(st.get("base"), "晴天", 1, 1)
+            elif kind == "direct_kuwo":
+                _direct_kuwo_search(st.get("base"), "晴天", 1, 1)
+            else:
+                continue
+            _pool_record_ok(st, (time.time() - t0) * 1000)
+        except UpstreamBizError as e:
+            _pool_record_ok(st, getattr(e, "lat", (time.time() - t0) * 1000))
+        except Exception as e:  # noqa: BLE001
+            _pool_record_fail(st, e)
+
+
+def pool_refresh_once():
+    """拉一次远端 manifest 的 stations 路由表（仅 kind:"hi" 镜像可配），
+    校验合法则在内存内整表替换 hi 层 —— 主站死了改一行 JSON 即可热切换，
+    不用发版。gd / direct 层恒为代码内置，远端不可触碰；任何错误保留
+    last-known-good。"""
+    global _POOL_STATIONS, _POOL_REMOTE
+    try:
+        m = (importer.load_rules(force=True) or {}).get("manifest") or {}
+    except Exception as e:  # noqa: BLE001
+        return {"applied": False, "error": str(e)[:160]}
+    chain = []
+    for u in [m.get("update_url")] + list(m.get("update_url_mirrors") or []):
+        if u and u not in chain:
+            chain.append(u)
+    remote, last = None, None
+    for u in chain:
+        try:
+            remote = _fetch_json(u, timeout=8)
+            break
+        except Exception as e:  # noqa: BLE001
+            last = e
+    if not isinstance(remote, dict):
+        return {"applied": False, "error": str(last or "远端路由表不可达")[:160]}
+    arr = remote.get("stations")
+    if not isinstance(arr, list):
+        return {"applied": False, "note": "远端无 stations 字段"}
+    valid = [dict(s) for s in arr if _valid_hi_entry(s)]
+    if not valid:
+        if arr:
+            return {"applied": False, "error": "远端 stations 全部非法，保留原表"}
+        return {"applied": False, "note": "远端 stations 为空，保留原表"}
+    with _POOL_LOCK:
+        rest = [s for s in _POOL_STATIONS if s.get("kind") != "hi"]
+        _POOL_STATIONS = valid + rest
+        _POOL_REMOTE = {"at": time.time(), "ids": [s.get("id") for s in valid],
+                        "invalid": len(arr) - len(valid)}
+    return {"applied": True, "ids": [s.get("id") for s in valid],
+            "invalid": len(arr) - len(valid)}
+
+
+def pool_tracker():
+    """站点池巡检守护线程：启动 8s 后先拉路由表 + 探一轮，之后每 600s 一轮。
+
+    与 update_tracker 并肩：两者都是 sleep(8) 后进入低频循环的轻线程。
+    """
+    time.sleep(8)
+    while True:
+        for job in (pool_refresh_once, pool_probe_once):
+            try:
+                job()
+            except Exception:  # noqa: BLE001
+                pass
+        time.sleep(POOL_PERIOD)
 
 
 # --------------------------------------------------------------------------
@@ -1691,6 +2203,10 @@ RPC_TABLE = {
                                             "time": p.get("time"),
                                             "sign": p.get("sign")}),
     "getlyric": lambda p: lyric_lookup(p),
+    "stations": lambda p: {"stations": pool_snapshot(), "active": pool_active(),
+                           "remote": _POOL_REMOTE},
+    "pool_refresh": lambda p: pool_refresh_once(),   # 手动拉一次远端路由表
+    "pool_probe": lambda p: pool_probe_once(),       # 手动逐站探一轮
 }
 
 
@@ -4395,12 +4911,26 @@ def run_diag():
             return "HTTP %s · %s · 头 %s" % (
                 r.status, r.headers.get("Content-Type"), head[:8].hex())
 
-    hop("1/6 缓存目录可写", _cache_write)
-    hop("2/6 系统时钟", _clock)
-    hop("3/6 主站域名解析", _dns)
-    hop("4/6 主站搜索", _search)
-    hop("5/6 解析播放直链", _resolve)
-    hop("6/6 CDN 取流（播放真正走的链路）", _cdn)
+    def _pool_hop():
+        snap = pool_snapshot()
+        if not snap:
+            raise RuntimeError("站点池为空")
+        detail = "%d 站 · 活动=%s" % (len(snap), pool_active() or "无")
+        tripped = [s["name"] for s in snap if s["tripped"]]
+        if _POOL_REMOTE:
+            detail += " · 远端路由表已应用(%s)" % time.strftime(
+                "%m-%d %H:%M", time.localtime(_POOL_REMOTE["at"]))
+        if tripped:
+            detail += " · 熔断中: " + "、".join(tripped)
+        return detail
+
+    hop("1/7 缓存目录可写", _cache_write)
+    hop("2/7 系统时钟", _clock)
+    hop("3/7 主站域名解析", _dns)
+    hop("4/7 站点池", _pool_hop)
+    hop("5/7 主站搜索", _search)
+    hop("6/7 解析播放直链", _resolve)
+    hop("7/7 CDN 取流（播放真正走的链路）", _cdn)
     return {"hops": hops}
 
 
@@ -4643,6 +5173,8 @@ class Handler(BaseHTTPRequestHandler):
             data = STORE.apply("load", None)
             data["_data_path"] = DATA_FILE
             data["_version"] = VERSION
+            # 有没有可撤销的上一次删除：设置页「撤销」按钮据此显示 / 禁用。
+            data["_has_undo"] = STORE.has_undo()
             # 同步密码不回给页面：拿不到就不可能被 XSS / 截图带走。
             # 前端只拿到 has_pass，改设置时密码留空即表示「沿用原密码」。
             wd = (data.get("settings") or {}).get("webdav")
@@ -4684,6 +5216,7 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(json.dumps(STORE.apply("load", None)))
             data.pop("_data_path", None)
             data.pop("_version", None)
+            data.pop("_has_undo", None)
             if data.get("settings"):
                 data["settings"]["download_dir"] = "<本机音乐目录>"
                 data["settings"].pop("webdav", None)   # 同步凭据绝不外流
@@ -4871,6 +5404,15 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 body = self._json_body()
                 op = body.get("op")
+                # undo 是元操作（恢复一份快照），不走 apply 的白名单校验。
+                if op == "undo":
+                    restored = STORE.restore_undo()
+                    if restored is None:
+                        self._send(200, {"ok": False, "error": "没有可撤销的上一次删除"})
+                        return
+                    sync_engine.touch()      # 撤销也是本地变更，让自动同步知道
+                    self._send(200, {"ok": True, "data": restored})
+                    return
                 if op not in STORE_OPS:
                     # 空 body / 非法 JSON / 拼错 op 以前会被当成「读取快照」，
                     # 回一个 ok:true 还白写一次盘 —— 直接明确拒绝。
@@ -5167,6 +5709,7 @@ def serve(port=0):
     httpd = _Server(("127.0.0.1", port), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     threading.Thread(target=update_tracker, name="update-tracker", daemon=True).start()
+    threading.Thread(target=pool_tracker, name="pool-tracker", daemon=True).start()
     return httpd, httpd.server_address[1]
 
 

@@ -38,6 +38,10 @@ jobs:
         run: python verify_audiophile.py
       - name: verify_edge（边界修复回归，纯离线）
         run: python verify_edge.py
+      - name: verify_durability（数据可靠性：健康镜像 / 撤销，纯离线）
+        run: python verify_durability.py
+      - name: verify_upstream_pool（上游站点池：故障转移 / 熔断 / 路由表热应用，全 stub 离线）
+        run: python verify_upstream_pool.py
 
   browser:
     name: 音频引擎套件（本地 Chrome，零上游）
